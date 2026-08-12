@@ -53,7 +53,10 @@ func toModel(t plaidsdk.Transaction, itemID string) (model.Transaction, error) {
 		Amount:   decimal.NewFromFloat(t.Amount),
 		Currency: currency,
 		Pending:  t.Pending,
-		Category: category(t),
+		// A posted row names the pending row it replaces. The store uses it to
+		// hide the duplicate; nothing here proposes a superseded_by.
+		PendingTransactionID: t.GetPendingTransactionId(),
+		Category:             category(t),
 	}), nil
 }
 

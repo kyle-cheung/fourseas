@@ -42,7 +42,11 @@ func (s *Store) ApplyPage(ctx context.Context, page Page) error {
 		if err := upsertAccounts(ctx, dbtx, page.Accounts); err != nil {
 			return err
 		}
-		// Supersede resolution belongs here, between the rows and the cursor.
+		// The rows this page carried can complete a pending and posted pair, so
+		// the duplicate is resolved before the cursor moves past it.
+		if err := resolveSupersedes(ctx, dbtx, page.Provider); err != nil {
+			return err
+		}
 		return saveCursor(ctx, dbtx, page.Provider, page.ItemID, page.Cursor)
 	})
 }
