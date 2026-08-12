@@ -65,6 +65,27 @@ func Reset(path string) (*Store, error) {
 // Close releases the database.
 func (s *Store) Close() error { return s.db.Close() }
 
+// execer is what *sql.DB and *sql.Tx have in common. Every write helper takes
+// one, so the same code writes on its own or inside a larger transaction.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	PrepareContext(ctx context.Context, query string) (*sql.Stmt, error)
+}
+
+// inTx runs write in one database transaction, and rolls back on any error.
+func (s *Store) inTx(ctx context.Context, write func(execer) error) error {
+	dbtx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer dbtx.Rollback()
+
+	if err := write(dbtx); err != nil {
+		return err
+	}
+	return dbtx.Commit()
+}
+
 // connect opens the DuckDB file, creating its directory when it is missing.
 func connect(path string) (*sql.DB, error) {
 	if path != ":memory:" && path != "" {

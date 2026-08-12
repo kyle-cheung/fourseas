@@ -53,17 +53,19 @@ ON CONFLICT (provider, account_id) DO UPDATE SET
 // unless a new one is given, and tracked and first_seen_at keep the values
 // they were created with.
 func (s *Store) UpsertAccounts(ctx context.Context, accounts []model.Account) error {
+	return s.inTx(ctx, func(dbtx execer) error {
+		return upsertAccounts(ctx, dbtx, accounts)
+	})
+}
+
+// upsertAccounts writes accounts through the caller's handle: the database, or
+// the transaction one sync page commits in.
+func upsertAccounts(ctx context.Context, db execer, accounts []model.Account) error {
 	if len(accounts) == 0 {
 		return nil
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin: %w", err)
-	}
-	defer tx.Rollback()
-
-	stmt, err := tx.PrepareContext(ctx, upsertAccountSQL)
+	stmt, err := db.PrepareContext(ctx, upsertAccountSQL)
 	if err != nil {
 		return fmt.Errorf("prepare account upsert: %w", err)
 	}
@@ -82,7 +84,7 @@ func (s *Store) UpsertAccounts(ctx context.Context, accounts []model.Account) er
 			return fmt.Errorf("upsert account %s/%s: %w", a.Provider, a.AccountID, err)
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 // Accounts returns every stored account, grouped by institution.
