@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	plaidsdk "github.com/plaid/plaid-go/v40/plaid"
+	"github.com/shopspring/decimal"
 )
 
 // sampleSyncResponse is a trimmed /transactions/sync response. It covers the
@@ -119,9 +120,8 @@ func decodeSample(t *testing.T) plaidsdk.TransactionsSyncResponse {
 
 func TestToModels(t *testing.T) {
 	resp := decodeSample(t)
-	accounts := newAccountIndex(resp.Accounts)
 
-	got, err := toModels(resp.Added, "item-1", "American Express", accounts)
+	got, err := toModels(resp.Added, "item-1")
 	if err != nil {
 		t.Fatalf("toModels: %v", err)
 	}
@@ -130,52 +130,54 @@ func TestToModels(t *testing.T) {
 	}
 
 	tests := []struct {
-		name        string
-		index       int
-		wantID      string
-		wantAmount  float64
-		wantDate    string
-		wantMerch   string
-		wantCat     string
-		wantPending bool
-		wantAccount string
-		wantCcy     string
+		name           string
+		index          int
+		wantID         string
+		wantAmount     string
+		wantDate       string
+		wantAuthorized string
+		wantMerch      string
+		wantCat        string
+		wantPending    bool
+		wantAccountID  string
+		wantCcy        string
 	}{
 		{
-			name:        "purchase keeps a positive amount",
-			index:       0,
-			wantID:      "txn-1",
-			wantAmount:  24.75,
-			wantDate:    "2026-08-10",
-			wantMerch:   "Blue Bottle Coffee",
-			wantCat:     "FOOD_AND_DRINK",
-			wantPending: false,
-			wantAccount: "Gold Card ••1234",
-			wantCcy:     "USD",
+			name:           "purchase keeps a positive amount",
+			index:          0,
+			wantID:         "txn-1",
+			wantAmount:     "24.75",
+			wantDate:       "2026-08-10",
+			wantAuthorized: "2026-08-09",
+			wantMerch:      "Blue Bottle Coffee",
+			wantCat:        "FOOD_AND_DRINK",
+			wantPending:    false,
+			wantAccountID:  "acct-amex",
+			wantCcy:        "USD",
 		},
 		{
-			name:        "card payment keeps a negative amount and falls back to the legacy category",
-			index:       1,
-			wantID:      "txn-2",
-			wantAmount:  -500.00,
-			wantDate:    "2026-08-05",
-			wantMerch:   "",
-			wantCat:     "Payment",
-			wantPending: false,
-			wantAccount: "Gold Card ••1234",
-			wantCcy:     "USD",
+			name:          "card payment keeps a negative amount and falls back to the legacy category",
+			index:         1,
+			wantID:        "txn-2",
+			wantAmount:    "-500",
+			wantDate:      "2026-08-05",
+			wantMerch:     "",
+			wantCat:       "Payment",
+			wantPending:   false,
+			wantAccountID: "acct-amex",
+			wantCcy:       "USD",
 		},
 		{
-			name:        "pending row with no mask and no category",
-			index:       2,
-			wantID:      "txn-3",
-			wantAmount:  13.20,
-			wantDate:    "2026-08-11",
-			wantMerch:   "",
-			wantCat:     "",
-			wantPending: true,
-			wantAccount: "Scotia Momentum Visa",
-			wantCcy:     "CAD",
+			name:          "pending row with no mask and no category",
+			index:         2,
+			wantID:        "txn-3",
+			wantAmount:    "13.2",
+			wantDate:      "2026-08-11",
+			wantMerch:     "",
+			wantCat:       "",
+			wantPending:   true,
+			wantAccountID: "acct-scotia",
+			wantCcy:       "CAD",
 		},
 	}
 
@@ -185,8 +187,12 @@ func TestToModels(t *testing.T) {
 			if row.ExternalID != tc.wantID {
 				t.Errorf("ExternalID = %q, want %q", row.ExternalID, tc.wantID)
 			}
-			if row.Amount != tc.wantAmount {
-				t.Errorf("Amount = %v, want %v", row.Amount, tc.wantAmount)
+			want, err := decimal.NewFromString(tc.wantAmount)
+			if err != nil {
+				t.Fatalf("bad want amount %q: %v", tc.wantAmount, err)
+			}
+			if !row.Amount.Equal(want) {
+				t.Errorf("Amount = %v, want %v", row.Amount, want)
 			}
 			if got := row.Date.Format(dateLayout); got != tc.wantDate {
 				t.Errorf("Date = %q, want %q", got, tc.wantDate)
@@ -200,8 +206,20 @@ func TestToModels(t *testing.T) {
 			if row.Pending != tc.wantPending {
 				t.Errorf("Pending = %v, want %v", row.Pending, tc.wantPending)
 			}
-			if row.AccountName != tc.wantAccount {
-				t.Errorf("AccountName = %q, want %q", row.AccountName, tc.wantAccount)
+			if row.AccountID != tc.wantAccountID {
+				t.Errorf("AccountID = %q, want %q", row.AccountID, tc.wantAccountID)
+			}
+			switch {
+			case tc.wantAuthorized == "":
+				if row.AuthorizedDate != nil {
+					t.Errorf("AuthorizedDate = %v, want none", row.AuthorizedDate)
+				}
+			case row.AuthorizedDate == nil:
+				t.Errorf("AuthorizedDate = none, want %q", tc.wantAuthorized)
+			default:
+				if got := row.AuthorizedDate.Format(dateLayout); got != tc.wantAuthorized {
+					t.Errorf("AuthorizedDate = %q, want %q", got, tc.wantAuthorized)
+				}
 			}
 			if row.Currency != tc.wantCcy {
 				t.Errorf("Currency = %q, want %q", row.Currency, tc.wantCcy)
@@ -212,9 +230,6 @@ func TestToModels(t *testing.T) {
 			if row.ItemID != "item-1" {
 				t.Errorf("ItemID = %q, want %q", row.ItemID, "item-1")
 			}
-			if row.Institution != "American Express" {
-				t.Errorf("Institution = %q, want %q", row.Institution, "American Express")
-			}
 		})
 	}
 }
@@ -224,14 +239,17 @@ func TestToModelRejectsBadDate(t *testing.T) {
 	bad := resp.Added[0]
 	bad.Date = "10/08/2026"
 
-	if _, err := toModel(bad, "item-1", "American Express", newAccountIndex(resp.Accounts)); err == nil {
+	if _, err := toModel(bad, "item-1"); err == nil {
 		t.Fatal("want an error for an unparsable date, got nil")
 	}
 }
 
-func TestUnknownAccountFallsBackToID(t *testing.T) {
-	index := newAccountIndex(nil)
-	if got := index.display("acct-missing"); got != "acct-missing" {
-		t.Errorf("display = %q, want the raw id", got)
+func TestToModelRejectsBadAuthorizedDate(t *testing.T) {
+	resp := decodeSample(t)
+	bad := resp.Added[0]
+	bad.SetAuthorizedDate("09/08/2026")
+
+	if _, err := toModel(bad, "item-1"); err == nil {
+		t.Fatal("want an error for an unparsable authorized date, got nil")
 	}
 }

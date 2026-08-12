@@ -10,6 +10,7 @@ import (
 	"github.com/kyle-cheung/fourseas/providence/internal/model"
 	"github.com/kyle-cheung/fourseas/providence/internal/provider"
 	"github.com/kyle-cheung/fourseas/providence/internal/store"
+	"github.com/shopspring/decimal"
 )
 
 // fakeSource returns a fixed list of pages and records the cursors it was given.
@@ -47,7 +48,7 @@ func row(id string, date string) model.Transaction {
 		ItemID:     "item-1",
 		Date:       d,
 		Name:       id,
-		Amount:     10,
+		Amount:     decimal.NewFromInt(10),
 		Currency:   "USD",
 	}
 }
