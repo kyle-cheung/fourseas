@@ -4,6 +4,7 @@
 //	fourseas link    link one card, then repeat for the next card
 //	fourseas sync    fetch new transactions, store them, print the newest rows
 //	fourseas show    print the newest stored rows without calling Plaid
+//	fourseas reset   drop everything and start the database again
 package main
 
 import (
@@ -20,6 +21,7 @@ Usage:
   fourseas link    Link one card through Plaid Link in your browser
   fourseas sync    Fetch new transactions, store them, and print the newest rows
   fourseas show    Print the newest stored rows without calling Plaid
+  fourseas reset   Drop all data and build the schema again. Asks first
 
 Settings come from .env. See .env.example.
 `
@@ -49,6 +51,8 @@ func run() error {
 		return runSync(ctx, cfg)
 	case "show":
 		return runShow(ctx, cfg)
+	case "reset":
+		return runReset(ctx, cfg, os.Args[2:])
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return nil

@@ -2,25 +2,53 @@
 // It must not import any provider SDK.
 package model
 
-import "time"
+import (
+	"time"
+
+	"github.com/shopspring/decimal"
+)
 
 // Transaction is one card transaction, normalized across providers.
 //
 // Amount keeps the Plaid sign convention: a positive amount is money leaving
 // the account. On a credit card a purchase is positive and a payment or refund
 // is negative.
+//
+// Money is a decimal, never a float. A float sum of money is wrong, and this is
+// a financial planning application.
 type Transaction struct {
-	Provider     string
-	ExternalID   string
-	ItemID       string
-	AccountID    string
-	AccountName  string
-	Institution  string
-	Date         time.Time
+	Provider   string
+	ExternalID string
+	ItemID     string
+	AccountID  string
+
+	// Date is the posted date. AuthorizedDate is null when the provider does
+	// not supply one.
+	Date           time.Time
+	AuthorizedDate *time.Time
+
+	// Name is the raw description. MerchantName is the cleaned name, and is
+	// often empty.
 	Name         string
 	MerchantName string
-	Amount       float64
-	Currency     string
-	Pending      bool
-	Category     string
+
+	Amount   decimal.Decimal
+	Currency string
+
+	// BaseAmount is Amount in the base currency. It is null when no rate is
+	// known, so that a total which cannot be trusted is null instead of a
+	// plausible wrong number.
+	BaseAmount   decimal.NullDecimal
+	BaseCurrency string
+	FXRate       decimal.NullDecimal
+	FXDate       *time.Time
+
+	Pending bool
+	// PendingTransactionID is the pending row that this posted row replaces.
+	PendingTransactionID string
+	// SupersededBy is set on a pending row when its posted row arrives.
+	SupersededBy string
+
+	Category string
+	SyncedAt time.Time
 }

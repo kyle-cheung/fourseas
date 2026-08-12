@@ -51,13 +51,11 @@ func (s *Source) Sync(ctx context.Context, cursor string) (provider.Batch, error
 		return provider.Batch{}, apiError(fmt.Sprintf("sync item %s", s.itemID), err, httpResp)
 	}
 
-	accounts := newAccountIndex(resp.Accounts)
-
-	added, err := toModels(resp.Added, s.itemID, s.institution, accounts)
+	added, err := toModels(resp.Added, s.itemID)
 	if err != nil {
 		return provider.Batch{}, err
 	}
-	modified, err := toModels(resp.Modified, s.itemID, s.institution, accounts)
+	modified, err := toModels(resp.Modified, s.itemID)
 	if err != nil {
 		return provider.Batch{}, err
 	}

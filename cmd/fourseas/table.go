@@ -13,7 +13,7 @@ import (
 const maxCellWidth = 30
 
 // printTable writes the rows to standard output in aligned columns.
-func printTable(rows []model.Transaction) {
+func printTable(rows []model.TransactionView) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "DATE\tACCOUNT\tDESCRIPTION\tAMOUNT\tCCY\tCATEGORY\tSTATUS")
 
@@ -27,11 +27,11 @@ func printTable(rows []model.Transaction) {
 			status = "pending"
 		}
 
-		fmt.Fprintf(w, "%s\t%s\t%s\t%10.2f\t%s\t%s\t%s\n",
+		fmt.Fprintf(w, "%s\t%s\t%s\t%10s\t%s\t%s\t%s\n",
 			r.Date.Format("2006-01-02"),
-			truncate(r.AccountName),
+			truncate(r.AccountLabel),
 			truncate(description),
-			r.Amount,
+			r.Amount.StringFixed(2),
 			r.Currency,
 			truncate(r.Category),
 			status,

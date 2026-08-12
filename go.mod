@@ -6,6 +6,7 @@ require (
 	github.com/duckdb/duckdb-go/v2 v2.10505.0
 	github.com/joho/godotenv v1.5.1
 	github.com/plaid/plaid-go/v40 v40.1.0
+	github.com/shopspring/decimal v1.4.0
 )
 
 require (

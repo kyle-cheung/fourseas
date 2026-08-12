@@ -50,6 +50,11 @@ func runSync(ctx context.Context, cfg settings) error {
 		if err := syncItem(ctx, cfg, db, item); err != nil {
 			failed++
 			fmt.Printf("%-28s failed: %v\n", label(item), err)
+			// Record why, and leave the cursor where it was, so the next run
+			// asks for the same page again.
+			if err := db.SetStatus(ctx, plaidprovider.ProviderName, item.ItemID, err.Error()); err != nil {
+				fmt.Printf("%-28s could not record the failure: %v\n", label(item), err)
+			}
 		}
 	}
 
@@ -154,7 +159,7 @@ func printNewest(ctx context.Context, db *store.Store, n int) error {
 		return err
 	}
 
-	rows, err := db.Newest(ctx, n)
+	rows, err := db.NewestView(ctx, n)
 	if err != nil {
 		return err
 	}

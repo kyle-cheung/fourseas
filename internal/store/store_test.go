@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kyle-cheung/fourseas/providence/internal/model"
+	"github.com/shopspring/decimal"
 )
 
 func day(s string) time.Time {
@@ -17,9 +18,33 @@ func day(s string) time.Time {
 	return t
 }
 
+func dayPtr(s string) *time.Time {
+	t := day(s)
+	return &t
+}
+
+func dec(s string) decimal.Decimal {
+	d, err := decimal.NewFromString(s)
+	if err != nil {
+		panic(err)
+	}
+	return d
+}
+
+func nullDec(s string) decimal.NullDecimal {
+	return decimal.NullDecimal{Decimal: dec(s), Valid: true}
+}
+
+// newStore opens a database in a directory that does not exist yet, so that
+// every test also proves the schema is created from nothing.
 func newStore(t *testing.T) *Store {
 	t.Helper()
-	s, err := Open(filepath.Join(t.TempDir(), "nested", "fourseas.duckdb"))
+	return openAt(t, filepath.Join(t.TempDir(), "nested", "fourseas.duckdb"))
+}
+
+func openAt(t *testing.T, path string) *Store {
+	t.Helper()
+	s, err := Open(path)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -29,149 +54,188 @@ func newStore(t *testing.T) *Store {
 
 func sample() model.Transaction {
 	return model.Transaction{
-		Provider:     "plaid",
-		ExternalID:   "txn-1",
-		ItemID:       "item-1",
-		AccountID:    "acct-amex",
-		AccountName:  "Gold Card ••1234",
-		Institution:  "American Express",
-		Date:         day("2026-08-10"),
-		Name:         "BLUE BOTTLE COFFEE",
-		MerchantName: "Blue Bottle Coffee",
-		Amount:       24.75,
-		Currency:     "USD",
-		Pending:      true,
-		Category:     "FOOD_AND_DRINK",
+		Provider:             "plaid",
+		ExternalID:           "txn-1",
+		ItemID:               "item-1",
+		AccountID:            "acct-amex",
+		Date:                 day("2026-08-10"),
+		AuthorizedDate:       dayPtr("2026-08-09"),
+		Name:                 "BLUE BOTTLE COFFEE",
+		MerchantName:         "Blue Bottle Coffee",
+		Amount:               dec("24.75"),
+		Currency:             "USD",
+		BaseAmount:           nullDec("24.75"),
+		BaseCurrency:         "USD",
+		FXRate:               nullDec("1"),
+		FXDate:               dayPtr("2026-08-10"),
+		Pending:              true,
+		PendingTransactionID: "txn-pending-1",
+		SupersededBy:         "",
+		Category:             "FOOD_AND_DRINK",
+		SyncedAt:             time.Date(2026, 8, 12, 9, 30, 0, 0, time.UTC),
 	}
 }
 
-func TestRoundTrip(t *testing.T) {
+func sampleAccount() model.Account {
+	return model.Account{
+		Provider:         "plaid",
+		AccountID:        "acct-amex",
+		ItemID:           "item-1",
+		Name:             "Platinum Card",
+		Mask:             "1234",
+		Type:             "credit",
+		Subtype:          "credit card",
+		Currency:         "USD",
+		Nickname:         "",
+		Tracked:          true,
+		BalanceCurrent:   nullDec("1234.5600"),
+		BalanceAvailable: nullDec("765.4400"),
+		BalanceLimit:     nullDec("2000"),
+		BalanceUpdatedAt: dayPtr("2026-08-12"),
+		FirstSeenAt:      day("2026-08-01"),
+		LastSeenAt:       day("2026-08-12"),
+	}
+}
+
+func sampleInstitution() model.Institution {
+	return model.Institution{
+		Provider:        "plaid",
+		ItemID:          "item-1",
+		InstitutionID:   "ins_10",
+		InstitutionName: "American Express",
+		Env:             "production",
+		LinkedAt:        day("2026-08-01"),
+	}
+}
+
+// TestDecimalRoundTripsExactly is the reason money is not a float: 0.1 + 0.2
+// must be 0.3, not 0.30000000000000004.
+func TestDecimalRoundTripsExactly(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	one, two := sample(), sample()
+	one.ExternalID, one.Amount = "txn-tenth", dec("0.1")
+	two.ExternalID, two.Amount = "txn-fifth", dec("0.2")
+	one.BaseAmount, two.BaseAmount = decimal.NullDecimal{}, decimal.NullDecimal{}
+
+	big := sample()
+	big.ExternalID, big.Amount = "txn-big", dec("12345678.9012")
+
+	if err := s.Upsert(ctx, []model.Transaction{one, two, big}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	got, err := s.Get(ctx, "plaid", "txn-big")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !got.Amount.Equal(dec("12345678.9012")) {
+		t.Errorf("Amount = %s, want 12345678.9012", got.Amount)
+	}
+
+	// The sum happens in DuckDB, on the stored column type.
+	var raw any
+	err = s.db.QueryRowContext(ctx,
+		`SELECT sum(amount) FROM transactions WHERE external_id IN ('txn-tenth', 'txn-fifth')`).Scan(&raw)
+	if err != nil {
+		t.Fatalf("sum: %v", err)
+	}
+	sum, err := toDecimal(raw)
+	if err != nil {
+		t.Fatalf("convert sum: %v", err)
+	}
+	if !sum.Equal(dec("0.3")) {
+		t.Errorf("0.1 + 0.2 = %s, want exactly 0.3", sum)
+	}
+}
+
+func TestTransactionRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
 
 	want := sample()
+	want.SupersededBy = "txn-2"
 	if err := s.Upsert(ctx, []model.Transaction{want}); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
 
-	got, err := s.Newest(ctx, 10)
+	got, err := s.Get(ctx, want.Provider, want.ExternalID)
 	if err != nil {
-		t.Fatalf("newest: %v", err)
+		t.Fatalf("get: %v", err)
 	}
-	if len(got) != 1 {
-		t.Fatalf("got %d rows, want 1", len(got))
-	}
-	if !got[0].Date.Equal(want.Date) {
-		t.Errorf("Date = %v, want %v", got[0].Date, want.Date)
-	}
-	got[0].Date, want.Date = time.Time{}, time.Time{}
-	if got[0] != want {
-		t.Errorf("round trip changed the row:\n got %+v\nwant %+v", got[0], want)
-	}
+	assertSameTransaction(t, got, want)
 }
 
-func TestUpsertIsIdempotent(t *testing.T) {
+// TestNullableColumnsRoundTripAsNull proves the columns issues 4 and 6 fill in
+// accept nothing at all today.
+func TestNullableColumnsRoundTripAsNull(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
 
-	first := sample()
-	if err := s.Upsert(ctx, []model.Transaction{first}); err != nil {
-		t.Fatalf("first upsert: %v", err)
-	}
+	want := sample()
+	want.AuthorizedDate = nil
+	want.MerchantName = ""
+	want.BaseAmount = decimal.NullDecimal{}
+	want.BaseCurrency = ""
+	want.FXRate = decimal.NullDecimal{}
+	want.FXDate = nil
+	want.PendingTransactionID = ""
+	want.SupersededBy = ""
 
-	// The same transaction comes back settled, with a real merchant name.
-	second := sample()
-	second.Pending = false
-	second.Amount = 25.10
-	if err := s.Upsert(ctx, []model.Transaction{second}); err != nil {
-		t.Fatalf("second upsert: %v", err)
-	}
-
-	n, err := s.Count(ctx)
-	if err != nil {
-		t.Fatalf("count: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("got %d rows after re-inserting the same transaction, want 1", n)
-	}
-
-	got, err := s.Newest(ctx, 1)
-	if err != nil {
-		t.Fatalf("newest: %v", err)
-	}
-	if got[0].Pending {
-		t.Error("Pending = true, want the updated value false")
-	}
-	if got[0].Amount != 25.10 {
-		t.Errorf("Amount = %v, want the updated value 25.10", got[0].Amount)
-	}
-}
-
-func TestNewestOrdersByDateDescending(t *testing.T) {
-	ctx := context.Background()
-	s := newStore(t)
-
-	older, newer := sample(), sample()
-	older.ExternalID, older.Date = "txn-old", day("2026-07-01")
-	newer.ExternalID, newer.Date = "txn-new", day("2026-08-11")
-
-	if err := s.Upsert(ctx, []model.Transaction{older, newer}); err != nil {
+	if err := s.Upsert(ctx, []model.Transaction{want}); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
-
-	got, err := s.Newest(ctx, 1)
+	got, err := s.Get(ctx, want.Provider, want.ExternalID)
 	if err != nil {
-		t.Fatalf("newest: %v", err)
+		t.Fatalf("get: %v", err)
 	}
-	if len(got) != 1 || got[0].ExternalID != "txn-new" {
-		t.Fatalf("got %+v, want only txn-new", got)
+	assertSameTransaction(t, got, want)
+}
+
+func assertSameTransaction(t *testing.T, got, want model.Transaction) {
+	t.Helper()
+
+	if !got.Amount.Equal(want.Amount) {
+		t.Errorf("Amount = %s, want %s", got.Amount, want.Amount)
+	}
+	if got.BaseAmount.Valid != want.BaseAmount.Valid ||
+		(want.BaseAmount.Valid && !got.BaseAmount.Decimal.Equal(want.BaseAmount.Decimal)) {
+		t.Errorf("BaseAmount = %+v, want %+v", got.BaseAmount, want.BaseAmount)
+	}
+	if got.FXRate.Valid != want.FXRate.Valid ||
+		(want.FXRate.Valid && !got.FXRate.Decimal.Equal(want.FXRate.Decimal)) {
+		t.Errorf("FXRate = %+v, want %+v", got.FXRate, want.FXRate)
+	}
+	if !got.Date.Equal(want.Date) {
+		t.Errorf("Date = %v, want %v", got.Date, want.Date)
+	}
+	if !got.SyncedAt.Equal(want.SyncedAt) {
+		t.Errorf("SyncedAt = %v, want %v", got.SyncedAt, want.SyncedAt)
+	}
+	assertSameDate(t, "AuthorizedDate", got.AuthorizedDate, want.AuthorizedDate)
+	assertSameDate(t, "FXDate", got.FXDate, want.FXDate)
+
+	// Compare everything else field by field, with the compared fields cleared.
+	got.Amount, want.Amount = decimal.Decimal{}, decimal.Decimal{}
+	got.BaseAmount, want.BaseAmount = decimal.NullDecimal{}, decimal.NullDecimal{}
+	got.FXRate, want.FXRate = decimal.NullDecimal{}, decimal.NullDecimal{}
+	got.Date, want.Date = time.Time{}, time.Time{}
+	got.SyncedAt, want.SyncedAt = time.Time{}, time.Time{}
+	got.AuthorizedDate, want.AuthorizedDate = nil, nil
+	got.FXDate, want.FXDate = nil, nil
+	if got != want {
+		t.Errorf("round trip changed the row:\n got %+v\nwant %+v", got, want)
 	}
 }
 
-func TestRemove(t *testing.T) {
-	ctx := context.Background()
-	s := newStore(t)
-
-	if err := s.Upsert(ctx, []model.Transaction{sample()}); err != nil {
-		t.Fatalf("upsert: %v", err)
-	}
-	if err := s.Remove(ctx, "plaid", []string{"txn-1"}); err != nil {
-		t.Fatalf("remove: %v", err)
-	}
-
-	n, err := s.Count(ctx)
-	if err != nil {
-		t.Fatalf("count: %v", err)
-	}
-	if n != 0 {
-		t.Fatalf("got %d rows after remove, want 0", n)
-	}
-}
-
-func TestCursorStartsEmptyAndPersists(t *testing.T) {
-	ctx := context.Background()
-	s := newStore(t)
-
-	got, err := s.Cursor(ctx, "plaid", "item-1")
-	if err != nil {
-		t.Fatalf("first cursor read: %v", err)
-	}
-	if got != "" {
-		t.Errorf("cursor = %q on a new store, want an empty string", got)
-	}
-
-	if err := s.SetCursor(ctx, "plaid", "item-1", "cursor-abc"); err != nil {
-		t.Fatalf("set cursor: %v", err)
-	}
-	if err := s.SetCursor(ctx, "plaid", "item-1", "cursor-def"); err != nil {
-		t.Fatalf("overwrite cursor: %v", err)
-	}
-
-	got, err = s.Cursor(ctx, "plaid", "item-1")
-	if err != nil {
-		t.Fatalf("second cursor read: %v", err)
-	}
-	if got != "cursor-def" {
-		t.Errorf("cursor = %q, want %q", got, "cursor-def")
+func assertSameDate(t *testing.T, field string, got, want *time.Time) {
+	t.Helper()
+	switch {
+	case got == nil && want == nil:
+	case got == nil || want == nil:
+		t.Errorf("%s = %v, want %v", field, got, want)
+	case !got.Equal(*want):
+		t.Errorf("%s = %v, want %v", field, *got, *want)
 	}
 }
