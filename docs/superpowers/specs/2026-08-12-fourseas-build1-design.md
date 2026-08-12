@@ -262,14 +262,27 @@ Two worktrees at a time is the ceiling. Issues 5 and 6 both rewrite the sync
 write path, and issues 3 and 6 both touch transaction upserts. More than two in
 parallel produces conflicts that cost more than the time saved.
 
-### Issue 1 — driver swap and rename
+### Issue 1 — driver swap and renames
+
+Three mechanical renames that each touch every file, done together as one churn.
 
 Replace `github.com/marcboeker/go-duckdb/v2` with
 `github.com/duckdb/duckdb-go/v2`. Rename `cmd/probe` to `cmd/fourseas` and the
-binary to `bin/fourseas`. Update the README and `.env.example`.
+binary to `bin/fourseas`. Change the module path from
+`github.com/kyle-cheung/fourseas2/providence` to
+`github.com/kyle-cheung/fourseas/providence`, because the repository was renamed
+from `fourseas2` to `fourseas`. Rename the three `PROBE_` environment variables
+to `FOURSEAS_`: `PROBE_DB_PATH`, `PROBE_TOKENS_PATH`, and `PROBE_LINK_PORT`.
+Update `.env.example` and `docs/plaid-setup.md` where they name the `probe`
+command.
 
-Done when: the module builds, `go vet` is clean, all existing tests pass
-unchanged, and `fourseas sync` still works against the live Amex link.
+Done when: the module builds, `go vet` is clean, `grep -ri "probe\|fourseas2"`
+finds nothing outside the two spec files, all existing tests pass with no change
+to their logic or assertions, and `fourseas sync` still works against the live
+Amex link.
+
+The default database file is renamed to `data/fourseas.duckdb`. Anyone with the
+old file either renames it or runs a full sync again, which is cheap.
 
 ### Issue 2 — schema, versioning, store rewrite
 
