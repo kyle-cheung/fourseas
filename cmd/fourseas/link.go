@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	plaidprovider "github.com/kyle-cheung/fourseas2/providence/internal/provider/plaid"
-	"github.com/kyle-cheung/fourseas2/providence/internal/tokens"
+	plaidprovider "github.com/kyle-cheung/fourseas/providence/internal/provider/plaid"
+	"github.com/kyle-cheung/fourseas/providence/internal/tokens"
 )
 
 // runLink links one card and saves its access token. Run it once for each card.
@@ -49,6 +49,6 @@ func runLink(ctx context.Context, cfg settings) error {
 	}
 	fmt.Printf("\nLinked %s. Token saved to %s (%d linked in total).\n",
 		name, cfg.tokensPath, len(saved.Items))
-	fmt.Println("Run `probe link` again for the next card, or `probe sync` to fetch transactions.")
+	fmt.Println("Run `fourseas link` again for the next card, or `fourseas sync` to fetch transactions.")
 	return nil
 }

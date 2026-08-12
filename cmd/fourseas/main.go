@@ -1,9 +1,9 @@
-// Command probe tests one assumption: can we pull real credit card
-// transactions from Plaid into a local DuckDB file and read them back?
+// Command fourseas pulls real credit card transactions from Plaid into a
+// local DuckDB file and reads them back.
 //
-//	probe link    link one card, then repeat for the next card
-//	probe sync    fetch new transactions, store them, print the newest rows
-//	probe show    print the newest stored rows without calling Plaid
+//	fourseas link    link one card, then repeat for the next card
+//	fourseas sync    fetch new transactions, store them, print the newest rows
+//	fourseas show    print the newest stored rows without calling Plaid
 package main
 
 import (
@@ -14,12 +14,12 @@ import (
 	"syscall"
 )
 
-const usage = `probe - Plaid to DuckDB transaction probe
+const usage = `fourseas - Plaid to DuckDB transactions
 
 Usage:
-  probe link    Link one card through Plaid Link in your browser
-  probe sync    Fetch new transactions, store them, and print the newest rows
-  probe show    Print the newest stored rows without calling Plaid
+  fourseas link    Link one card through Plaid Link in your browser
+  fourseas sync    Fetch new transactions, store them, and print the newest rows
+  fourseas show    Print the newest stored rows without calling Plaid
 
 Settings come from .env. See .env.example.
 `

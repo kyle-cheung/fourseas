@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kyle-cheung/fourseas2/providence/internal/model"
-	"github.com/kyle-cheung/fourseas2/providence/internal/provider"
-	"github.com/kyle-cheung/fourseas2/providence/internal/store"
+	"github.com/kyle-cheung/fourseas/providence/internal/model"
+	"github.com/kyle-cheung/fourseas/providence/internal/provider"
+	"github.com/kyle-cheung/fourseas/providence/internal/store"
 )
 
 // fakeSource returns a fixed list of pages and records the cursors it was given.
@@ -54,7 +54,7 @@ func row(id string, date string) model.Transaction {
 
 func newTestStore(t *testing.T) *store.Store {
 	t.Helper()
-	s, err := store.Open(filepath.Join(t.TempDir(), "probe.duckdb"))
+	s, err := store.Open(filepath.Join(t.TempDir(), "fourseas.duckdb"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

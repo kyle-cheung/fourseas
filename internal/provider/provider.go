@@ -1,13 +1,13 @@
 // Package provider defines the transaction source contract.
 //
-// The probe has one implementation today (Plaid). A second source is a new
+// Fourseas has one implementation today (Plaid). A second source is a new
 // package that satisfies this interface, not a change to the store or the model.
 package provider
 
 import (
 	"context"
 
-	"github.com/kyle-cheung/fourseas2/providence/internal/model"
+	"github.com/kyle-cheung/fourseas/providence/internal/model"
 )
 
 // Batch is one page of incremental changes from a provider.

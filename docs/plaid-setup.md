@@ -47,7 +47,7 @@ American Express does not need this.
 3. Click **Save changes**.
 4. Remove the `#` from the `PLAID_REDIRECT_URI` line in `.env`.
 
-The port must match `PROBE_LINK_PORT` if you change it from 8080.
+The port must match `FOURSEAS_LINK_PORT` if you change it from 8080.
 
 Link a bank that does not use OAuth first. It proves the rest of the path with
 fewer moving parts.

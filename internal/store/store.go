@@ -10,8 +10,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/kyle-cheung/fourseas2/providence/internal/model"
-	_ "github.com/marcboeker/go-duckdb/v2"
+	_ "github.com/duckdb/duckdb-go/v2"
+	"github.com/kyle-cheung/fourseas/providence/internal/model"
 )
 
 const schema = `

@@ -1,4 +1,4 @@
-// Package model holds the canonical shapes the probe stores and prints.
+// Package model holds the canonical shapes fourseas stores and prints.
 // It must not import any provider SDK.
 package model
 

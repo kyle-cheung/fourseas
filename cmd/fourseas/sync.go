@@ -4,16 +4,16 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/kyle-cheung/fourseas2/providence/internal/provider"
-	plaidprovider "github.com/kyle-cheung/fourseas2/providence/internal/provider/plaid"
-	"github.com/kyle-cheung/fourseas2/providence/internal/store"
-	"github.com/kyle-cheung/fourseas2/providence/internal/tokens"
+	"github.com/kyle-cheung/fourseas/providence/internal/provider"
+	plaidprovider "github.com/kyle-cheung/fourseas/providence/internal/provider/plaid"
+	"github.com/kyle-cheung/fourseas/providence/internal/store"
+	"github.com/kyle-cheung/fourseas/providence/internal/tokens"
 )
 
 // maxPages stops a runaway pagination loop.
 const maxPages = 100
 
-// rowsToShow is how many rows the probe prints after a sync.
+// rowsToShow is how many rows fourseas prints after a sync.
 const rowsToShow = 10
 
 // runSync fetches new transactions for every linked card and prints the newest.
@@ -27,7 +27,7 @@ func runSync(ctx context.Context, cfg settings) error {
 		return err
 	}
 	if len(saved.Items) == 0 {
-		return fmt.Errorf("nothing is linked yet: run `probe link` first (looked in %s)", cfg.tokensPath)
+		return fmt.Errorf("nothing is linked yet: run `fourseas link` first (looked in %s)", cfg.tokensPath)
 	}
 
 	db, err := store.Open(cfg.dbPath)

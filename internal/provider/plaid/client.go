@@ -10,7 +10,7 @@ import (
 	plaidsdk "github.com/plaid/plaid-go/v40/plaid"
 )
 
-// Config holds everything the probe needs to talk to Plaid.
+// Config holds everything fourseas needs to talk to Plaid.
 type Config struct {
 	ClientID string
 	Secret   string

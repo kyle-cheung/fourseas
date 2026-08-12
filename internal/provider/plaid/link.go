@@ -15,7 +15,7 @@ import (
 	plaidsdk "github.com/plaid/plaid-go/v40/plaid"
 )
 
-// linkTimeout is how long the probe waits for the browser part to finish.
+// linkTimeout is how long fourseas waits for the browser part to finish.
 const linkTimeout = 10 * time.Minute
 
 // LinkResult is one newly linked institution.
@@ -66,7 +66,7 @@ func Link(ctx context.Context, cfg Config) (LinkResult, error) {
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.LinkPort)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
-		return LinkResult{}, fmt.Errorf("listen on %s: %w (is another probe running?)", addr, err)
+		return LinkResult{}, fmt.Errorf("listen on %s: %w (is another fourseas running?)", addr, err)
 	}
 
 	server := &http.Server{Handler: mux}
@@ -88,9 +88,9 @@ func Link(ctx context.Context, cfg Config) (LinkResult, error) {
 }
 
 func createLinkToken(ctx context.Context, client *plaidsdk.APIClient, cfg Config) (string, error) {
-	user := plaidsdk.NewLinkTokenCreateRequestUser("providence-probe-local-user")
+	user := plaidsdk.NewLinkTokenCreateRequestUser("fourseas-local-user")
 	req := plaidsdk.NewLinkTokenCreateRequest(
-		"Providence probe",
+		"Fourseas",
 		"en",
 		[]plaidsdk.CountryCode{plaidsdk.COUNTRYCODE_US, plaidsdk.COUNTRYCODE_CA},
 	)
@@ -170,14 +170,14 @@ func openBrowser(url string) {
 	cmd.Start()
 }
 
-// linkPage serves Plaid Link and posts the result back to the probe.
+// linkPage serves Plaid Link and posts the result back to fourseas.
 // On an OAuth return, Plaid requires the widget to restart with the same link
 // token and the full redirect URL.
 var linkPage = template.Must(template.New("link").Parse(`<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Providence probe</title>
+  <title>Fourseas</title>
   <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
   <style>
     body { font-family: -apple-system, system-ui, sans-serif; margin: 4rem auto; max-width: 32rem; }
@@ -185,7 +185,7 @@ var linkPage = template.Must(template.New("link").Parse(`<!DOCTYPE html>
   </style>
 </head>
 <body>
-  <h1>Providence probe</h1>
+  <h1>Fourseas</h1>
   <p id="status">Opening Plaid Link…</p>
   <script>
     const status = document.getElementById('status');
@@ -202,7 +202,7 @@ var linkPage = template.Must(template.New("link").Parse(`<!DOCTYPE html>
         }).then((r) => {
           status.textContent = r.ok
             ? 'Done. Go back to the terminal.'
-            : 'The probe could not exchange the token. Check the terminal.';
+            : 'Fourseas could not exchange the token. Check the terminal.';
         });
       },
       onExit: (err) => {

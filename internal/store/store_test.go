@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kyle-cheung/fourseas2/providence/internal/model"
+	"github.com/kyle-cheung/fourseas/providence/internal/model"
 )
 
 func day(s string) time.Time {
@@ -19,7 +19,7 @@ func day(s string) time.Time {
 
 func newStore(t *testing.T) *Store {
 	t.Helper()
-	s, err := Open(filepath.Join(t.TempDir(), "nested", "probe.duckdb"))
+	s, err := Open(filepath.Join(t.TempDir(), "nested", "fourseas.duckdb"))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

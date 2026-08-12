@@ -6,7 +6,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/kyle-cheung/fourseas2/providence/internal/model"
+	"github.com/kyle-cheung/fourseas/providence/internal/model"
 )
 
 // maxCellWidth keeps long merchant names from breaking the layout.

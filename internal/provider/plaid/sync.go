@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/kyle-cheung/fourseas2/providence/internal/provider"
+	"github.com/kyle-cheung/fourseas/providence/internal/provider"
 	plaidsdk "github.com/plaid/plaid-go/v40/plaid"
 )
 

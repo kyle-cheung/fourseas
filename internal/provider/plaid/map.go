@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kyle-cheung/fourseas2/providence/internal/model"
+	"github.com/kyle-cheung/fourseas/providence/internal/model"
 	plaidsdk "github.com/plaid/plaid-go/v40/plaid"
 )
 

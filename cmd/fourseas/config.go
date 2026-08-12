@@ -5,17 +5,17 @@ import (
 	"strconv"
 
 	"github.com/joho/godotenv"
-	plaidprovider "github.com/kyle-cheung/fourseas2/providence/internal/provider/plaid"
+	plaidprovider "github.com/kyle-cheung/fourseas/providence/internal/provider/plaid"
 )
 
 // Default file locations. Both are gitignored.
 const (
-	defaultDBPath     = "data/providence.duckdb"
+	defaultDBPath     = "data/fourseas.duckdb"
 	defaultTokensPath = ".secrets/tokens.json"
 	defaultLinkPort   = 8080
 )
 
-// settings is everything the probe reads from the environment.
+// settings is everything fourseas reads from the environment.
 type settings struct {
 	plaid      plaidprovider.Config
 	dbPath     string
@@ -33,10 +33,10 @@ func loadSettings() settings {
 			Secret:      os.Getenv("PLAID_SECRET"),
 			Env:         envOr("PLAID_ENV", "sandbox"),
 			RedirectURI: os.Getenv("PLAID_REDIRECT_URI"),
-			LinkPort:    intEnvOr("PROBE_LINK_PORT", defaultLinkPort),
+			LinkPort:    intEnvOr("FOURSEAS_LINK_PORT", defaultLinkPort),
 		},
-		dbPath:     envOr("PROBE_DB_PATH", defaultDBPath),
-		tokensPath: envOr("PROBE_TOKENS_PATH", defaultTokensPath),
+		dbPath:     envOr("FOURSEAS_DB_PATH", defaultDBPath),
+		tokensPath: envOr("FOURSEAS_TOKENS_PATH", defaultTokensPath),
 	}
 }
 
