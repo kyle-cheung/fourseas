@@ -259,6 +259,54 @@ func TestDrainWithNothingNewMakesOneCall(t *testing.T) {
 	}
 }
 
+// TestDrainHidesThePendingRowWhenThePostedRowArrivesLater walks the real PG&E
+// case through the whole sync path: the pending row lands in one sync and the
+// posted row in the next. Both stay stored, and the view shows one charge.
+func TestDrainHidesThePendingRowWhenThePostedRowArrivesLater(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+
+	pending := row("txn-pge-pending", "2026-08-10")
+	pending.Name = "Pacific Gas Electric Company"
+	pending.Amount = decimal.RequireFromString("138.98")
+	pending.Pending = true
+
+	posted := row("txn-pge-posted", "2026-08-11")
+	posted.Name = "Pacific Gas And Elecwest"
+	posted.Amount = decimal.RequireFromString("138.98")
+	posted.PendingTransactionID = "txn-pge-pending"
+
+	first := &fakeSource{pages: []provider.Batch{
+		{Added: []model.Transaction{pending}, NextCursor: "c1", HasMore: false},
+	}}
+	if _, err := drain(ctx, db, first, "item-1"); err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+
+	second := &fakeSource{pages: []provider.Batch{
+		{Added: []model.Transaction{posted}, NextCursor: "c2", HasMore: false},
+	}}
+	if _, err := drain(ctx, db, second, "item-1"); err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+
+	stored, err := db.Count(ctx)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if stored != 2 {
+		t.Errorf("transactions holds %d rows, want both versions of the charge", stored)
+	}
+
+	shown, err := db.NewestView(ctx, 10)
+	if err != nil {
+		t.Fatalf("newest view: %v", err)
+	}
+	if len(shown) != 1 || shown[0].ExternalID != "txn-pge-posted" {
+		t.Fatalf("v_transactions shows %d rows %+v, want the posted row only", len(shown), shown)
+	}
+}
+
 func account(id, balance string) model.Account {
 	return model.Account{
 		Provider:       "fake",

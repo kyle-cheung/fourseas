@@ -266,6 +266,37 @@ func TestToModelsFillsTheBaseCurrencyColumns(t *testing.T) {
 	}
 }
 
+// TestToModelCarriesThePendingTransactionID keeps the link Plaid draws between
+// the posted row and the pending row it replaces. Without it the store cannot
+// hide the duplicate, and one charge is counted two times.
+func TestToModelCarriesThePendingTransactionID(t *testing.T) {
+	resp := decodeSample(t)
+
+	posted := resp.Added[0]
+	posted.SetPendingTransactionId("txn-pending-1")
+	got, err := toModel(posted, "item-1")
+	if err != nil {
+		t.Fatalf("toModel: %v", err)
+	}
+	if got.PendingTransactionID != "txn-pending-1" {
+		t.Errorf("PendingTransactionID = %q, want %q", got.PendingTransactionID, "txn-pending-1")
+	}
+	// Only the store sets superseded_by, from what it holds. A provider row
+	// never proposes one.
+	if got.SupersededBy != "" {
+		t.Errorf("SupersededBy = %q, want a mapped row to leave it empty", got.SupersededBy)
+	}
+
+	// Plaid sends null for a row that replaces nothing, which is most rows.
+	none, err := toModel(resp.Added[1], "item-1")
+	if err != nil {
+		t.Fatalf("toModel: %v", err)
+	}
+	if none.PendingTransactionID != "" {
+		t.Errorf("PendingTransactionID = %q, want empty when Plaid sends null", none.PendingTransactionID)
+	}
+}
+
 func TestToModelRejectsBadDate(t *testing.T) {
 	resp := decodeSample(t)
 	bad := resp.Added[0]
