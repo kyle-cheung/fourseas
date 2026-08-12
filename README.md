@@ -33,7 +33,17 @@ for your real cards.
 ./bin/probe show    # print the stored rows again without calling Plaid
 ```
 
-In sandbox, sign in with the user name `user_good` and the password `pass_good`.
+In sandbox, use these test values. Real values are refused.
+
+| Prompt         | Value          |
+| -------------- | -------------- |
+| Phone number   | `415-555-0011` |
+| One-time code  | `123456`       |
+| Bank user name | `user_good`    |
+| Bank password  | `pass_good`    |
+
+Every sandbox phone number uses the same one-time code. In production your own
+phone number and real bank sign-in work as normal.
 
 `sync` is safe to run more than one time. Rows are keyed on the provider and the
 transaction id, so a repeated run updates rows instead of duplicating them.
