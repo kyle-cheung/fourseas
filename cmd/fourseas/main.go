@@ -4,6 +4,7 @@
 //	fourseas link      link one card, then repeat for the next card
 //	fourseas sync      fetch new transactions, store them, print the newest rows
 //	fourseas accounts  list the stored accounts with their balances
+//	fourseas accounts nickname <account-id> "Amex Daily"  name an account
 //	fourseas show      print the newest stored rows without calling Plaid
 //	fourseas reset     drop everything and start the database again
 package main
@@ -22,6 +23,8 @@ Usage:
   fourseas link      Link one card through Plaid Link in your browser
   fourseas sync      Fetch new transactions, store them, and print the newest rows
   fourseas accounts  List the stored accounts with their balances and ids
+  fourseas accounts nickname <account-id> "Amex Daily"
+                     Name an account. An empty name clears the nickname
   fourseas show      Print the newest stored rows without calling Plaid
   fourseas reset     Drop all data and build the schema again. Asks first
 

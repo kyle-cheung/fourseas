@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -95,6 +97,101 @@ func TestUpsertAccountKeepsWhatTheUserOwns(t *testing.T) {
 	}
 	if !got[0].BalanceCurrent.Decimal.Equal(dec("99.99")) {
 		t.Errorf("BalanceCurrent = %s, want the new balance 99.99", got[0].BalanceCurrent.Decimal)
+	}
+}
+
+// TestSetNicknameWritesChangesAndClears proves the name the user gives an
+// account can be set, replaced, and removed, and that the provider's own name
+// is never touched.
+func TestSetNicknameWritesChangesAndClears(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	stored := sampleAccount()
+	if err := s.UpsertAccounts(ctx, []model.Account{stored}); err != nil {
+		t.Fatalf("upsert accounts: %v", err)
+	}
+
+	for _, want := range []string{"Amex Daily", "Amex Travel", ""} {
+		if err := s.SetNickname(ctx, stored.AccountID, want); err != nil {
+			t.Fatalf("set nickname %q: %v", want, err)
+		}
+		got, err := s.Accounts(ctx)
+		if err != nil {
+			t.Fatalf("accounts: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("got %d accounts, want 1", len(got))
+		}
+		if got[0].Nickname != want {
+			t.Errorf("Nickname = %q, want %q", got[0].Nickname, want)
+		}
+		if got[0].Name != stored.Name {
+			t.Errorf("Name = %q, want the provider's name %q", got[0].Name, stored.Name)
+		}
+	}
+}
+
+// TestSetNicknameOnAnUnknownAccountFails proves a typed id is an error that
+// names the id, and not a silent no-op.
+func TestSetNicknameOnAnUnknownAccountFails(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	if err := s.UpsertAccounts(ctx, []model.Account{sampleAccount()}); err != nil {
+		t.Fatalf("upsert accounts: %v", err)
+	}
+
+	err := s.SetNickname(ctx, "acct-typo", "Amex Daily")
+	var unknown *UnknownAccountError
+	if !errors.As(err, &unknown) {
+		t.Fatalf("SetNickname error = %v, want an *UnknownAccountError", err)
+	}
+	if unknown.AccountID != "acct-typo" {
+		t.Errorf("AccountID = %q, want the id that was not found", unknown.AccountID)
+	}
+	if !strings.Contains(err.Error(), "acct-typo") {
+		t.Errorf("error %q does not name the account id", err)
+	}
+
+	// The account that does exist keeps its empty nickname.
+	got, err := s.Accounts(ctx)
+	if err != nil {
+		t.Fatalf("accounts: %v", err)
+	}
+	if got[0].Nickname != "" {
+		t.Errorf("Nickname = %q, want a failed call to change nothing", got[0].Nickname)
+	}
+}
+
+// TestSetNicknameOnlyTouchesTheOneAccount proves the update is not a blanket
+// write over the table.
+func TestSetNicknameOnlyTouchesTheOneAccount(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	other := sampleAccount()
+	other.AccountID = "acct-chase"
+	if err := s.UpsertAccounts(ctx, []model.Account{sampleAccount(), other}); err != nil {
+		t.Fatalf("upsert accounts: %v", err)
+	}
+	if err := s.SetNickname(ctx, "acct-amex", "Amex Daily"); err != nil {
+		t.Fatalf("set nickname: %v", err)
+	}
+
+	got, err := s.Accounts(ctx)
+	if err != nil {
+		t.Fatalf("accounts: %v", err)
+	}
+	byID := map[string]string{}
+	for _, a := range got {
+		byID[a.AccountID] = a.Nickname
+	}
+	if byID["acct-amex"] != "Amex Daily" {
+		t.Errorf("acct-amex nickname = %q, want %q", byID["acct-amex"], "Amex Daily")
+	}
+	if byID["acct-chase"] != "" {
+		t.Errorf("acct-chase nickname = %q, want it left alone", byID["acct-chase"])
 	}
 }
 
