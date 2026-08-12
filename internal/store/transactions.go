@@ -46,17 +46,19 @@ ON CONFLICT (provider, external_id) DO UPDATE SET
 // Upsert writes rows, replacing any row with the same provider and external id.
 // Running a sync more than one time therefore does not create duplicates.
 func (s *Store) Upsert(ctx context.Context, txs []model.Transaction) error {
+	return s.inTx(ctx, func(dbtx execer) error {
+		return upsertTransactions(ctx, dbtx, txs)
+	})
+}
+
+// upsertTransactions writes rows through whatever the caller is holding: the
+// database, or the transaction one sync page commits in.
+func upsertTransactions(ctx context.Context, db execer, txs []model.Transaction) error {
 	if len(txs) == 0 {
 		return nil
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin: %w", err)
-	}
-	defer tx.Rollback()
-
-	stmt, err := tx.PrepareContext(ctx, upsertTransactionSQL)
+	stmt, err := db.PrepareContext(ctx, upsertTransactionSQL)
 	if err != nil {
 		return fmt.Errorf("prepare upsert: %w", err)
 	}
@@ -82,13 +84,20 @@ func (s *Store) Upsert(ctx context.Context, txs []model.Transaction) error {
 			return fmt.Errorf("upsert %s/%s: %w", t.Provider, t.ExternalID, err)
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 // Remove deletes rows the provider says no longer exist.
 func (s *Store) Remove(ctx context.Context, provider string, externalIDs []string) error {
+	return s.inTx(ctx, func(dbtx execer) error {
+		return removeTransactions(ctx, dbtx, provider, externalIDs)
+	})
+}
+
+// removeTransactions deletes rows through the caller's handle.
+func removeTransactions(ctx context.Context, db execer, provider string, externalIDs []string) error {
 	for _, id := range externalIDs {
-		_, err := s.db.ExecContext(ctx,
+		_, err := db.ExecContext(ctx,
 			`DELETE FROM transactions WHERE provider = ? AND external_id = ?`, provider, id)
 		if err != nil {
 			return fmt.Errorf("remove %s/%s: %w", provider, id, err)

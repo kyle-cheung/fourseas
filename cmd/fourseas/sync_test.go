@@ -186,6 +186,79 @@ func TestDrainStoresAccountsAndBalances(t *testing.T) {
 	}
 }
 
+// TestDrainLeavesTheRowsAndTheCursorWhenAPageFailsPartWay proves the page is
+// one unit: the rows before the bad one, and the cursor that page carried, are
+// both left as they were.
+func TestDrainLeavesTheRowsAndTheCursorWhenAPageFailsPartWay(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+
+	// A balance no DECIMAL(18,4) column can hold fails on insert, after the
+	// rows of the same page are written.
+	source := &fakeSource{pages: []provider.Batch{
+		{Added: []model.Transaction{row("a", "2026-08-01")}, NextCursor: "c1", HasMore: true},
+		{
+			Added:      []model.Transaction{row("b", "2026-08-02")},
+			RemovedIDs: []string{"a"},
+			Accounts:   []model.Account{account("acct-1", "99999999999999999999.99")},
+			NextCursor: "c2",
+			HasMore:    false,
+		},
+	}}
+
+	if _, err := drain(ctx, db, source, "item-1"); err == nil {
+		t.Fatal("want an error from the second page, got nil")
+	}
+
+	// Only page one is stored: "b" never landed and "a" was not removed.
+	n, err := db.Count(ctx)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("stored %d rows, want only the row from the first page", n)
+	}
+	if _, err := db.Get(ctx, "fake", "a"); err != nil {
+		t.Errorf("the row from the first page is gone: %v", err)
+	}
+
+	accounts, err := db.Accounts(ctx)
+	if err != nil {
+		t.Fatalf("accounts: %v", err)
+	}
+	if len(accounts) != 0 {
+		t.Errorf("stored %d accounts from the failed page, want 0", len(accounts))
+	}
+
+	saved, err := db.Cursor(ctx, "fake", "item-1")
+	if err != nil {
+		t.Fatalf("read cursor: %v", err)
+	}
+	if saved != "c1" {
+		t.Errorf("saved cursor = %q, want the cursor of the last whole page", saved)
+	}
+}
+
+// TestDrainWithNothingNewMakesOneCall is the everyday case: a second sync asks
+// once and reports nothing.
+func TestDrainWithNothingNewMakesOneCall(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+
+	source := &fakeSource{pages: []provider.Batch{{NextCursor: "c1", HasMore: false}}}
+	got, err := drain(ctx, db, source, "item-1")
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+
+	if got.added != 0 || got.modified != 0 || got.removed != 0 {
+		t.Errorf("counts = %+v, want all zero", got)
+	}
+	if source.call != 1 {
+		t.Errorf("made %d API calls, want 1", source.call)
+	}
+}
+
 func account(id, balance string) model.Account {
 	return model.Account{
 		Provider:       "fake",

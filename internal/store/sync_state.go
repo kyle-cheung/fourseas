@@ -29,7 +29,13 @@ func (s *Store) Cursor(ctx context.Context, provider, itemID string) (string, er
 // SetCursor saves the cursor the next run starts from, and records that the
 // sync succeeded.
 func (s *Store) SetCursor(ctx context.Context, provider, itemID, cursor string) error {
-	_, err := s.db.ExecContext(ctx, `
+	return saveCursor(ctx, s.db, provider, itemID, cursor)
+}
+
+// saveCursor writes the cursor through the caller's handle, so that a sync
+// page can save it in the same transaction as the rows it belongs to.
+func saveCursor(ctx context.Context, db execer, provider, itemID, cursor string) error {
+	_, err := db.ExecContext(ctx, `
 		INSERT INTO sync_state (provider, item_id, cursor, last_synced_at, last_status)
 		VALUES (?, ?, ?, ?, 'ok')
 		ON CONFLICT (provider, item_id) DO UPDATE SET

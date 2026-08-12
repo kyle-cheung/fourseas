@@ -120,9 +120,9 @@ type counts struct {
 	removed  int
 }
 
-// drain reads every page the provider offers and writes each one to the store.
-// It saves the cursor after every page, so an interrupted run continues instead
-// of starting over.
+// drain reads every page the provider offers and commits each one to the store
+// whole: its rows and its cursor land together, so an interrupted run continues
+// from the last whole page instead of starting over or repeating one.
 func drain(ctx context.Context, db *store.Store, source provider.Provider, itemID string) (counts, error) {
 	var total counts
 
@@ -136,7 +136,7 @@ func drain(ctx context.Context, db *store.Store, source provider.Provider, itemI
 		if err != nil {
 			return total, err
 		}
-		if err := applyBatch(ctx, db, source, batch); err != nil {
+		if err := db.ApplyPage(ctx, toPage(source.Name(), itemID, batch)); err != nil {
 			return total, err
 		}
 
@@ -145,9 +145,6 @@ func drain(ctx context.Context, db *store.Store, source provider.Provider, itemI
 		total.removed += len(batch.RemovedIDs)
 		cursor = batch.NextCursor
 
-		if err := db.SetCursor(ctx, source.Name(), itemID, cursor); err != nil {
-			return total, err
-		}
 		if !batch.HasMore {
 			return total, nil
 		}
@@ -156,19 +153,17 @@ func drain(ctx context.Context, db *store.Store, source provider.Provider, itemI
 	return total, fmt.Errorf("stopped after %d pages: the provider still reports more", maxPages)
 }
 
-func applyBatch(ctx context.Context, db *store.Store, source provider.Provider, batch provider.Batch) error {
-	if err := db.Upsert(ctx, batch.Added); err != nil {
-		return err
+// toPage turns one provider batch into the unit the store commits.
+func toPage(providerName, itemID string, batch provider.Batch) store.Page {
+	return store.Page{
+		Provider:   providerName,
+		ItemID:     itemID,
+		Added:      batch.Added,
+		Modified:   batch.Modified,
+		RemovedIDs: batch.RemovedIDs,
+		Accounts:   batch.Accounts,
+		Cursor:     batch.NextCursor,
 	}
-	if err := db.Upsert(ctx, batch.Modified); err != nil {
-		return err
-	}
-	if err := db.Remove(ctx, source.Name(), batch.RemovedIDs); err != nil {
-		return err
-	}
-	// The provider sends its whole account list with every page, so the
-	// balances are already here and cost no extra call.
-	return db.UpsertAccounts(ctx, batch.Accounts)
 }
 
 // runShow prints stored rows without calling Plaid.
