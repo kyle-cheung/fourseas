@@ -42,12 +42,23 @@ transaction id, so a repeated run updates rows instead of duplicating them.
 
 Scotiabank uses OAuth, so Plaid needs a redirect URI that you registered first.
 
-1. In the Plaid dashboard, go to Team Settings > API > Allowed redirect URIs.
-2. Add `http://localhost:8080/oauth`.
+1. In the Plaid dashboard, go to Developers > API > Allowed redirect URIs.
+2. Add `http://localhost:8080/oauth` and click Save changes.
 3. Remove the `#` from the `PLAID_REDIRECT_URI` line in `.env`.
 
 American Express does not need this. If `probe link` stops with a redirect URI
 error, this step is missing.
+
+## Data Transparency Messaging
+
+Plaid refuses to create a link token until the Link customization has at least
+one use case. The error is `INVALID_LINK_CUSTOMIZATION`. It applies to sandbox
+as well as production, and no API setting avoids it.
+
+1. Go to <https://dashboard.plaid.com/link/data-transparency-v5>.
+2. Open the Data Transparency section.
+3. Select at least one use case. "Personal finance management" fits this probe.
+4. Click Publish.
 
 ## Files it writes
 

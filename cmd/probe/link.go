@@ -19,7 +19,7 @@ func runLink(ctx context.Context, cfg settings) error {
 	if cfg.plaid.RedirectURI == "" {
 		fmt.Printf("No PLAID_REDIRECT_URI is set. Banks that use OAuth, such as Scotiabank,\n" +
 			"will not finish. To use one, register this URI in the Plaid dashboard\n" +
-			"under Team Settings > API > Allowed redirect URIs, then put it in .env:\n")
+			"under Developers > API > Allowed redirect URIs, then put it in .env:\n")
 		fmt.Printf("  http://localhost:%d/oauth\n\n", cfg.plaid.LinkPort)
 	}
 
