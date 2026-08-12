@@ -85,6 +85,56 @@ func TestRemove(t *testing.T) {
 	}
 }
 
+// TestSumOfBaseAmountIsNullWhenARowHasNoRate is the point of the base currency
+// columns: a total that mixes a USD row with a CAD row is null, not a plausible
+// wrong number.
+func TestSumOfBaseAmountIsNullWhenARowHasNoRate(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	usd := model.WithBase(model.Transaction{
+		Provider: "plaid", ExternalID: "txn-usd", AccountID: "acct-amex",
+		Date: day("2026-08-10"), Amount: dec("24.75"), Currency: "USD",
+	})
+	cad := model.WithBase(model.Transaction{
+		Provider: "plaid", ExternalID: "txn-cad", AccountID: "acct-scotia",
+		Date: day("2026-08-11"), Amount: dec("13.20"), Currency: "CAD",
+	})
+
+	if err := s.Upsert(ctx, []model.Transaction{usd, cad}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	// DuckDB's sum skips nulls, so the null has to be found with a count.
+	var raw any
+	var missing int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT sum(base_amount), count(*) FILTER (base_amount IS NULL)
+		FROM transactions`).Scan(&raw, &missing)
+	if err != nil {
+		t.Fatalf("sum: %v", err)
+	}
+	if missing != 1 {
+		t.Errorf("%d rows have no base amount, want 1 (the CAD row)", missing)
+	}
+
+	sum, err := toDecimal(raw)
+	if err != nil {
+		t.Fatalf("convert sum: %v", err)
+	}
+	if !sum.Equal(dec("24.75")) {
+		t.Errorf("sum(base_amount) = %s, want only the USD row 24.75", sum)
+	}
+
+	stored, err := s.Get(ctx, "plaid", "txn-cad")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if stored.BaseAmount.Valid || stored.BaseCurrency != "" || stored.FXRate.Valid || stored.FXDate != nil {
+		t.Errorf("stored CAD row = %+v, want all four base columns null", stored)
+	}
+}
+
 func TestGetReportsAMissingRow(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
