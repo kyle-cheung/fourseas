@@ -42,6 +42,43 @@ func printTable(rows []model.TransactionView) {
 	fmt.Println("\nA positive amount is money leaving the account. A payment or refund is negative.")
 }
 
+// printAccounts writes the account list in aligned columns.
+//
+// The account id is printed in full and last, because it is the value the user
+// copies into `fourseas accounts nickname <id>`.
+func printAccounts(rows []model.AccountView) {
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "INSTITUTION\tNAME\tMASK\tTYPE\tBALANCE\tLIMIT\tCCY\tUPDATED\tNICKNAME\tACCOUNT ID")
+
+	for _, r := range rows {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%10s\t%10s\t%s\t%s\t%s\t%s\n",
+			truncate(r.InstitutionName),
+			truncate(r.Name),
+			r.Mask,
+			accountKind(r.Account),
+			accountBalance(r.Account),
+			accountLimit(r.Account),
+			r.Currency,
+			accountUpdated(r.Account),
+			truncate(r.Nickname),
+			r.AccountID,
+		)
+	}
+	w.Flush()
+
+	fmt.Println("\nOn a credit card a positive balance is money owed.")
+	fmt.Println("Balances come from the last sync. Run `fourseas sync` for newer ones.")
+}
+
+// accountKind is the subtype, which says "credit card" where the type only
+// says "credit". It falls back to the type when there is no subtype.
+func accountKind(a model.Account) string {
+	if a.Subtype != "" {
+		return a.Subtype
+	}
+	return a.Type
+}
+
 // truncate shortens a value that is too wide for a column.
 func truncate(s string) string {
 	if len(s) <= maxCellWidth {

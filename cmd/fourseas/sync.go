@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/kyle-cheung/fourseas/providence/internal/model"
 	"github.com/kyle-cheung/fourseas/providence/internal/provider"
 	plaidprovider "github.com/kyle-cheung/fourseas/providence/internal/provider/plaid"
 	"github.com/kyle-cheung/fourseas/providence/internal/store"
@@ -79,6 +80,12 @@ func syncItem(ctx context.Context, cfg settings, db *store.Store, item tokens.It
 		return err
 	}
 
+	// The accounts written below refer to this institution, so record it
+	// before the first page lands.
+	if err := recordInstitution(ctx, db, item, cfg.plaid.Env); err != nil {
+		return err
+	}
+
 	counts, err := drain(ctx, db, source, item.ItemID)
 	if err != nil {
 		return err
@@ -87,6 +94,23 @@ func syncItem(ctx context.Context, cfg settings, db *store.Store, item tokens.It
 	fmt.Printf("%-28s %d added, %d modified, %d removed\n",
 		label(item), counts.added, counts.modified, counts.removed)
 	return nil
+}
+
+// recordInstitution stores the linked item, so the accounts list can name the
+// login an account sits behind. What is known lives in the token file: an
+// item that was linked before this field existed has no environment, so the
+// current one is used.
+func recordInstitution(ctx context.Context, db *store.Store, item tokens.Item, env string) error {
+	if item.Env != "" {
+		env = item.Env
+	}
+	return db.UpsertInstitution(ctx, model.Institution{
+		Provider:        plaidprovider.ProviderName,
+		ItemID:          item.ItemID,
+		InstitutionName: item.Institution,
+		Env:             env,
+		LinkedAt:        item.LinkedAt,
+	})
 }
 
 // counts is what one drain changed.
@@ -139,7 +163,12 @@ func applyBatch(ctx context.Context, db *store.Store, source provider.Provider, 
 	if err := db.Upsert(ctx, batch.Modified); err != nil {
 		return err
 	}
-	return db.Remove(ctx, source.Name(), batch.RemovedIDs)
+	if err := db.Remove(ctx, source.Name(), batch.RemovedIDs); err != nil {
+		return err
+	}
+	// The provider sends its whole account list with every page, so the
+	// balances are already here and cost no extra call.
+	return db.UpsertAccounts(ctx, batch.Accounts)
 }
 
 // runShow prints stored rows without calling Plaid.

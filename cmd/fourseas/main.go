@@ -1,10 +1,11 @@
 // Command fourseas pulls real credit card transactions from Plaid into a
 // local DuckDB file and reads them back.
 //
-//	fourseas link    link one card, then repeat for the next card
-//	fourseas sync    fetch new transactions, store them, print the newest rows
-//	fourseas show    print the newest stored rows without calling Plaid
-//	fourseas reset   drop everything and start the database again
+//	fourseas link      link one card, then repeat for the next card
+//	fourseas sync      fetch new transactions, store them, print the newest rows
+//	fourseas accounts  list the stored accounts with their balances
+//	fourseas show      print the newest stored rows without calling Plaid
+//	fourseas reset     drop everything and start the database again
 package main
 
 import (
@@ -18,10 +19,11 @@ import (
 const usage = `fourseas - Plaid to DuckDB transactions
 
 Usage:
-  fourseas link    Link one card through Plaid Link in your browser
-  fourseas sync    Fetch new transactions, store them, and print the newest rows
-  fourseas show    Print the newest stored rows without calling Plaid
-  fourseas reset   Drop all data and build the schema again. Asks first
+  fourseas link      Link one card through Plaid Link in your browser
+  fourseas sync      Fetch new transactions, store them, and print the newest rows
+  fourseas accounts  List the stored accounts with their balances and ids
+  fourseas show      Print the newest stored rows without calling Plaid
+  fourseas reset     Drop all data and build the schema again. Asks first
 
 Settings come from .env. See .env.example.
 `
@@ -49,6 +51,8 @@ func run() error {
 		return runLink(ctx, cfg)
 	case "sync":
 		return runSync(ctx, cfg)
+	case "accounts":
+		return runAccounts(ctx, cfg, os.Args[2:])
 	case "show":
 		return runShow(ctx, cfg)
 	case "reset":

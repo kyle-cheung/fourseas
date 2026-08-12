@@ -3,6 +3,7 @@ package plaid
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/kyle-cheung/fourseas/providence/internal/provider"
 	plaidsdk "github.com/plaid/plaid-go/v40/plaid"
@@ -69,6 +70,9 @@ func (s *Source) Sync(ctx context.Context, cursor string) (provider.Batch, error
 		Added:      added,
 		Modified:   modified,
 		RemovedIDs: removed,
+		// Plaid returns the whole account list with every page, so balances
+		// arrive without a second call.
+		Accounts:   toAccounts(resp.Accounts, s.itemID, time.Now().UTC()),
 		NextCursor: resp.NextCursor,
 		HasMore:    resp.HasMore,
 	}, nil
