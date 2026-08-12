@@ -224,7 +224,7 @@ internal/tokens/       the access token file
 `model` and `store` still do not import Plaid.
 
 `store` is split into `schema.go`, `accounts.go`, `transactions.go`,
-`sync_state.go`, and `views.go`. This is deliberate: issues 2, 4, 5, and 6 run
+`sync_state.go`, and `views.go`. This is deliberate: issues 3, 4, 5, and 6 run
 in parallel worktrees, and one large file would make them conflict.
 
 ## Testing
@@ -242,24 +242,27 @@ No test uses the network.
 
 ## Issues
 
-Issue 8 (Scotiabank OAuth) is complete. A live link succeeded.
+Scotiabank OAuth was verified before this build started, so it is not an issue. A live link succeeded.
+
+The issues are on GitHub, numbered in execution order. The numbers below are the
+GitHub numbers.
 
 | # | Issue | Depends on | Worktree |
 | - | ----- | ---------- | -------- |
-| 0 | Driver swap and rename | — | Alone |
-| 1 | Schema, versioning, store rewrite | 0 | Alone |
-| 2 | Accounts and balances | 1 | Yes |
-| 6 | Base currency | 1 | Yes, beside 2 |
-| 4 | Atomic page commit | 1 | Yes |
-| 5 | Pending supersede | 1 | Yes, beside 4 |
-| 3 | Nicknames | 2 | Yes |
-| 7 | Views and documentation | 2, 5, 6 | Yes |
+| 1 | Driver swap and rename | — | Alone |
+| 2 | Schema, versioning, store rewrite | 1 | Alone |
+| 3 | Accounts and balances | 2 | Yes |
+| 4 | Base currency | 2 | Yes, beside 3 |
+| 5 | Atomic page commit | 2 | Yes |
+| 6 | Pending supersede | 2 | Yes, beside 5 |
+| 7 | Nicknames | 3 | Yes |
+| 8 | Views and documentation | 3, 4, 6 | Yes |
 
-Two worktrees at a time is the ceiling. Issues 4 and 5 both rewrite the sync
-write path, and issues 2 and 5 both touch transaction upserts. More than two in
+Two worktrees at a time is the ceiling. Issues 5 and 6 both rewrite the sync
+write path, and issues 3 and 6 both touch transaction upserts. More than two in
 parallel produces conflicts that cost more than the time saved.
 
-### Issue 0 — driver swap and rename
+### Issue 1 — driver swap and rename
 
 Replace `github.com/marcboeker/go-duckdb/v2` with
 `github.com/duckdb/duckdb-go/v2`. Rename `cmd/probe` to `cmd/fourseas` and the
@@ -268,18 +271,18 @@ binary to `bin/fourseas`. Update the README and `.env.example`.
 Done when: the module builds, `go vet` is clean, all existing tests pass
 unchanged, and `fourseas sync` still works against the live Amex link.
 
-### Issue 1 — schema, versioning, store rewrite
+### Issue 2 — schema, versioning, store rewrite
 
 Create all four tables and `schema_version`. Add **every** column, including
 `pending_transaction_id`, `superseded_by`, and the four currency columns, even
-though issues 5 and 6 populate them. Split `store` into one file for each table.
+though issues 4 and 6 populate them. Split `store` into one file for each table.
 Add `fourseas reset`.
 
 Done when: the schema is created from nothing, a version mismatch stops the
 command with a clear message, `DECIMAL` values round trip exactly, and the
 store tests pass.
 
-### Issue 2 — accounts and balances
+### Issue 3 — accounts and balances
 
 Write the accounts from every sync response into `accounts`, with balances.
 Add `fourseas accounts`.
@@ -287,29 +290,7 @@ Add `fourseas accounts`.
 Done when: after a sync, every account Plaid returned appears with its balance,
 and `fourseas accounts` shows ids, names, masks, types, balances, and nicknames.
 
-### Issue 3 — nicknames
-
-Add `fourseas accounts nickname <account-id> "<name>"`.
-
-Done when: a nickname is stored, shown by `fourseas accounts`, can be changed
-and cleared, and an unknown id gives a clear error.
-
-### Issue 4 — atomic page commit
-
-Move the row writes and the cursor save into one database transaction.
-
-Done when: an injected failure part way through a page leaves the rows and the
-cursor unchanged, proven by a test.
-
-### Issue 5 — pending supersede
-
-Store `pending_transaction_id` and set `superseded_by`.
-
-Done when: the PG&E pair produces one row in `v_transactions` and two rows in
-`transactions`, both when the pair arrives in one page and when it arrives
-across two syncs.
-
-### Issue 6 — base currency
+### Issue 4 — base currency
 
 Populate `base_amount`, `base_currency`, and `fx_rate` for USD rows. Leave CAD
 rows null.
@@ -317,7 +298,29 @@ rows null.
 Done when: a USD row has `base_amount` equal to `amount` with an `fx_rate` of
 1.0, and a CAD row has null, proven by a test.
 
-### Issue 7 — views and documentation
+### Issue 5 — atomic page commit
+
+Move the row writes and the cursor save into one database transaction.
+
+Done when: an injected failure part way through a page leaves the rows and the
+cursor unchanged, proven by a test.
+
+### Issue 6 — pending supersede
+
+Store `pending_transaction_id` and set `superseded_by`.
+
+Done when: the PG&E pair produces one row in `v_transactions` and two rows in
+`transactions`, both when the pair arrives in one page and when it arrives
+across two syncs.
+
+### Issue 7 — nicknames
+
+Add `fourseas accounts nickname <account-id> "<name>"`.
+
+Done when: a nickname is stored, shown by `fourseas accounts`, can be changed
+and cleared, and an unknown id gives a clear error.
+
+### Issue 8 — views and documentation
 
 Create `v_transactions`. Write the exploration guide with example queries.
 
