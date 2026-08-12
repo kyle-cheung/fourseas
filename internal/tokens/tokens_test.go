@@ -31,6 +31,27 @@ func TestUpsertAddsANewItem(t *testing.T) {
 	}
 }
 
+func TestUsableIn(t *testing.T) {
+	tests := []struct {
+		name string
+		item Item
+		env  string
+		want bool
+	}{
+		{"same environment", Item{Env: "production"}, "production", true},
+		{"different environment", Item{Env: "sandbox"}, "production", false},
+		{"no recorded environment is assumed usable", Item{}, "production", true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.item.UsableIn(tc.env); got != tc.want {
+				t.Errorf("UsableIn(%q) = %v, want %v", tc.env, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoadMissingFileIsEmptyNotAnError(t *testing.T) {
 	f, err := Load(filepath.Join(t.TempDir(), "nothing.json"))
 	if err != nil {

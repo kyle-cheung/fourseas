@@ -36,6 +36,7 @@ func runLink(ctx context.Context, cfg settings) error {
 		ItemID:      result.ItemID,
 		AccessToken: result.AccessToken,
 		Institution: result.Institution,
+		Env:         cfg.plaid.Env,
 		LinkedAt:    time.Now().UTC(),
 	})
 	if err := tokens.Save(cfg.tokensPath, saved); err != nil {

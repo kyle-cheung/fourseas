@@ -36,22 +36,39 @@ func runSync(ctx context.Context, cfg settings) error {
 	}
 	defer db.Close()
 
+	// One bad card must not stop the others. Report each failure and carry on,
+	// then print whatever was stored.
+	attempted, failed := 0, 0
 	for _, item := range saved.Items {
+		if !item.UsableIn(cfg.plaid.Env) {
+			fmt.Printf("%-28s skipped: linked in %s, and PLAID_ENV is %s\n",
+				label(item), item.Env, cfg.plaid.Env)
+			continue
+		}
+
+		attempted++
 		if err := syncItem(ctx, cfg, db, item); err != nil {
-			return err
+			failed++
+			fmt.Printf("%-28s failed: %v\n", label(item), err)
 		}
 	}
 
+	if attempted > 0 && failed == attempted {
+		return fmt.Errorf("every card failed to sync")
+	}
 	return printNewest(ctx, db, rowsToShow)
+}
+
+// label is the name to show for an item in terminal output.
+func label(item tokens.Item) string {
+	if item.Institution != "" {
+		return item.Institution
+	}
+	return item.ItemID
 }
 
 // syncItem pages through one item's changes and writes them to the store.
 func syncItem(ctx context.Context, cfg settings, db *store.Store, item tokens.Item) error {
-	label := item.Institution
-	if label == "" {
-		label = item.ItemID
-	}
-
 	source, err := plaidprovider.NewSource(cfg.plaid, item.AccessToken, item.ItemID, item.Institution)
 	if err != nil {
 		return err
@@ -59,11 +76,11 @@ func syncItem(ctx context.Context, cfg settings, db *store.Store, item tokens.It
 
 	counts, err := drain(ctx, db, source, item.ItemID)
 	if err != nil {
-		return fmt.Errorf("%s: %w", label, err)
+		return err
 	}
 
 	fmt.Printf("%-28s %d added, %d modified, %d removed\n",
-		label, counts.added, counts.modified, counts.removed)
+		label(item), counts.added, counts.modified, counts.removed)
 	return nil
 }
 

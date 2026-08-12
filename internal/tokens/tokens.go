@@ -12,11 +12,22 @@ import (
 )
 
 // Item is one linked institution.
+//
+// Env records the Plaid environment the token belongs to. A token is only
+// usable in the environment that issued it. Items saved before this field
+// existed have an empty Env.
 type Item struct {
 	ItemID      string    `json:"item_id"`
 	AccessToken string    `json:"access_token"`
 	Institution string    `json:"institution"`
+	Env         string    `json:"env"`
 	LinkedAt    time.Time `json:"linked_at"`
+}
+
+// UsableIn reports whether the item belongs to env. An item with no recorded
+// environment is assumed to be usable, because the only way to know is to try.
+func (i Item) UsableIn(env string) bool {
+	return i.Env == "" || i.Env == env
 }
 
 // File is the whole token file.
