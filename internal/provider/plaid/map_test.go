@@ -3,6 +3,7 @@ package plaid
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	plaidsdk "github.com/plaid/plaid-go/v40/plaid"
 	"github.com/shopspring/decimal"
@@ -251,5 +252,81 @@ func TestToModelRejectsBadAuthorizedDate(t *testing.T) {
 
 	if _, err := toModel(bad, "item-1"); err == nil {
 		t.Fatal("want an error for an unparsable authorized date, got nil")
+	}
+}
+
+func TestToAccounts(t *testing.T) {
+	resp := decodeSample(t)
+	seen := time.Date(2026, 8, 12, 15, 4, 5, 0, time.UTC)
+
+	got := toAccounts(resp.Accounts, "item-1", seen)
+	if len(got) != 2 {
+		t.Fatalf("got %d accounts, want 2", len(got))
+	}
+
+	amex, scotia := got[0], got[1]
+
+	// The official name wins, because it is the one printed on the card.
+	if amex.Name != "American Express Gold Card" {
+		t.Errorf("Name = %q, want the official name", amex.Name)
+	}
+	if scotia.Name != "Scotia Momentum Visa" {
+		t.Errorf("Name = %q, want the short name when there is no official one", scotia.Name)
+	}
+	if amex.Mask != "1234" {
+		t.Errorf("Mask = %q, want %q", amex.Mask, "1234")
+	}
+	if scotia.Mask != "" {
+		t.Errorf("Mask = %q, want empty when Plaid sends null", scotia.Mask)
+	}
+	if amex.Type != "credit" || amex.Subtype != "credit card" {
+		t.Errorf("Type/Subtype = %q/%q, want credit/credit card", amex.Type, amex.Subtype)
+	}
+	if amex.Currency != "USD" || scotia.Currency != "CAD" {
+		t.Errorf("Currency = %q and %q, want USD and CAD", amex.Currency, scotia.Currency)
+	}
+
+	if !amex.BalanceCurrent.Valid || !amex.BalanceCurrent.Decimal.Equal(decimal.RequireFromString("412.55")) {
+		t.Errorf("BalanceCurrent = %+v, want 412.55", amex.BalanceCurrent)
+	}
+	if !amex.BalanceLimit.Valid || !amex.BalanceLimit.Decimal.Equal(decimal.RequireFromString("10000")) {
+		t.Errorf("BalanceLimit = %+v, want 10000", amex.BalanceLimit)
+	}
+	if amex.BalanceAvailable.Valid {
+		t.Errorf("BalanceAvailable = %+v, want null when Plaid sends null", amex.BalanceAvailable)
+	}
+
+	if amex.BalanceUpdatedAt == nil || !amex.BalanceUpdatedAt.Equal(seen) {
+		t.Errorf("BalanceUpdatedAt = %v, want the sync time %v", amex.BalanceUpdatedAt, seen)
+	}
+	if !amex.FirstSeenAt.Equal(seen) || !amex.LastSeenAt.Equal(seen) {
+		t.Errorf("seen times = %v and %v, want both %v", amex.FirstSeenAt, amex.LastSeenAt, seen)
+	}
+
+	if amex.Provider != ProviderName || amex.ItemID != "item-1" || amex.AccountID != "acct-amex" {
+		t.Errorf("identity = %q/%q/%q, want plaid/item-1/acct-amex",
+			amex.Provider, amex.ItemID, amex.AccountID)
+	}
+	// A new account is tracked until the user says otherwise. The upsert keeps
+	// the stored choice, so this value only applies the first time.
+	if !amex.Tracked {
+		t.Error("Tracked = false, want a new account to be tracked")
+	}
+	// A nickname belongs to the user, so a sync must never propose one.
+	if amex.Nickname != "" {
+		t.Errorf("Nickname = %q, want a sync to leave it empty", amex.Nickname)
+	}
+}
+
+// TestToAccountUsesThePlaidBalanceTimeWhenThereIsOne covers Capital One, the
+// one institution that reports when the balance was last updated.
+func TestToAccountUsesThePlaidBalanceTimeWhenThereIsOne(t *testing.T) {
+	resp := decodeSample(t)
+	reported := time.Date(2026, 8, 11, 6, 30, 0, 0, time.UTC)
+	resp.Accounts[0].Balances.SetLastUpdatedDatetime(reported)
+
+	got := toAccounts(resp.Accounts, "item-1", time.Date(2026, 8, 12, 15, 4, 5, 0, time.UTC))
+	if got[0].BalanceUpdatedAt == nil || !got[0].BalanceUpdatedAt.Equal(reported) {
+		t.Errorf("BalanceUpdatedAt = %v, want the time Plaid reported %v", got[0].BalanceUpdatedAt, reported)
 	}
 }

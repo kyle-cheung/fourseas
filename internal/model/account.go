@@ -49,6 +49,14 @@ type Account struct {
 	LastSeenAt  time.Time
 }
 
+// AccountView is one row of the accounts list: an account with the name of the
+// institution it sits behind joined in, for display.
+type AccountView struct {
+	Account
+	// InstitutionName is empty when the institution row is not stored yet.
+	InstitutionName string
+}
+
 // SyncState is where the next incremental sync of one institution starts.
 type SyncState struct {
 	Provider     string

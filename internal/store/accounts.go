@@ -9,10 +9,19 @@ import (
 )
 
 const accountColumns = `
-	provider, account_id, item_id, name, mask, type, subtype, currency,
-	nickname, tracked,
-	balance_current, balance_available, balance_limit, balance_updated_at,
-	first_seen_at, last_seen_at`
+	a.provider, a.account_id, a.item_id, a.name, a.mask, a.type, a.subtype, a.currency,
+	a.nickname, a.tracked,
+	a.balance_current, a.balance_available, a.balance_limit, a.balance_updated_at,
+	a.first_seen_at, a.last_seen_at`
+
+// accountViewSQL reads accounts with the name of the institution they sit
+// behind. The join is a LEFT JOIN so that an account whose institution row is
+// missing is still listed.
+const accountViewSQL = `
+SELECT ` + accountColumns + `, i.institution_name
+FROM accounts a
+LEFT JOIN institutions i
+	ON i.provider = a.provider AND i.item_id = a.item_id`
 
 // upsertAccountSQL keeps what the user owns and takes what the provider owns.
 // A sync knows nothing about nicknames or tracking, so it must not erase them.
@@ -76,61 +85,87 @@ func (s *Store) UpsertAccounts(ctx context.Context, accounts []model.Account) er
 	return tx.Commit()
 }
 
-// Accounts returns every stored account, newest institution activity first.
+// Accounts returns every stored account, grouped by institution.
 func (s *Store) Accounts(ctx context.Context) ([]model.Account, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+accountColumns+` FROM accounts ORDER BY item_id, name, account_id`)
+	views, err := s.AccountViews(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]model.Account, 0, len(views))
+	for _, v := range views {
+		out = append(out, v.Account)
+	}
+	return out, nil
+}
+
+// AccountViews returns every stored account with the name of its institution,
+// ordered the way the list is printed: by institution, then by account.
+func (s *Store) AccountViews(ctx context.Context) ([]model.AccountView, error) {
+	rows, err := s.db.QueryContext(ctx, accountViewSQL+`
+		ORDER BY coalesce(i.institution_name, a.item_id), a.name, a.account_id`)
 	if err != nil {
 		return nil, fmt.Errorf("query accounts: %w", err)
 	}
 	defer rows.Close()
 
-	var out []model.Account
+	var out []model.AccountView
 	for rows.Next() {
-		var (
-			a                                         model.Account
-			itemID, name, mask, kind, subtype         sql.NullString
-			currency, nickname                        sql.NullString
-			current, available, limit                 any
-			balanceUpdatedAt, firstSeenAt, lastSeenAt sql.NullTime
-		)
-		err := rows.Scan(
-			&a.Provider, &a.AccountID, &itemID, &name, &mask, &kind, &subtype, &currency,
-			&nickname, &a.Tracked,
-			&current, &available, &limit, &balanceUpdatedAt,
-			&firstSeenAt, &lastSeenAt,
-		)
+		view, err := scanAccountView(rows)
 		if err != nil {
-			return nil, fmt.Errorf("scan account: %w", err)
+			return nil, err
 		}
-
-		if a.BalanceCurrent, err = toNullDecimal(current); err != nil {
-			return nil, fmt.Errorf("balance_current: %w", err)
-		}
-		if a.BalanceAvailable, err = toNullDecimal(available); err != nil {
-			return nil, fmt.Errorf("balance_available: %w", err)
-		}
-		if a.BalanceLimit, err = toNullDecimal(limit); err != nil {
-			return nil, fmt.Errorf("balance_limit: %w", err)
-		}
-
-		a.ItemID = text(itemID)
-		a.Name = text(name)
-		a.Mask = text(mask)
-		a.Type = text(kind)
-		a.Subtype = text(subtype)
-		a.Currency = text(currency)
-		a.Nickname = text(nickname)
-		a.BalanceUpdatedAt = timePtr(balanceUpdatedAt)
-		if when := timePtr(firstSeenAt); when != nil {
-			a.FirstSeenAt = *when
-		}
-		if when := timePtr(lastSeenAt); when != nil {
-			a.LastSeenAt = *when
-		}
-		out = append(out, a)
+		out = append(out, view)
 	}
 	return out, rows.Err()
+}
+
+// scanAccountView reads one row of accountViewSQL.
+func scanAccountView(rows *sql.Rows) (model.AccountView, error) {
+	var (
+		view                                      model.AccountView
+		itemID, name, mask, kind, subtype         sql.NullString
+		currency, nickname, institutionName       sql.NullString
+		current, available, limit                 any
+		balanceUpdatedAt, firstSeenAt, lastSeenAt sql.NullTime
+	)
+	a := &view.Account
+	err := rows.Scan(
+		&a.Provider, &a.AccountID, &itemID, &name, &mask, &kind, &subtype, &currency,
+		&nickname, &a.Tracked,
+		&current, &available, &limit, &balanceUpdatedAt,
+		&firstSeenAt, &lastSeenAt,
+		&institutionName,
+	)
+	if err != nil {
+		return model.AccountView{}, fmt.Errorf("scan account: %w", err)
+	}
+
+	if a.BalanceCurrent, err = toNullDecimal(current); err != nil {
+		return model.AccountView{}, fmt.Errorf("balance_current: %w", err)
+	}
+	if a.BalanceAvailable, err = toNullDecimal(available); err != nil {
+		return model.AccountView{}, fmt.Errorf("balance_available: %w", err)
+	}
+	if a.BalanceLimit, err = toNullDecimal(limit); err != nil {
+		return model.AccountView{}, fmt.Errorf("balance_limit: %w", err)
+	}
+
+	a.ItemID = text(itemID)
+	a.Name = text(name)
+	a.Mask = text(mask)
+	a.Type = text(kind)
+	a.Subtype = text(subtype)
+	a.Currency = text(currency)
+	a.Nickname = text(nickname)
+	a.BalanceUpdatedAt = timePtr(balanceUpdatedAt)
+	if when := timePtr(firstSeenAt); when != nil {
+		a.FirstSeenAt = *when
+	}
+	if when := timePtr(lastSeenAt); when != nil {
+		a.LastSeenAt = *when
+	}
+	view.InstitutionName = text(institutionName)
+	return view, nil
 }
 
 const upsertInstitutionSQL = `

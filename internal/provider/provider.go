@@ -15,6 +15,9 @@ type Batch struct {
 	Added      []model.Transaction
 	Modified   []model.Transaction
 	RemovedIDs []string
+	// Accounts is the full account list of the institution, with balances.
+	// Plaid sends it with every page, so balances cost no extra call.
+	Accounts   []model.Account
 	NextCursor string
 	HasMore    bool
 }

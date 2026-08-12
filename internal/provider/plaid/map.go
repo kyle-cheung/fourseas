@@ -75,6 +75,75 @@ func category(t plaidsdk.Transaction) string {
 	return strings.Join(t.Category, " > ")
 }
 
+// toAccount converts one Plaid account into the canonical shape.
+//
+// seen is the time of the sync that returned the account. It stamps
+// first_seen_at, last_seen_at, and the balance, so every row of one sync
+// carries the same time.
+//
+// Nickname and Tracked are left at their zero and default values on purpose:
+// they belong to the user, and the store keeps the stored ones.
+func toAccount(a plaidsdk.AccountBase, itemID string, seen time.Time) model.Account {
+	name := a.GetOfficialName()
+	if name == "" {
+		name = a.Name
+	}
+
+	currency := a.Balances.GetIsoCurrencyCode()
+	if currency == "" {
+		currency = a.Balances.GetUnofficialCurrencyCode()
+	}
+
+	// Plaid reports when the balance was last updated for one institution
+	// only (Capital One). For every other institution the sync time is the
+	// best answer available.
+	updated := seen
+	if reported, ok := a.Balances.GetLastUpdatedDatetimeOk(); ok && reported != nil {
+		updated = *reported
+	}
+
+	return model.Account{
+		Provider:  ProviderName,
+		AccountID: a.AccountId,
+		ItemID:    itemID,
+
+		Name:     name,
+		Mask:     a.GetMask(),
+		Type:     string(a.Type),
+		Subtype:  string(a.GetSubtype()),
+		Currency: currency,
+
+		Tracked: true,
+
+		// Plaid sends balances as JSON numbers, so this is where a float
+		// becomes a decimal and stays one.
+		BalanceCurrent:   optionalAmount(a.Balances.GetCurrentOk()),
+		BalanceAvailable: optionalAmount(a.Balances.GetAvailableOk()),
+		BalanceLimit:     optionalAmount(a.Balances.GetLimitOk()),
+		BalanceUpdatedAt: &updated,
+
+		FirstSeenAt: seen,
+		LastSeenAt:  seen,
+	}
+}
+
+// optionalAmount reads a balance Plaid may send as null.
+func optionalAmount(value *float64, ok bool) decimal.NullDecimal {
+	if !ok || value == nil {
+		return decimal.NullDecimal{}
+	}
+	return decimal.NullDecimal{Decimal: decimal.NewFromFloat(*value), Valid: true}
+}
+
+// toAccounts converts the account list one sync response carries.
+func toAccounts(accounts []plaidsdk.AccountBase, itemID string, seen time.Time) []model.Account {
+	out := make([]model.Account, 0, len(accounts))
+	for _, a := range accounts {
+		out = append(out, toAccount(a, itemID, seen))
+	}
+	return out
+}
+
 // toModels converts a list and stops at the first bad row.
 func toModels(txs []plaidsdk.Transaction, itemID string) ([]model.Transaction, error) {
 	out := make([]model.Transaction, 0, len(txs))

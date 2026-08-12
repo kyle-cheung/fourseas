@@ -162,3 +162,45 @@ func assertSameAccount(t *testing.T, got, want model.Account) {
 		t.Errorf("round trip changed the account:\n got %+v\nwant %+v", got, want)
 	}
 }
+
+// TestAccountViewsJoinTheInstitutionName proves the accounts list can show
+// which login an account sits behind.
+func TestAccountViewsJoinTheInstitutionName(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	if err := s.UpsertInstitution(ctx, sampleInstitution()); err != nil {
+		t.Fatalf("upsert institution: %v", err)
+	}
+
+	known := sampleAccount()
+	orphan := sampleAccount()
+	orphan.AccountID = "acct-unknown"
+	orphan.ItemID = "item-not-linked"
+	orphan.Name = "Mystery Card"
+	if err := s.UpsertAccounts(ctx, []model.Account{known, orphan}); err != nil {
+		t.Fatalf("upsert accounts: %v", err)
+	}
+
+	got, err := s.AccountViews(ctx)
+	if err != nil {
+		t.Fatalf("account views: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d views, want 2", len(got))
+	}
+
+	byID := map[string]model.AccountView{}
+	for _, v := range got {
+		byID[v.AccountID] = v
+	}
+	if name := byID["acct-amex"].InstitutionName; name != "American Express" {
+		t.Errorf("InstitutionName = %q, want %q", name, "American Express")
+	}
+	// An account whose institution row is missing is still listed. Losing a
+	// card from the list would be worse than an empty name.
+	if name := byID["acct-unknown"].InstitutionName; name != "" {
+		t.Errorf("InstitutionName = %q, want empty for an unknown institution", name)
+	}
+	assertSameAccount(t, byID["acct-amex"].Account, known)
+}

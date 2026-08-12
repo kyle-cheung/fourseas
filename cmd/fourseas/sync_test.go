@@ -156,3 +156,46 @@ func TestDrainKeepsTheCursorFromTheLastGoodPage(t *testing.T) {
 		t.Errorf("saved cursor = %q, want the cursor from the last good page", saved)
 	}
 }
+
+// TestDrainStoresAccountsAndBalances proves the account list Plaid returns on
+// every sync is written instead of thrown away.
+func TestDrainStoresAccountsAndBalances(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+
+	first := account("acct-1", "500.25")
+	second := account("acct-1", "612.75")
+	source := &fakeSource{pages: []provider.Batch{
+		{Accounts: []model.Account{first}, NextCursor: "c1", HasMore: true},
+		{Accounts: []model.Account{second}, NextCursor: "c2", HasMore: false},
+	}}
+
+	if _, err := drain(ctx, db, source, "item-1"); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+
+	got, err := db.Accounts(ctx)
+	if err != nil {
+		t.Fatalf("accounts: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d accounts, want 1", len(got))
+	}
+	if !got[0].BalanceCurrent.Valid || !got[0].BalanceCurrent.Decimal.Equal(decimal.RequireFromString("612.75")) {
+		t.Errorf("BalanceCurrent = %+v, want the newest balance 612.75", got[0].BalanceCurrent)
+	}
+}
+
+func account(id, balance string) model.Account {
+	return model.Account{
+		Provider:       "fake",
+		AccountID:      id,
+		ItemID:         "item-1",
+		Name:           "Gold Card",
+		Currency:       "USD",
+		Tracked:        true,
+		BalanceCurrent: decimal.NullDecimal{Decimal: decimal.RequireFromString(balance), Valid: true},
+		FirstSeenAt:    time.Now().UTC(),
+		LastSeenAt:     time.Now().UTC(),
+	}
+}
