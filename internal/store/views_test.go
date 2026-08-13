@@ -51,6 +51,38 @@ func TestViewHidesSupersededRows(t *testing.T) {
 	}
 }
 
+// TestViewExposesTheDocumentedColumns holds the names the README tells people
+// to query by. Renaming one is a change to the surface, not a refactor.
+func TestViewExposesTheDocumentedColumns(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	rows, err := s.db.QueryContext(ctx, `SELECT * FROM `+transactionsView+` LIMIT 0`)
+	if err != nil {
+		t.Fatalf("query %s: %v", transactionsView, err)
+	}
+	defer rows.Close()
+
+	names, err := rows.Columns()
+	if err != nil {
+		t.Fatalf("columns: %v", err)
+	}
+	found := make(map[string]bool, len(names))
+	for _, name := range names {
+		found[name] = true
+	}
+
+	for _, want := range []string{
+		"date", "account", "nickname", "institution_name", "description",
+		"amount", "currency", "base_amount", "category", "pending",
+	} {
+		if !found[want] {
+			t.Errorf("%s has no column %q, and the README tells people to query it",
+				transactionsView, want)
+		}
+	}
+}
+
 func TestViewLabelsAnAccountByNicknameThenNameThenID(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)

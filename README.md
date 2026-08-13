@@ -78,9 +78,9 @@ rows, for example to see what a charge looked like while it was pending.
 
 ### Worked examples
 
-Every query below is run by a test in
-[`internal/store/guide_test.go`](internal/store/guide_test.go), so the guide
-cannot go stale without the tests failing.
+The output below comes from real runs against a small database. Your own
+numbers will differ. The column names these queries use are held by a test, so
+a rename to the view fails the build rather than the README.
 
 **One card, since a date.** This is the question this application was built for.
 
