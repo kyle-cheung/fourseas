@@ -170,6 +170,46 @@ func scanAccountView(rows *sql.Rows) (model.AccountView, error) {
 	return view, nil
 }
 
+// UnknownAccountError says no stored account carries the given id.
+type UnknownAccountError struct {
+	AccountID string
+}
+
+func (e *UnknownAccountError) Error() string {
+	return fmt.Sprintf("no stored account has id %q: run `fourseas accounts` to see the stored ids",
+		e.AccountID)
+}
+
+const countAccountSQL = `SELECT count(*) FROM accounts WHERE account_id = ?`
+
+const setNicknameSQL = `UPDATE accounts SET nickname = ? WHERE account_id = ?`
+
+// SetNickname gives one account the name the user calls it by, replacing any
+// nickname it already had. An empty nickname clears it. The provider's own
+// name in the name column is never touched.
+//
+// The id is matched without a provider, because the account id is what the
+// accounts list prints and what the user copies back.
+//
+// It returns an *UnknownAccountError when no account carries the id, so that a
+// mistyped id is never a silent no-op.
+func (s *Store) SetNickname(ctx context.Context, accountID, nickname string) error {
+	// The row is counted first because the number of rows an UPDATE changed is
+	// not reported by every driver, and a missing account must be an error.
+	var found int
+	if err := s.db.QueryRowContext(ctx, countAccountSQL, accountID).Scan(&found); err != nil {
+		return fmt.Errorf("look for account %s: %w", accountID, err)
+	}
+	if found == 0 {
+		return &UnknownAccountError{AccountID: accountID}
+	}
+
+	if _, err := s.db.ExecContext(ctx, setNicknameSQL, textArg(nickname), accountID); err != nil {
+		return fmt.Errorf("set the nickname of account %s: %w", accountID, err)
+	}
+	return nil
+}
+
 const upsertInstitutionSQL = `
 INSERT INTO institutions (
 	provider, item_id, institution_id, institution_name, env, linked_at
