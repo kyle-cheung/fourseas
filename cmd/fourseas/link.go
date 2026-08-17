@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kyle-cheung/fourseas/providence/internal/app"
 	plaidprovider "github.com/kyle-cheung/fourseas/providence/internal/provider/plaid"
 	"github.com/kyle-cheung/fourseas/providence/internal/tokens"
 )
@@ -15,11 +16,7 @@ import (
 // when the item is created, so fourseas asks for everything Plaid permits.
 // Plaid raises a request under 30 days to 30, and requests 90 days when nothing
 // is asked for.
-const (
-	defaultLinkDays = 730
-	minLinkDays     = 30
-	maxLinkDays     = 730
-)
+const defaultLinkDays = app.MaxLinkDays
 
 // runLink links one card and saves its access token. Run it once for each card.
 func runLink(ctx context.Context, cfg settings, options []string) error {
@@ -111,8 +108,8 @@ func parseLinkDays(value string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("--days wants a whole number of days, got %q", value)
 	}
-	if days < minLinkDays || days > maxLinkDays {
-		return 0, fmt.Errorf("--days wants %d to %d days, got %d", minLinkDays, maxLinkDays, days)
+	if days < app.MinLinkDays || days > app.MaxLinkDays {
+		return 0, fmt.Errorf("--days wants %d to %d days, got %d", app.MinLinkDays, app.MaxLinkDays, days)
 	}
 	return days, nil
 }
