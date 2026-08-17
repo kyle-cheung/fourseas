@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -135,9 +136,12 @@ func TestDrainResumesFromTheSavedCursor(t *testing.T) {
 	}
 }
 
-func TestDrainKeepsTheCursorFromTheLastGoodPage(t *testing.T) {
+func TestDrainKeepsTheStartingCursorUntilTheLastPage(t *testing.T) {
 	ctx := context.Background()
 	db := newTestStore(t)
+	if err := db.SetCursor(ctx, "fake", "item-1", "start"); err != nil {
+		t.Fatalf("set cursor: %v", err)
+	}
 
 	source := &fakeSource{
 		pages: []provider.Batch{
@@ -154,8 +158,8 @@ func TestDrainKeepsTheCursorFromTheLastGoodPage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read cursor: %v", err)
 	}
-	if saved != "c1" {
-		t.Errorf("saved cursor = %q, want the cursor from the last good page", saved)
+	if saved != "start" {
+		t.Errorf("saved cursor = %q, want the starting cursor", saved)
 	}
 }
 
@@ -188,9 +192,7 @@ func TestDrainStoresAccountsAndBalances(t *testing.T) {
 	}
 }
 
-// TestDrainLeavesTheRowsAndTheCursorWhenAPageFailsPartWay proves the page is
-// one unit: the rows before the bad one, and the cursor that page carried, are
-// both left as they were.
+// A page is one unit: its row changes and durable cursor land together.
 func TestDrainLeavesTheRowsAndTheCursorWhenAPageFailsPartWay(t *testing.T) {
 	ctx := context.Background()
 	db := newTestStore(t)
@@ -236,8 +238,8 @@ func TestDrainLeavesTheRowsAndTheCursorWhenAPageFailsPartWay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read cursor: %v", err)
 	}
-	if saved != "c1" {
-		t.Errorf("saved cursor = %q, want the cursor of the last whole page", saved)
+	if saved != "" {
+		t.Errorf("saved cursor = %q, want the starting cursor", saved)
 	}
 }
 
@@ -306,6 +308,114 @@ func TestDrainHidesThePendingRowWhenThePostedRowArrivesLater(t *testing.T) {
 	}
 	if len(shown) != 1 || shown[0].ExternalID != "txn-pge-posted" {
 		t.Fatalf("v_transactions shows %d rows %+v, want the posted row only", len(shown), shown)
+	}
+}
+
+// movedError is what a provider returns when its data changed while a page
+// sequence was read.
+func movedError() error {
+	return fmt.Errorf("sync item item-1: %w: plaid TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION",
+		provider.ErrRestartPagination)
+}
+
+func TestDrainRetriesAMutationFromTheStartingCursor(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+
+	if err := db.SetCursor(ctx, "fake", "item-1", "start"); err != nil {
+		t.Fatalf("set cursor: %v", err)
+	}
+
+	source := &fakeSource{
+		pages: []provider.Batch{
+			{Added: []model.Transaction{row("a", "2026-08-01")}, NextCursor: "c1", HasMore: true},
+			{},
+			{Added: []model.Transaction{row("a", "2026-08-01")}, NextCursor: "c1", HasMore: true},
+			{Added: []model.Transaction{row("b", "2026-08-02")}, NextCursor: "c2"},
+		},
+		errs: []error{nil, movedError()},
+	}
+
+	got, err := drain(ctx, db, source, "item-1")
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+
+	want := []string{"start", "c1", "start", "c1"}
+	if len(source.cursors) != len(want) {
+		t.Fatalf("cursors = %v, want %v", source.cursors, want)
+	}
+	for i := range want {
+		if source.cursors[i] != want[i] {
+			t.Errorf("cursor %d = %q, want %q", i, source.cursors[i], want[i])
+		}
+	}
+
+	if got.added != 2 {
+		t.Errorf("added = %d, want 2 from the attempt that finished", got.added)
+	}
+
+	saved, err := db.Cursor(ctx, "fake", "item-1")
+	if err != nil {
+		t.Fatalf("read cursor: %v", err)
+	}
+	if saved != "c2" {
+		t.Errorf("saved cursor = %q, want %q", saved, "c2")
+	}
+}
+
+func TestDrainFallsBackFromALegacyIntermediateCursor(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+
+	if err := db.SetCursor(ctx, "fake", "item-1", "dead-cursor"); err != nil {
+		t.Fatalf("set cursor: %v", err)
+	}
+
+	source := &fakeSource{
+		pages: []provider.Batch{{}, {}, {NextCursor: "fresh"}},
+		errs:  []error{movedError(), movedError()},
+	}
+
+	if _, err := drain(ctx, db, source, "item-1"); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+
+	want := []string{"dead-cursor", "dead-cursor", ""}
+	if len(source.cursors) != len(want) {
+		t.Fatalf("cursors = %v, want %v", source.cursors, want)
+	}
+	for i := range want {
+		if source.cursors[i] != want[i] {
+			t.Errorf("cursor %d = %q, want %q", i, source.cursors[i], want[i])
+		}
+	}
+
+	saved, err := db.Cursor(ctx, "fake", "item-1")
+	if err != nil {
+		t.Fatalf("read cursor: %v", err)
+	}
+	if saved != "fresh" {
+		t.Errorf("saved cursor = %q, want fresh", saved)
+	}
+}
+
+// TestDrainGivesUpWhenTheDataKeepsMoving proves the restart is bounded.
+func TestDrainGivesUpWhenTheDataKeepsMoving(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+
+	errs := make([]error, maxRestarts)
+	for i := range errs {
+		errs[i] = movedError()
+	}
+	source := &fakeSource{errs: errs}
+
+	if _, err := drain(ctx, db, source, "item-1"); err == nil {
+		t.Fatal("drain error = nil, want it to give up")
+	}
+	if source.call != maxRestarts {
+		t.Errorf("made %d attempts, want %d", source.call, maxRestarts)
 	}
 }
 

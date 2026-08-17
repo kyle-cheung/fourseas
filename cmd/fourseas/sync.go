@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,14 @@ import (
 
 // maxPages stops a runaway pagination loop.
 const maxPages = 100
+
+// maxRestarts is how many times one item may start its pages again because the
+// provider's data moved while they were read.
+const maxRestarts = 5
+
+// legacyCursorFailures is how many immediate mutation errors show that a saved
+// cursor came from an unfinished pagination sequence made by an older version.
+const legacyCursorFailures = 2
 
 // rowsToShow is how many rows fourseas prints after a sync.
 const rowsToShow = 10
@@ -154,25 +163,68 @@ type counts struct {
 	removed  int
 }
 
-// drain reads every page the provider offers and commits each one to the store
-// whole: its rows and its cursor land together, so an interrupted run continues
-// from the last whole page instead of starting over or repeating one.
+// drain reads every page of one item. If the provider changes the data during
+// pagination, the next attempt uses the cursor that started the sequence.
 func drain(ctx context.Context, db *store.Store, source provider.Provider, itemID string) (counts, error) {
-	var total counts
-
 	cursor, err := db.Cursor(ctx, source.Name(), itemID)
 	if err != nil {
-		return total, err
+		return counts{}, err
 	}
+
+	immediateFailures := 0
+	for attempt := 1; ; attempt++ {
+		total, pagesRead, err := drainFrom(ctx, db, source, itemID, cursor)
+		if err == nil {
+			return total, nil
+		}
+		if !errors.Is(err, provider.ErrRestartPagination) {
+			return total, err
+		}
+		if attempt >= maxRestarts {
+			return total, fmt.Errorf("the data kept changing over %d attempts: %w", attempt, err)
+		}
+
+		if pagesRead == 0 && cursor != "" {
+			immediateFailures++
+		} else {
+			immediateFailures = 0
+		}
+
+		if immediateFailures >= legacyCursorFailures {
+			fmt.Printf("  %s: the saved cursor came from an unfinished page sequence. Reading the whole history once.\n", itemID)
+			cursor = ""
+			immediateFailures = 0
+			if err := db.ClearCursor(ctx, source.Name(), itemID); err != nil {
+				return total, err
+			}
+		} else {
+			fmt.Printf("  %s: the data changed while paging. Retrying from the starting cursor (attempt %d of %d).\n",
+				itemID, attempt+1, maxRestarts)
+		}
+	}
+}
+
+// drainFrom applies each page, but it keeps the starting cursor as the durable
+// checkpoint until the final page completes.
+func drainFrom(ctx context.Context, db *store.Store, source provider.Provider, itemID, cursor string) (counts, int, error) {
+	var total counts
+	startCursor := cursor
+	pagesRead := 0
 
 	for page := 0; page < maxPages; page++ {
 		batch, err := source.Sync(ctx, cursor)
 		if err != nil {
-			return total, err
+			return total, pagesRead, err
 		}
-		if err := db.ApplyPage(ctx, toPage(source.Name(), itemID, batch)); err != nil {
-			return total, err
+
+		checkpoint := batch.NextCursor
+		if batch.HasMore {
+			checkpoint = startCursor
 		}
+		if err := db.ApplyPage(ctx, toPage(source.Name(), itemID, batch, checkpoint)); err != nil {
+			return total, pagesRead, err
+		}
+		pagesRead++
 
 		total.added += len(batch.Added)
 		total.modified += len(batch.Modified)
@@ -180,15 +232,15 @@ func drain(ctx context.Context, db *store.Store, source provider.Provider, itemI
 		cursor = batch.NextCursor
 
 		if !batch.HasMore {
-			return total, nil
+			return total, pagesRead, nil
 		}
 	}
 
-	return total, fmt.Errorf("stopped after %d pages: the provider still reports more", maxPages)
+	return total, pagesRead, fmt.Errorf("stopped after %d pages: the provider still reports more", maxPages)
 }
 
 // toPage turns one provider batch into the unit the store commits.
-func toPage(providerName, itemID string, batch provider.Batch) store.Page {
+func toPage(providerName, itemID string, batch provider.Batch, cursor string) store.Page {
 	return store.Page{
 		Provider:   providerName,
 		ItemID:     itemID,
@@ -196,7 +248,7 @@ func toPage(providerName, itemID string, batch provider.Batch) store.Page {
 		Modified:   batch.Modified,
 		RemovedIDs: batch.RemovedIDs,
 		Accounts:   batch.Accounts,
-		Cursor:     batch.NextCursor,
+		Cursor:     cursor,
 	}
 }
 

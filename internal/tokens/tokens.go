@@ -71,6 +71,29 @@ func (f File) Upsert(item Item) File {
 	return out
 }
 
+// Delete returns a new File without the item. It does not change f. An item
+// that is not there is not an error: the wanted state is already the state.
+func (f File) Delete(itemID string) File {
+	out := File{Items: make([]Item, 0, len(f.Items))}
+	for _, existing := range f.Items {
+		if existing.ItemID == itemID {
+			continue
+		}
+		out.Items = append(out.Items, existing)
+	}
+	return out
+}
+
+// Find returns the item with this id.
+func (f File) Find(itemID string) (Item, bool) {
+	for _, item := range f.Items {
+		if item.ItemID == itemID {
+			return item, true
+		}
+	}
+	return Item{}, false
+}
+
 // Save writes the file with owner-only permissions.
 func Save(path string, f File) error {
 	if dir := filepath.Dir(path); dir != "." {

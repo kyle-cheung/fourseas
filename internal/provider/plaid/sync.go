@@ -10,7 +10,7 @@ import (
 )
 
 // pageSize is how many transactions to ask for in one call.
-const pageSize = 100
+const pageSize = 500
 
 // Source reads transactions for one linked item. It satisfies provider.Provider.
 type Source struct {

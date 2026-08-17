@@ -6,9 +6,9 @@ import (
 	"github.com/kyle-cheung/fourseas/providence/internal/model"
 )
 
-// Page is one page of provider changes: the rows it holds and the cursor the
-// next page starts from. It is a store type, not a provider type, so that the
-// store still depends on nothing above it.
+// Page is one page of provider changes: the rows it holds and the durable
+// cursor the next sync starts from. It is a store type, not a provider type, so
+// the store still depends on nothing above it.
 type Page struct {
 	Provider   string
 	ItemID     string
@@ -17,15 +17,14 @@ type Page struct {
 	RemovedIDs []string
 	// Accounts is the account list the same response carried, with balances.
 	Accounts []model.Account
-	// Cursor is where the next sync of this institution starts.
+	// Cursor stays at the start of a page sequence until its final page lands.
 	Cursor string
 }
 
 // ApplyPage writes one page and its cursor in one database transaction.
 //
-// Rows and cursor move together. A failure part way through leaves both as
-// they were, so the next run asks for the same page again: no page is lost,
-// and none is written two times.
+// Rows and cursor move together. A failure part way through leaves both as they
+// were.
 func (s *Store) ApplyPage(ctx context.Context, page Page) error {
 	return s.inTx(ctx, func(dbtx execer) error {
 		if err := upsertTransactions(ctx, dbtx, page.Added); err != nil {

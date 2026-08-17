@@ -30,13 +30,18 @@ type LinkResult struct {
 // It creates a link token, serves the Link widget on localhost, opens the
 // browser, waits for the user to sign in to the bank, then exchanges the
 // public token. The server stops before Link returns.
-func Link(ctx context.Context, cfg Config) (LinkResult, error) {
+//
+// days is how much transaction history to request for the new item. Plaid fixes
+// this amount when the item is created and does not permit a later change, so
+// it can only be chosen here. A value that is not positive leaves the choice to
+// Plaid, which requests 90 days.
+func Link(ctx context.Context, cfg Config, days int) (LinkResult, error) {
 	client, err := newClient(cfg)
 	if err != nil {
 		return LinkResult{}, err
 	}
 
-	linkToken, err := createLinkToken(ctx, client, cfg)
+	linkToken, err := createLinkToken(ctx, client, cfg, days)
 	if err != nil {
 		return LinkResult{}, err
 	}
@@ -87,7 +92,22 @@ func Link(ctx context.Context, cfg Config) (LinkResult, error) {
 	}
 }
 
-func createLinkToken(ctx context.Context, client *plaidsdk.APIClient, cfg Config) (string, error) {
+func createLinkToken(ctx context.Context, client *plaidsdk.APIClient, cfg Config, days int) (string, error) {
+	req := linkTokenRequest(cfg, days)
+
+	resp, httpResp, err := client.PlaidApi.LinkTokenCreate(ctx).
+		LinkTokenCreateRequest(*req).Execute()
+	if err != nil {
+		return "", apiError("create link token", err, httpResp)
+	}
+	return resp.LinkToken, nil
+}
+
+// linkTokenRequest builds the link token call. transactions.days_requested is
+// the only place the amount of history can be set: this call initializes the
+// transactions product, and Plaid then refuses to change the amount for the
+// life of the item.
+func linkTokenRequest(cfg Config, days int) *plaidsdk.LinkTokenCreateRequest {
 	user := plaidsdk.NewLinkTokenCreateRequestUser("fourseas-local-user")
 	req := plaidsdk.NewLinkTokenCreateRequest(
 		"Fourseas",
@@ -99,13 +119,12 @@ func createLinkToken(ctx context.Context, client *plaidsdk.APIClient, cfg Config
 	if cfg.RedirectURI != "" {
 		req.SetRedirectUri(cfg.RedirectURI)
 	}
-
-	resp, httpResp, err := client.PlaidApi.LinkTokenCreate(ctx).
-		LinkTokenCreateRequest(*req).Execute()
-	if err != nil {
-		return "", apiError("create link token", err, httpResp)
+	if days > 0 {
+		transactions := plaidsdk.NewLinkTokenTransactions()
+		transactions.SetDaysRequested(int32(days))
+		req.SetTransactions(*transactions)
 	}
-	return resp.LinkToken, nil
+	return req
 }
 
 func exchangeHandler(client *plaidsdk.APIClient, results chan<- LinkResult, failures chan<- error) http.HandlerFunc {

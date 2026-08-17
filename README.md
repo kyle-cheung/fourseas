@@ -27,14 +27,81 @@ Plaid needs setup in its dashboard before `link` works. See
 | ------- | ------------ |
 | `fourseas link` | Link one institution through Plaid Link in the browser |
 | `fourseas sync` | Fetch what changed from Plaid, refresh FX rates, and print the newest rows |
+| `fourseas link --days <n>` | Link with `n` days of history. 30 to 730, 730 by default |
 | `fourseas sync --fx` | Refresh FX rates only |
 | `fourseas accounts` | List accounts with ids, balances, and nicknames |
 | `fourseas accounts nickname <id> "<name>"` | Name an account. An empty name clears it |
 | `fourseas show` | Print the newest stored rows without calling Plaid |
+| `fourseas unlink <item-id>` | Remove one institution at Plaid, then delete its local token and data. Asks first |
+| `fourseas unlink --list` | List the linked institutions with the item ids `unlink` takes |
 | `fourseas reset` | Drop all data and build the schema again. Asks first |
 
 Settings come from `.env`. The database is `data/fourseas.duckdb` unless you set
 `FOURSEAS_DB_PATH`.
+
+### How much history you get
+
+`fourseas link` requests **730 days**, the most Plaid permits. Plaid requests 90
+days when nothing is asked for, so fourseas asks at link time.
+
+**The amount is fixed when the card is linked.** Plaid sets it while it
+initializes the transactions product, and it cannot be changed for the life of
+the item. `fourseas sync` cannot ask for more history later. To get more history
+for a card that is already linked, you must remove the item and link the card
+again:
+
+```bash
+bin/fourseas unlink --list          # find the item id
+bin/fourseas unlink <item-id>       # remove it at Plaid and delete its rows
+bin/fourseas link                   # link the card again, with a new window
+```
+
+Use `--days` to request less:
+
+```bash
+bin/fourseas link --days 365   # one year
+bin/fourseas link --days 90    # Plaid's own default
+```
+
+The value must be 30 to 730. Plaid raises anything under 30 days to 30, so
+fourseas refuses a smaller number instead of promising something it will not
+get. A bad value fails before the browser opens.
+
+Two more points:
+
+- **The first sync takes longer with more history.** Plaid polls the bank for
+  the whole window before the rows are ready. The transactions arrive through
+  the cursor, so run `fourseas sync` again a short time later if the first run
+  looks short.
+- **The bank sets the real limit.** 730 days is what Plaid permits, not what
+  every institution holds. You get what the bank provides.
+
+### Remove a card
+
+```bash
+bin/fourseas unlink --list       # the linked institutions, with their item ids
+bin/fourseas unlink <item-id>    # asks first. Add --yes to skip the question
+```
+
+`unlink` calls Plaid `/item/remove` first, then deletes that item's
+transactions, accounts, cursor, and institution row in one database
+transaction, and its access token last. A failure at any step leaves the
+earlier state, so the command can be run again.
+
+Two reasons to use it:
+
+- **Plaid bills each live item, each month.** Deleting the token on its own
+  leaves the item alive at Plaid, and removes the only way to reach it.
+- **A re-link is the only way to get more history.** The history window is
+  fixed when the item is created. `unlink` then `link` builds a new one.
+
+An access token only works in the environment that issued it, so `unlink`
+refuses an item that was linked in another `PLAID_ENV` and says which one to
+set. Without that the removal would fail at Plaid and leave the item billed.
+
+The transactions go too. A re-link gives new transaction ids to the same
+charges, so rows that were kept would count every charge twice. There is no
+undo, and none is needed: a new link fetches the data again.
 
 ### Refresh FX rates
 
@@ -240,8 +307,9 @@ ORDER BY currency;
 Use `fourseas sync --fx` to refresh missing rates, or group by `currency` and
 read one currency at a time.
 
-**About 90 days of history.** That is Plaid's default window for a newly linked
-Item. More history needs an explicit historical request.
+**History is fixed at link time.** `fourseas link` requests 730 days, and Plaid
+cannot change the amount afterwards. A card linked with a smaller `--days` keeps
+that window until you remove the item and link it again.
 
 **Losing the file forces a full sync again.** The cursor lives with the data, so
 the two can never disagree. Deleting the file fetches everything again, which is

@@ -6,9 +6,21 @@ package provider
 
 import (
 	"context"
+	"errors"
 
 	"github.com/kyle-cheung/fourseas/providence/internal/model"
 )
+
+// ErrRestartPagination says the provider's data moved while a page sequence was
+// being read, so the cursors of that sequence are no longer usable. The caller
+// must start the item again from the cursor the last whole sync ended on.
+//
+// A provider reports this by wrapping the error it returns from Sync.
+var ErrRestartPagination = errors.New("pagination must start again from the last whole sync")
+
+// ErrItemGone says the provider does not hold the item any more. A caller that
+// wanted the item removed has what it asked for and can carry on.
+var ErrItemGone = errors.New("the provider does not have this item")
 
 // Batch is one page of incremental changes from a provider.
 type Batch struct {

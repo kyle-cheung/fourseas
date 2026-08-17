@@ -79,8 +79,36 @@ after moving to production, they are left over from a sandbox run.
 
 ## Limits worth knowing
 
-**About 90 days of history.** That is Plaid's default window for a newly linked
-Item. More history needs an explicit historical request.
+**History is chosen once, at link time.** `fourseas link` sends
+`transactions.days_requested` in the link token request and asks for 730 days,
+the most Plaid permits. Plaid would request 90 days if nothing were asked for.
+
+Plaid fixes this amount while it initializes the transactions product, and it
+cannot be raised for the life of the item: `days_requested` in a later
+`/transactions/sync` call is ignored. To get more history for a card that is
+already linked, run `fourseas unlink <item-id>` and link the card again. Use
+`fourseas link --days <n>` (30 to 730) to ask for less.
+
+**Plaid bills every live item, each month.** The Transactions product is charged
+for each item you hold, whether or not you sync it. Deleting the local access
+token does not stop that charge: the item stays alive at Plaid, and the token
+that could have removed it is gone.
+
+`fourseas unlink <item-id>` calls `/item/remove` first, and only then deletes the
+local rows and the token. That is what stops the cost. `fourseas unlink --list`
+shows the item ids. An item Plaid already dropped answers `ITEM_NOT_FOUND`, which
+unlink treats as a success and carries on with the local delete.
+
+**A long first sync can be interrupted by the bank.** When the transaction data
+of an item changes while the pages are read, Plaid fails the call with
+`TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION`. The intermediate cursors from
+that sequence cannot be used. This is common on a first sync of 730 days,
+because the bank keeps posting while the pages arrive.
+
+`fourseas sync` keeps the cursor that started the sequence until the final page
+lands. If the data changes, it retries from that cursor, up to five times. Rows
+read two times are written by their id, so nothing is doubled. It also detects
+an intermediate cursor saved by an older version and performs one full sync.
 
 **One cursor for each institution, not for each account.** `/transactions/sync`
 works on an access token, and one access token covers every account in that
