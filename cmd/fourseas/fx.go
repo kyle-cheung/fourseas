@@ -37,7 +37,10 @@ func syncFX(ctx context.Context, db fxStore, source fxSource, now time.Time) ([]
 
 	currencies, err := db.RequiredFXCurrencies(ctx, model.BaseCurrency)
 	if err != nil {
-		return nil, fmt.Errorf("find required FX currencies: %w", contextError(ctx, err))
+		if cause := context.Cause(ctx); cause != nil {
+			return nil, fmt.Errorf("find required FX currencies: %w", cause)
+		}
+		return nil, fmt.Errorf("find required FX currencies: %w", err)
 	}
 
 	utcNow := now.UTC()
@@ -56,11 +59,13 @@ func syncFX(ctx context.Context, db fxStore, source fxSource, now time.Time) ([]
 
 		rates, err := source.Rates(ctx, required.Currency, model.BaseCurrency, start, today)
 		if err != nil {
-			result.Err = fmt.Errorf("fetch %s FX rates: %w", required.Currency, contextError(ctx, err))
-			results = append(results, result)
-			if isContextError(result.Err) {
+			if cause := context.Cause(ctx); cause != nil {
+				result.Err = fmt.Errorf("fetch %s FX rates: %w", required.Currency, cause)
+				results = append(results, result)
 				return results, result.Err
 			}
+			result.Err = fmt.Errorf("fetch %s FX rates: %w", required.Currency, err)
+			results = append(results, result)
 			continue
 		}
 		if err := context.Cause(ctx); err != nil {
@@ -70,11 +75,13 @@ func syncFX(ctx context.Context, db fxStore, source fxSource, now time.Time) ([]
 		}
 
 		if err := db.UpsertFXRates(ctx, rates); err != nil {
-			result.Err = fmt.Errorf("store %s FX rates: %w", required.Currency, contextError(ctx, err))
-			results = append(results, result)
-			if isContextError(result.Err) {
+			if cause := context.Cause(ctx); cause != nil {
+				result.Err = fmt.Errorf("store %s FX rates: %w", required.Currency, cause)
+				results = append(results, result)
 				return results, result.Err
 			}
+			result.Err = fmt.Errorf("store %s FX rates: %w", required.Currency, err)
+			results = append(results, result)
 			continue
 		}
 		result.Rows = len(rates)
@@ -108,7 +115,7 @@ func runFXPhase(
 	}
 
 	if syncErr != nil {
-		if isContextError(syncErr) {
+		if context.Cause(ctx) != nil {
 			return syncErr
 		}
 		fmt.Fprintf(out, "FX warning: %v\n", syncErr)
@@ -131,15 +138,4 @@ func newFXSource() fxSource {
 		&http.Client{Timeout: 30 * time.Second},
 		frankfurterBaseURL,
 	)
-}
-
-func contextError(ctx context.Context, err error) error {
-	if cause := context.Cause(ctx); cause != nil {
-		return cause
-	}
-	return err
-}
-
-func isContextError(err error) bool {
-	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }

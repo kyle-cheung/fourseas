@@ -44,9 +44,10 @@ type fxRateCall struct {
 }
 
 type fakeFXSource struct {
-	rates map[string][]model.FXRate
-	errs  map[string]error
-	calls []fxRateCall
+	rates  map[string][]model.FXRate
+	errs   map[string]error
+	onCall func(string)
+	calls  []fxRateCall
 }
 
 func (f *fakeFXSource) Rates(
@@ -62,6 +63,9 @@ func (f *fakeFXSource) Rates(
 		from:         from,
 		to:           to,
 	})
+	if f.onCall != nil {
+		f.onCall(currency)
+	}
 	return f.rates[currency], f.errs[currency]
 }
 
@@ -272,67 +276,125 @@ func TestRunFXPhaseAlwaysReturnsContextErrors(t *testing.T) {
 			for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
 				ctx, cancel := context.WithCancelCause(context.Background())
 				cancel(cause)
+				store := &fakeFXStore{}
 
 				err := runFXPhase(
-					ctx, &fakeFXStore{}, &fakeFXSource{},
+					ctx, store, &fakeFXSource{},
 					time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC), test.strict, &bytes.Buffer{},
 				)
 				if !errors.Is(err, cause) {
 					t.Errorf("runFXPhase() error = %v, want errors.Is(_, %v)", err, cause)
+				}
+				if store.requiredCalls != 0 {
+					t.Errorf("RequiredFXCurrencies() calls = %d, want 0", store.requiredCalls)
 				}
 			}
 		})
 	}
 }
 
-func TestSyncFXStopsAndPreservesOperationContextErrors(t *testing.T) {
+func TestRunFXPhaseTreatsRequestLocalDeadlineAsCurrencyFailure(t *testing.T) {
 	for _, test := range []struct {
-		name       string
-		sourceErr  error
-		upsertErr  error
-		wantErr    error
-		wantUpsert int
+		name    string
+		strict  bool
+		wantErr bool
 	}{
-		{
-			name:       "fetch canceled",
-			sourceErr:  context.Canceled,
-			wantErr:    context.Canceled,
-			wantUpsert: 0,
-		},
-		{
-			name:       "upsert deadline exceeded",
-			upsertErr:  context.DeadlineExceeded,
-			wantErr:    context.DeadlineExceeded,
-			wantUpsert: 1,
-		},
+		{name: "normal mode", strict: false, wantErr: false},
+		{name: "strict FX-only mode", strict: true, wantErr: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			store := &fakeFXStore{
-				currencies: []model.FXCurrency{
-					{Currency: "CAD", OldestTransactionDate: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)},
-					{Currency: "EUR", OldestTransactionDate: time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC)},
-				},
-				upsertErrs: []error{test.upsertErr},
-			}
+			store := &fakeFXStore{currencies: []model.FXCurrency{
+				{Currency: "CAD", OldestTransactionDate: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)},
+				{Currency: "EUR", OldestTransactionDate: time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC)},
+			}}
 			source := &fakeFXSource{
-				rates: map[string][]model.FXRate{"CAD": {fxRate("CAD", "2026-08-17")}},
-				errs:  map[string]error{"CAD": test.sourceErr},
+				rates: map[string][]model.FXRate{"EUR": {fxRate("EUR", "2026-08-17")}},
+				errs:  map[string]error{"CAD": context.DeadlineExceeded},
 			}
+			var out bytes.Buffer
 
-			_, err := syncFX(
+			err := runFXPhase(
 				context.Background(), store, source,
-				time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC), test.strict, &out,
 			)
-			if !errors.Is(err, test.wantErr) {
-				t.Fatalf("syncFX() error = %v, want errors.Is(_, %v)", err, test.wantErr)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("runFXPhase() error = %v, wantErr %v", err, test.wantErr)
 			}
-			if len(source.calls) != 1 {
-				t.Errorf("Rates() calls = %d, want 1", len(source.calls))
+			if test.strict && !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("runFXPhase() error = %v, want errors.Is(_, DeadlineExceeded)", err)
 			}
-			if len(store.upsertCalls) != test.wantUpsert {
-				t.Errorf("UpsertFXRates() calls = %d, want %d", len(store.upsertCalls), test.wantUpsert)
+			if len(source.calls) != 2 || source.calls[0].currency != "CAD" || source.calls[1].currency != "EUR" {
+				t.Errorf("Rates() calls = %+v, want CAD followed by EUR", source.calls)
+			}
+			if len(store.upsertCalls) != 1 || store.upsertCalls[0][0].Currency != "EUR" {
+				t.Errorf("upserts = %+v, want only EUR", store.upsertCalls)
+			}
+			if !strings.Contains(out.String(), "CAD") || !strings.Contains(out.String(), "warning") {
+				t.Errorf("output = %q, want a CAD warning", out.String())
 			}
 		})
+	}
+}
+
+func TestSyncFXContinuesAfterRequestLocalUpsertContextError(t *testing.T) {
+	store := &fakeFXStore{
+		currencies: []model.FXCurrency{
+			{Currency: "CAD", OldestTransactionDate: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)},
+			{Currency: "EUR", OldestTransactionDate: time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC)},
+		},
+		upsertErrs: []error{context.Canceled},
+	}
+	source := &fakeFXSource{rates: map[string][]model.FXRate{
+		"CAD": {fxRate("CAD", "2026-08-17")},
+		"EUR": {fxRate("EUR", "2026-08-17")},
+	}}
+
+	results, err := syncFX(
+		context.Background(), store, source,
+		time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatalf("syncFX() error = %v", err)
+	}
+	if len(source.calls) != 2 || len(store.upsertCalls) != 2 {
+		t.Errorf("Rates() calls = %d, upserts = %d; want 2 of each", len(source.calls), len(store.upsertCalls))
+	}
+	if len(results) != 2 || !errors.Is(results[0].Err, context.Canceled) || results[1].Err != nil {
+		t.Errorf("results = %+v, want local CAD cancellation followed by EUR success", results)
+	}
+}
+
+func TestSyncFXStopsWhenCallerContextIsCanceledDuringRequest(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	store := &fakeFXStore{currencies: []model.FXCurrency{
+		{Currency: "CAD", OldestTransactionDate: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)},
+		{Currency: "EUR", OldestTransactionDate: time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC)},
+	}}
+	source := &fakeFXSource{
+		rates: map[string][]model.FXRate{"CAD": {fxRate("CAD", "2026-08-17")}},
+		onCall: func(string) {
+			cancel(context.DeadlineExceeded)
+		},
+	}
+
+	_, err := syncFX(
+		ctx, store, source,
+		time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC),
+	)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("syncFX() error = %v, want caller deadline", err)
+	}
+	if len(source.calls) != 1 {
+		t.Errorf("Rates() calls = %d, want 1", len(source.calls))
+	}
+	if len(store.upsertCalls) != 0 {
+		t.Errorf("UpsertFXRates() calls = %d, want 0", len(store.upsertCalls))
+	}
+	if len(source.calls) > 0 && source.calls[0].currency != "CAD" {
+		t.Errorf("first currency = %q, want CAD", source.calls[0].currency)
+	}
+	if context.Cause(ctx) != context.DeadlineExceeded {
+		t.Errorf("context cause = %v, want DeadlineExceeded", context.Cause(ctx))
 	}
 }
 
