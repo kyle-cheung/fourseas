@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +27,38 @@ type fakeService struct {
 	// accountsCtx is the context of the last Accounts call, so a test can see
 	// whether the model cancelled it.
 	accountsCtx context.Context
+
+	// linkItem is what a successful Link returns, and linkErr replaces it.
+	linkItem app.LinkedItem
+	linkErr  error
+	// linkDays holds the history length of every Link call, in order.
+	linkDays []int
+	// links holds every item a successful Link saved, as App.Link saves the
+	// token before any sync runs.
+	links map[string]bool
+
+	// syncCalls holds the item id of every SyncItem call, in order.
+	syncCalls []string
+	// syncErrs is consumed one entry per SyncItem call. A nil entry, or an
+	// empty list, is a success that returns syncAccounts.
+	syncErrs     []error
+	syncAccounts []model.AccountView
+
+	// nicknameCalls holds the account id and the name of every SetNickname
+	// call, in order.
+	nicknameCalls [][2]string
+	// nicknameErrs is consumed one entry per SetNickname call.
+	nicknameErrs []error
+}
+
+// takeError takes the first prepared error off a queue.
+func takeError(queue *[]error) error {
+	if len(*queue) == 0 {
+		return nil
+	}
+	err := (*queue)[0]
+	*queue = (*queue)[1:]
+	return err
 }
 
 func (f *fakeService) Accounts(ctx context.Context, itemID string) (app.AccountData, error) {
@@ -33,19 +67,34 @@ func (f *fakeService) Accounts(ctx context.Context, itemID string) (app.AccountD
 	return f.data, f.accountsErr
 }
 
-func (f *fakeService) Link(context.Context, int, app.Progress) (app.LinkedItem, error) {
-	return app.LinkedItem{}, nil
+func (f *fakeService) Link(_ context.Context, days int, _ app.Progress) (app.LinkedItem, error) {
+	f.linkDays = append(f.linkDays, days)
+	if f.linkErr != nil {
+		return app.LinkedItem{}, f.linkErr
+	}
+	if f.links == nil {
+		f.links = map[string]bool{}
+	}
+	f.links[f.linkItem.ItemID] = true
+	return f.linkItem, nil
 }
 
-func (f *fakeService) SyncItem(context.Context, string, app.Progress) ([]model.AccountView, error) {
-	return nil, nil
+func (f *fakeService) SyncItem(_ context.Context, itemID string, _ app.Progress) ([]model.AccountView, error) {
+	f.syncCalls = append(f.syncCalls, itemID)
+	if err := takeError(&f.syncErrs); err != nil {
+		return nil, err
+	}
+	return f.syncAccounts, nil
 }
 
 func (f *fakeService) SyncAll(context.Context, app.Progress) ([]app.SyncResult, error) {
 	return nil, nil
 }
 
-func (f *fakeService) SetNickname(context.Context, string, string) error { return nil }
+func (f *fakeService) SetNickname(_ context.Context, accountID, nickname string) error {
+	f.nicknameCalls = append(f.nicknameCalls, [2]string{accountID, nickname})
+	return takeError(&f.nicknameErrs)
+}
 
 func (f *fakeService) UnlinkPreview(context.Context, string) (app.UnlinkData, error) {
 	return app.UnlinkData{}, nil
@@ -427,3 +476,283 @@ func TestSyncStatusNeverCallsFailureASuccess(t *testing.T) {
 }
 
 func timePtr(t time.Time) *time.Time { return &t }
+
+// runOperation executes one operation command, applies its result, and returns
+// whatever command the result started next.
+func runOperation(t *testing.T, m *Model, cmd tea.Cmd) tea.Cmd {
+	t.Helper()
+	if cmd == nil {
+		t.Fatal("expected an operation command, got none")
+	}
+	msg := cmd()
+	if _, ok := msg.(operationMsg); !ok {
+		t.Fatalf("command returned %T, want operationMsg", msg)
+	}
+	_, next := m.Update(msg)
+	return next
+}
+
+// typeText sends one key press per character.
+func typeText(t *testing.T, m *Model, text string) {
+	t.Helper()
+	for _, r := range text {
+		press(t, m, runeKey(r))
+	}
+}
+
+// openHistory walks the main menu to the history length choice.
+func openHistory(t *testing.T, m *Model) {
+	t.Helper()
+	press(t, m, codeKey(tea.KeyDown))
+	press(t, m, codeKey(tea.KeyEnter))
+	if m.screen != historyScreen {
+		t.Fatalf("screen after choosing Add account = %v, want historyScreen", m.screen)
+	}
+}
+
+// addUntilFirstNickname runs the add flow from the main menu to the first
+// nickname prompt.
+func addUntilFirstNickname(t *testing.T, m *Model) {
+	t.Helper()
+	openHistory(t, m)
+	cmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // Link
+	runOperation(t, m, cmd)                                       // SyncItem
+	if m.screen != nicknameScreen {
+		t.Fatalf("screen after the first sync = %v, want nicknameScreen", m.screen)
+	}
+}
+
+func TestAddFlowLinksSyncsNamesAndMarksNewAccounts(t *testing.T) {
+	first := account("acc-1", "", "Everyday Checking", "1234", "Chase", 10)
+	second := account("acc-2", "", "Sapphire", "9876", "Chase", 20)
+	fake := &fakeService{
+		data:         app.AccountData{Accounts: []model.AccountView{first, second}},
+		linkItem:     app.LinkedItem{ItemID: "item-new", Institution: "Chase"},
+		syncAccounts: []model.AccountView{first, second},
+	}
+	m := ready(t, fake)
+
+	openHistory(t, m)
+	choices := m.View().Content
+	for _, want := range []string{"730 days", "365 days", "90 days", "Custom"} {
+		if !strings.Contains(choices, want) {
+			t.Errorf("history view = %q, want it to contain %q", choices, want)
+		}
+	}
+	if m.history.cursor != 0 {
+		t.Errorf("history cursor = %d, want the longest history as the default", m.history.cursor)
+	}
+
+	cmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // Link
+	if len(fake.linkDays) != 1 || fake.linkDays[0] != 730 {
+		t.Fatalf("Link days = %v, want one call for 730 days", fake.linkDays)
+	}
+	if m.linked.ItemID != "item-new" || m.linked.Institution != "Chase" {
+		t.Fatalf("linked item = %+v, want the returned metadata", m.linked)
+	}
+
+	cmd = runOperation(t, m, cmd) // SyncItem
+	if len(fake.syncCalls) != 1 || fake.syncCalls[0] != "item-new" {
+		t.Fatalf("SyncItem calls = %v, want one call for item-new", fake.syncCalls)
+	}
+	if m.screen != nicknameScreen || m.nicknameIndex != 0 {
+		t.Fatalf("screen = %v, index = %d, want the first nickname prompt", m.screen, m.nicknameIndex)
+	}
+
+	typeText(t, m, "Travel card")
+	cmd = runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // SetNickname
+	if m.screen != nicknameScreen || m.nicknameIndex != 1 {
+		t.Fatalf("screen = %v, index = %d, want the second nickname prompt", m.screen, m.nicknameIndex)
+	}
+	if got := m.prompt.input.Value(); got != "" {
+		t.Errorf("second prompt value = %q, want an empty prompt", got)
+	}
+
+	cmd = press(t, m, codeKey(tea.KeyEsc)) // skip the second name
+	runOperation(t, m, cmd)                // the closing account refresh
+
+	want := [][2]string{{"acc-1", "Travel card"}}
+	if len(fake.nicknameCalls) != 1 || fake.nicknameCalls[0] != want[0] {
+		t.Fatalf("SetNickname calls = %v, want %v", fake.nicknameCalls, want)
+	}
+	if m.screen != accountsScreen {
+		t.Fatalf("screen after the last name = %v, want accountsScreen", m.screen)
+	}
+	for _, id := range []string{"acc-1", "acc-2"} {
+		if !m.accounts.newItems[id] {
+			t.Errorf("account %q is not marked as new", id)
+		}
+	}
+	if got := strings.Count(m.View().Content, "NEW"); got != 2 {
+		t.Errorf("account list has %d NEW marks, want 2:\n%s", got, m.View().Content)
+	}
+}
+
+func TestCustomHistoryKeepsAnUnusableValueOnThePrompt(t *testing.T) {
+	fake := &fakeService{linkItem: app.LinkedItem{ItemID: "item-new", Institution: "Chase"}}
+	m := ready(t, fake)
+
+	openHistory(t, m)
+	for range historyDays { // move to the free choice
+		press(t, m, codeKey(tea.KeyDown))
+	}
+	press(t, m, codeKey(tea.KeyEnter))
+	if m.screen != customDaysScreen {
+		t.Fatalf("screen after choosing Custom = %v, want customDaysScreen", m.screen)
+	}
+
+	for _, value := range []string{"ten", strconv.Itoa(app.MinLinkDays - 1), strconv.Itoa(app.MaxLinkDays + 1)} {
+		m.prompt.input.SetValue(value)
+		if cmd := press(t, m, codeKey(tea.KeyEnter)); cmd != nil {
+			t.Fatalf("value %q started an operation", value)
+		}
+		if m.screen != customDaysScreen {
+			t.Fatalf("screen after the value %q = %v, want the prompt to stay open", value, m.screen)
+		}
+		if m.prompt.err == nil {
+			t.Fatalf("value %q left no reason on the prompt", value)
+		}
+		if body := m.View().Content; !strings.Contains(body, "30") || !strings.Contains(body, "730") {
+			t.Errorf("prompt view = %q, want the accepted range", body)
+		}
+	}
+	if len(fake.linkDays) != 0 {
+		t.Fatalf("Link days = %v, want no link for an unusable value", fake.linkDays)
+	}
+
+	m.prompt.input.SetValue(" 120 ")
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+	if len(fake.linkDays) != 1 || fake.linkDays[0] != 120 {
+		t.Fatalf("Link days = %v, want one call for 120 days", fake.linkDays)
+	}
+}
+
+func TestAddFlowEscSkipsNickname(t *testing.T) {
+	only := account("acc-1", "", "Everyday Checking", "1234", "Chase", 10)
+	fake := &fakeService{
+		data:         app.AccountData{Accounts: []model.AccountView{only}},
+		linkItem:     app.LinkedItem{ItemID: "item-new", Institution: "Chase"},
+		syncAccounts: []model.AccountView{only},
+	}
+	m := ready(t, fake)
+	addUntilFirstNickname(t, m)
+
+	typeText(t, m, "Never saved")
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEsc)))
+
+	if len(fake.nicknameCalls) != 0 {
+		t.Errorf("SetNickname calls = %v, want none after esc", fake.nicknameCalls)
+	}
+	if m.screen != accountsScreen {
+		t.Fatalf("screen after skipping the only name = %v, want accountsScreen", m.screen)
+	}
+	if !m.accounts.newItems["acc-1"] {
+		t.Error("a skipped account is not marked as new")
+	}
+}
+
+func TestAddFlowSyncFailureKeepsLinkedItemForRetry(t *testing.T) {
+	only := account("acc-1", "", "Everyday Checking", "1234", "Chase", 10)
+	fake := &fakeService{
+		data:         app.AccountData{Accounts: []model.AccountView{only}},
+		linkItem:     app.LinkedItem{ItemID: "item-new", Institution: "Chase"},
+		syncErrs:     []error{fmt.Errorf("plaid: %w", app.ErrProductNotReady)},
+		syncAccounts: []model.AccountView{only},
+	}
+	m := ready(t, fake)
+
+	openHistory(t, m)
+	cmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // Link
+	cmd = runOperation(t, m, cmd)                                 // the failing SyncItem
+	if cmd != nil {
+		t.Fatal("the failed sync started another command; the interface must not retry on its own")
+	}
+	if m.screen != recoveryScreen {
+		t.Fatalf("screen after a failed sync = %v, want recoveryScreen", m.screen)
+	}
+
+	body := m.View().Content
+	for _, want := range []string{"Retry", "Main", "The bank is still preparing the data"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("recovery view = %q, want it to contain %q", body, want)
+		}
+	}
+	if m.linked.ItemID != "item-new" {
+		t.Errorf("linked item = %+v, want item-new kept for the retry", m.linked)
+	}
+	if !fake.links["item-new"] {
+		t.Error("the fake no longer holds item-new as a saved link")
+	}
+	if len(fake.syncCalls) != 1 {
+		t.Fatalf("SyncItem calls = %v, want no automatic retry", fake.syncCalls)
+	}
+
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // Retry
+	if len(fake.syncCalls) != 2 || fake.syncCalls[1] != "item-new" {
+		t.Fatalf("SyncItem calls = %v, want a second call for item-new", fake.syncCalls)
+	}
+	if m.screen != nicknameScreen {
+		t.Fatalf("screen after a successful retry = %v, want nicknameScreen", m.screen)
+	}
+}
+
+func TestLinkCancellationReturnsToHistoryChoice(t *testing.T) {
+	fake := &fakeService{
+		linkItem: app.LinkedItem{ItemID: "item-new", Institution: "Chase"},
+		linkErr:  context.Canceled,
+	}
+	m := ready(t, fake)
+
+	openHistory(t, m)
+	cmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+	if cmd != nil {
+		t.Fatal("a cancelled link started another command")
+	}
+	if m.screen != historyScreen {
+		t.Fatalf("screen after a cancelled link = %v, want historyScreen", m.screen)
+	}
+	if m.linked != (app.LinkedItem{}) {
+		t.Errorf("linked item = %+v, want it cleared", m.linked)
+	}
+	if body := m.View().Content; strings.Contains(strings.ToLower(body), "went wrong") {
+		t.Errorf("view = %q, want cancellation not shown as a failure", body)
+	}
+}
+
+func TestNicknameFailureKeepsPromptOpen(t *testing.T) {
+	only := account("acc-1", "", "Everyday Checking", "1234", "Chase", 10)
+	fake := &fakeService{
+		data:         app.AccountData{Accounts: []model.AccountView{only}},
+		linkItem:     app.LinkedItem{ItemID: "item-new", Institution: "Chase"},
+		syncAccounts: []model.AccountView{only},
+		nicknameErrs: []error{errors.New("the account is unknown")},
+	}
+	m := ready(t, fake)
+	addUntilFirstNickname(t, m)
+
+	typeText(t, m, "Travel card")
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+
+	if m.screen != nicknameScreen {
+		t.Fatalf("screen after a failed name = %v, want the prompt to stay open", m.screen)
+	}
+	if m.nicknameIndex != 0 {
+		t.Errorf("index after a failed name = %d, want the same account", m.nicknameIndex)
+	}
+	if got := m.prompt.input.Value(); got != "Travel card" {
+		t.Errorf("prompt value = %q, want the typed text kept", got)
+	}
+	if !m.prompt.input.Focused() {
+		t.Error("the prompt lost focus after a failed name")
+	}
+	if body := m.View().Content; !strings.Contains(body, "the account is unknown") {
+		t.Errorf("view = %q, want the failure under the prompt", body)
+	}
+
+	// A second attempt succeeds and moves on.
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+	want := [][2]string{{"acc-1", "Travel card"}, {"acc-1", "Travel card"}}
+	if len(fake.nicknameCalls) != 2 || fake.nicknameCalls[1] != want[1] {
+		t.Fatalf("SetNickname calls = %v, want %v", fake.nicknameCalls, want)
+	}
+}

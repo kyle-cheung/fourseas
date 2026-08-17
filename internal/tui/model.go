@@ -9,6 +9,8 @@ package tui
 import (
 	"context"
 	"errors"
+	"strconv"
+	"strings"
 	"time"
 
 	"charm.land/bubbles/v2/textinput"
@@ -111,6 +113,9 @@ type operation uint8
 
 const (
 	accountsOperation operation = iota
+	linkOperation
+	syncItemOperation
+	nicknameOperation
 )
 
 // progressMsg is one step of a long operation, sent from the operation's own
@@ -125,12 +130,16 @@ type operationMsg struct {
 }
 
 // start marks the model busy and returns the command that runs the operation.
-// Only one operation runs at a time, so one cancel function is enough.
+// Only one operation runs at a time, so one cancel function is enough. The
+// recovery state of the previous operation is dropped here, so a failure never
+// offers the retry of an older operation. An operation that can be run again
+// sets its own retry after this call.
 func (m *Model) start(kind operation, run func(context.Context) (any, error)) tea.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.returnTo = m.screen
 	m.cancel = cancel
 	m.running = true
+	m.recovery = recoveryState{}
 	return func() tea.Msg {
 		value, err := run(ctx)
 		return operationMsg{kind: kind, value: value, err: err}
@@ -155,6 +164,33 @@ func (m *Model) Init() tea.Cmd {
 func (m *Model) refreshAccounts() tea.Cmd {
 	return m.start(accountsOperation, func(ctx context.Context) (any, error) {
 		return m.app.Accounts(ctx, "")
+	})
+}
+
+// startLink opens the provider's link flow for one history length. A failure
+// can be run again with the same length.
+func (m *Model) startLink(days int) tea.Cmd {
+	cmd := m.start(linkOperation, func(ctx context.Context) (any, error) {
+		return m.app.Link(ctx, days, m.report)
+	})
+	m.recovery.retry = func() tea.Cmd { return m.startLink(days) }
+	return cmd
+}
+
+// startSyncItem fetches the first data of one linked institution. The item is
+// already saved, so a failure can be run again with the same item.
+func (m *Model) startSyncItem(itemID string) tea.Cmd {
+	cmd := m.start(syncItemOperation, func(ctx context.Context) (any, error) {
+		return m.app.SyncItem(ctx, itemID, m.report)
+	})
+	m.recovery.retry = func() tea.Cmd { return m.startSyncItem(itemID) }
+	return cmd
+}
+
+// startNickname gives one account the name the user typed.
+func (m *Model) startNickname(accountID, nickname string) tea.Cmd {
+	return m.start(nicknameOperation, func(ctx context.Context) (any, error) {
+		return nil, m.app.SetNickname(ctx, accountID, nickname)
 	})
 }
 
@@ -184,13 +220,14 @@ func (m *Model) finish(msg operationMsg) tea.Cmd {
 
 	// A cancellation is what the user asked for, not a failure.
 	if errors.Is(msg.err, context.Canceled) {
+		if msg.kind == linkOperation {
+			m.linked = app.LinkedItem{}
+		}
 		m.screen = m.returnTo
 		return nil
 	}
 	if msg.err != nil {
-		m.recovery = recoveryState{message: displayError(msg.err)}
-		m.screen = recoveryScreen
-		return nil
+		return m.failed(msg)
 	}
 
 	switch msg.kind {
@@ -199,7 +236,32 @@ func (m *Model) finish(msg operationMsg) tea.Cmd {
 		m.accounts.rows = data.Accounts
 		m.accounts.cursor = clampCursor(m.accounts.cursor, len(data.Accounts))
 		m.syncStates = data.States
+	case linkOperation:
+		// Only the non-secret metadata of the new item is kept.
+		item, _ := msg.value.(app.LinkedItem)
+		m.linked = app.LinkedItem{ItemID: item.ItemID, Institution: item.Institution}
+		return m.startSyncItem(m.linked.ItemID)
+	case syncItemOperation:
+		accounts, _ := msg.value.([]model.AccountView)
+		return m.askNicknames(accounts)
+	case nicknameOperation:
+		return m.nextNickname()
 	}
+	return nil
+}
+
+// failed shows one failure. A name the store refused stays on its own prompt,
+// because the user can correct the text and try again. Every other failure
+// opens the recovery screen, which offers the retry the operation left.
+func (m *Model) failed(msg operationMsg) tea.Cmd {
+	if msg.kind == nicknameOperation {
+		m.prompt.err = msg.err
+		m.screen = nicknameScreen
+		return m.prompt.input.Focus()
+	}
+	m.recovery.message = displayError(msg.err)
+	m.recovery.cursor = 0
+	m.screen = recoveryScreen
 	return nil
 }
 
@@ -230,6 +292,11 @@ func (m *Model) key(msg tea.KeyPressMsg) tea.Cmd {
 func (m *Model) promptKey(msg tea.KeyPressMsg) tea.Cmd {
 	switch msg.Code {
 	case tea.KeyEsc:
+		// Esc on a queued name skips that one account instead of leaving the
+		// add flow. Every other prompt closes and returns one screen.
+		if m.screen == nicknameScreen && m.naming() {
+			return m.nextNickname()
+		}
 		m.closePrompt()
 		return nil
 	case tea.KeyEnter:
@@ -242,7 +309,72 @@ func (m *Model) promptKey(msg tea.KeyPressMsg) tea.Cmd {
 
 // submitPrompt runs the action behind the active prompt. Each flow that opens
 // a prompt adds its own case.
-func (m *Model) submitPrompt() tea.Cmd { return nil }
+func (m *Model) submitPrompt() tea.Cmd {
+	switch m.screen {
+	case customDaysScreen:
+		return m.submitCustomDays()
+	case nicknameScreen:
+		if m.naming() {
+			return m.startNickname(m.nicknameQueue[m.nicknameIndex].AccountID, m.prompt.input.Value())
+		}
+	}
+	return nil
+}
+
+// submitCustomDays reads a free history length. A value the provider would
+// refuse keeps the prompt open with the reason, so the user can correct it.
+func (m *Model) submitCustomDays() tea.Cmd {
+	days, err := strconv.Atoi(strings.TrimSpace(m.prompt.input.Value()))
+	if err != nil || days < app.MinLinkDays || days > app.MaxLinkDays {
+		m.prompt.err = errHistoryRange
+		return nil
+	}
+	m.prompt.input.Blur()
+	m.prompt = promptState{}
+	m.screen = historyScreen
+	return m.startLink(days)
+}
+
+// naming says whether the add flow is still offering a name for a queued
+// account. A rename from the account detail leaves the queue empty.
+func (m *Model) naming() bool { return m.nicknameIndex < len(m.nicknameQueue) }
+
+// askNicknames offers a name for every account the first sync returned, one
+// account at a time.
+func (m *Model) askNicknames(accounts []model.AccountView) tea.Cmd {
+	m.nicknameQueue = accounts
+	m.nicknameIndex = 0
+	return m.askNickname()
+}
+
+// askNickname opens the prompt of the account at the current index, or closes
+// the add flow once every account has been offered a name.
+func (m *Model) askNickname() tea.Cmd {
+	if !m.naming() {
+		return m.finishAdd()
+	}
+	return m.openPrompt(nicknameScreen, accountName(m.nicknameQueue[m.nicknameIndex]), "")
+}
+
+// nextNickname moves to the next account. A saved name and a skipped name both
+// advance by one.
+func (m *Model) nextNickname() tea.Cmd {
+	m.nicknameIndex++
+	return m.askNickname()
+}
+
+// finishAdd marks every account of the finished add flow as new for the rest
+// of this session, and shows the account list with the fresh data.
+func (m *Model) finishAdd() tea.Cmd {
+	m.prompt.input.Blur()
+	m.prompt = promptState{}
+	for _, view := range m.nicknameQueue {
+		m.accounts.newItems[view.AccountID] = true
+	}
+	m.nicknameQueue, m.nicknameIndex = nil, 0
+	m.screen = accountsScreen
+	return m.refreshAccounts()
+}
 
 // menuKey moves the cursor of a list, opens the selection, and leaves.
 func (m *Model) menuKey(msg tea.KeyPressMsg) tea.Cmd {
@@ -270,6 +402,10 @@ func (m *Model) moveCursor(delta int) {
 		m.main.cursor = clampCursor(m.main.cursor+delta, len(mainChoices))
 	case accountsScreen:
 		m.accounts.cursor = clampCursor(m.accounts.cursor+delta, len(m.accounts.rows))
+	case historyScreen:
+		m.history.cursor = clampCursor(m.history.cursor+delta, len(historyChoices))
+	case recoveryScreen:
+		m.recovery.cursor = clampCursor(m.recovery.cursor+delta, len(m.recovery.choices()))
 	}
 }
 
@@ -277,17 +413,41 @@ func (m *Model) moveCursor(delta int) {
 func (m *Model) activate() tea.Cmd {
 	switch m.screen {
 	case mainScreen:
-		if m.main.cursor == choiceAccounts {
+		switch m.main.cursor {
+		case choiceAccounts:
 			m.accounts.cursor = clampCursor(m.accounts.cursor, len(m.accounts.rows))
 			m.screen = accountsScreen
+		case choiceAdd:
+			// The longest history is the default, because Plaid fixes the
+			// amount when the item is created.
+			m.history = menuState{}
+			m.screen = historyScreen
 		}
 	case accountsScreen:
 		if m.accounts.cursor < len(m.accounts.rows) {
 			m.detail = detailState{account: m.accounts.rows[m.accounts.cursor]}
 			m.screen = detailScreen
 		}
+	case historyScreen:
+		if m.history.cursor >= len(historyDays) {
+			return m.openPrompt(customDaysScreen, "days", "")
+		}
+		return m.startLink(historyDays[m.history.cursor])
+	case recoveryScreen:
+		return m.recoverWith(m.recovery.choices()[m.recovery.cursor])
 	}
 	return nil
+}
+
+// recoverWith runs the way out of a failure the user chose. Main always leaves
+// the failure behind with a fresh account list, because the failed operation
+// may still have changed the stored data.
+func (m *Model) recoverWith(choice string) tea.Cmd {
+	if choice == recoveryRetry && m.recovery.retry != nil {
+		return m.recovery.retry()
+	}
+	m.screen = mainScreen
+	return m.refreshAccounts()
 }
 
 // openPrompt shows one text prompt with the value it starts from.

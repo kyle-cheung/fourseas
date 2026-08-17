@@ -23,6 +23,44 @@ const (
 	choiceSync
 )
 
+// historyDays is how much history each fixed choice of the history screen asks
+// for. The first is the most a link may ask for, and is the default.
+var historyDays = []int{app.MaxLinkDays, 365, 90}
+
+// historyChoices is the order of the history screen, with the free choice
+// last.
+var historyChoices = historyMenu(historyDays)
+
+// historyMenu writes one choice for every fixed history length, then the free
+// choice.
+func historyMenu(days []int) []string {
+	choices := make([]string, 0, len(days)+1)
+	for _, count := range days {
+		choices = append(choices, strconv.Itoa(count)+" days")
+	}
+	return append(choices, "Custom")
+}
+
+// errHistoryRange is what a history length the provider would refuse shows on
+// the prompt.
+var errHistoryRange = errors.New("history must be a whole number of days from " +
+	strconv.Itoa(app.MinLinkDays) + " through " + strconv.Itoa(app.MaxLinkDays))
+
+// The ways out of a failure.
+const (
+	recoveryRetry = "Retry"
+	recoveryMain  = "Main"
+)
+
+// choices are the ways out of this failure. Retry is offered only when the
+// failed operation can be run again as it was.
+func (r recoveryState) choices() []string {
+	if r.retry != nil {
+		return []string{recoveryRetry, recoveryMain}
+	}
+	return []string{recoveryMain}
+}
+
 // defaultWidth is the width used before the first resize message arrives.
 const defaultWidth = 80
 
@@ -50,6 +88,8 @@ func (m *Model) body() string {
 		lines = m.accountLines()
 	case detailScreen:
 		lines = m.detailLines()
+	case historyScreen:
+		lines = m.historyLines()
 	case customDaysScreen, nicknameScreen:
 		lines = m.promptLines()
 	case recoveryScreen:
@@ -125,10 +165,23 @@ func (m *Model) promptLines() []string {
 	return append(lines, "", footer("enter accept · esc cancel"))
 }
 
-// recoveryLines shows what failed.
+// historyLines is how much history a new link may ask for.
+func (m *Model) historyLines() []string {
+	lines := []string{header(promptTitle(historyScreen)), ""}
+	for i, choice := range historyChoices {
+		lines = append(lines, mark(i == m.history.cursor)+choice)
+	}
+	return append(lines, "", footer("↑/↓ move · enter select · esc back"))
+}
+
+// recoveryLines shows what failed and what the user can do about it.
 func (m *Model) recoveryLines() []string {
-	return []string{header("Something went wrong"), "", blankMark + m.recovery.message,
-		"", footer("esc back · ctrl+c quit")}
+	lines := []string{header("Something went wrong"), "",
+		truncate(blankMark+m.recovery.message, m.contentWidth()), ""}
+	for i, choice := range m.recovery.choices() {
+		lines = append(lines, mark(i == m.recovery.cursor)+choice)
+	}
+	return append(lines, "", footer("↑/↓ move · enter select · esc back · ctrl+c quit"))
 }
 
 // promptTitle names the prompt of one screen.
