@@ -6,7 +6,7 @@ Status: approved design
 ## Purpose
 
 After a transaction sync, fetch the exchange rates that are necessary to show
-all transaction amounts in USD. Store the rates once and calculate converted
+all transaction amounts in USD. Store the rates locally and calculate converted
 amounts in `v_transactions`.
 
 The raw transaction remains the provider record. It keeps its original
@@ -49,10 +49,10 @@ does not publish on a weekend, holiday, or the current date.
 ### Currency normalization
 
 Store `transactions.currency`, `fx_rates.currency`, and
-`fx_rates.base_currency` as uppercase ISO codes. Normalize at both store write
-boundaries so a provider-specific mapper cannot bypass the rule. Compare the
-base currency with `upper(currency)` in the work query. Validate Frankfurter
-response currencies after normalizing them to uppercase.
+`fx_rates.base_currency` as uppercase ISO codes. Add one
+`model.NormalizeCurrency` function and use it at both store write boundaries
+and in the Frankfurter client. This prevents a provider-specific mapper from
+bypassing the rule and keeps normalization logic in one place.
 
 ### Derived values
 
@@ -130,6 +130,8 @@ The client:
 - rejects non-success HTTP status codes;
 - rejects malformed JSON, invalid dates, non-positive rates, and response rows
   with unexpected currencies;
+- accepts a response row dated before the requested start date, because
+  Frankfurter can include the last published rate before that boundary;
 - allows the HTTP base URL and client to be replaced in tests.
 
 No production code or test depends on a Frankfurter API key.
@@ -139,7 +141,6 @@ No production code or test depends on a Frankfurter API key.
 Add focused store operations that:
 
 - list each non-USD transaction currency and its oldest transaction date;
-- read the oldest and newest stored rate date for one currency pair;
 - upsert one returned range in a database transaction;
 - read rates through `v_transactions`.
 
@@ -152,27 +153,17 @@ shape.
 ### FX sync service
 
 Keep orchestration separate from the Frankfurter HTTP client and the store.
-For each required currency, the FX sync service makes one range request through
-the current UTC date. Choose the start date as follows:
-
-- If no rates are stored, start at the oldest transaction date.
-- If the oldest transaction is before the oldest stored rate, start at the
-  oldest transaction date.
-- Otherwise, start at the newest stored rate date.
-
-If the selected start date is after today, clamp it to today. This lets a
-future-dated transaction acquire the latest available rate for its ASOF
-lookup without sending an inverted date range to Frankfurter.
-
-Starting again at the newest stored rate refreshes the latest published value.
-The idempotent upsert replaces that row and inserts any newer rows. A newly
-discovered older transaction causes a complete backfill for the expanded
-span. Do not detect individual missing calendar dates.
+For each required currency, the FX sync service makes one range request from
+its oldest transaction date through the current UTC date. If the oldest
+transaction is future-dated, clamp the start to today. The idempotent upsert
+replaces stored rows and inserts new rows. A full refresh is small for this
+personal CLI, includes revised rates, and needs no missing-date or stored-bound
+logic.
 
 Process currencies sequentially. The expected data set is small, and
 parallel requests add no useful behavior in this build.
 
-The sync result reports inserted or updated row counts for each currency and
+The sync result reports stored response row counts for each currency and
 collects currency-specific failures.
 
 ## Command behavior
@@ -213,11 +204,10 @@ Normal sync:
 2. Sync each usable Plaid item with the existing page and cursor rules.
 3. Stop with the existing error if every attempted Plaid item failed.
 4. Query stored transactions for non-USD currencies and their oldest dates.
-5. For each currency, choose one start date from its transaction and stored
-   rate bounds.
-6. Fetch through the current UTC date and atomically upsert the response.
-7. Print FX warnings without failing the Plaid sync.
-8. Print the newest transactions.
+5. Fetch each currency from its oldest transaction date through the current
+   UTC date and atomically upsert the response.
+6. Print FX warnings without failing the Plaid sync.
+7. Print the newest transactions.
 
 FX-only sync starts at step 4. It returns an error after processing all
 currencies when one or more currencies failed.
@@ -242,8 +232,8 @@ No test uses the network.
 - Frankfurter client tests use an HTTP test server for the request path,
   query parameters, decimal parsing, bad status, bad JSON, and invalid rows.
 - Store tests cover exact `DECIMAL(18,8)` round trips and idempotent upserts.
-- Range-bound tests cover an empty rate table, an incremental refresh, and a
-  newly discovered older transaction.
+- Orchestration tests prove each currency is refreshed from its oldest
+  transaction date and a future start is clamped to today.
 - View tests cover USD rate `1`, an exact-date conversion, a weekend or holiday
   conversion from the prior rate, a future-dated conversion, and null values
   for a transaction older than the first rate.
@@ -263,9 +253,11 @@ Update the README to:
 
 - document `fourseas sync --fx`;
 - add `fx_rates` to the schema table list;
-- explain that `v_transactions.base_amount` is computed from daily rates;
+- explain that `v_transactions.base_amount` is computed from published rates;
 - replace the current statement that cross-currency totals do not work;
-- retain the warning that missing rates produce null converted values.
+- retain the warning that missing rates produce null converted values;
+- state that upgrading a version 1 database requires `fourseas reset` and a
+  full sync.
 
 ## Out of scope
 
