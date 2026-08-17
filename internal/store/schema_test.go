@@ -23,7 +23,7 @@ func TestSchemaIsCreatedFromNothingAndStamped(t *testing.T) {
 		t.Errorf("version = %d, want %d", version, SchemaVersion)
 	}
 
-	for _, table := range []string{"institutions", "accounts", "transactions", "sync_state", "schema_version"} {
+	for _, table := range []string{"institutions", "accounts", "transactions", "fx_rates", "sync_state", "schema_version"} {
 		var n int
 		if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM `+table).Scan(&n); err != nil {
 			t.Errorf("table %s is missing: %v", table, err)

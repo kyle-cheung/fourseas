@@ -83,3 +83,15 @@ func TestWithBaseDoesNotMutateItsInput(t *testing.T) {
 		t.Errorf("WithBase changed its input: %+v", in)
 	}
 }
+
+func TestNormalizeCurrency(t *testing.T) {
+	for input, want := range map[string]string{
+		"cad":   "CAD",
+		" Usd ": "USD",
+		"":      "",
+	} {
+		if got := NormalizeCurrency(input); got != want {
+			t.Errorf("NormalizeCurrency(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
