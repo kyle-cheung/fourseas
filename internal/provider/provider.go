@@ -18,6 +18,10 @@ import (
 // A provider reports this by wrapping the error it returns from Sync.
 var ErrRestartPagination = errors.New("pagination must start again from the last whole sync")
 
+// ErrItemGone says the provider does not hold the item any more. A caller that
+// wanted the item removed has what it asked for and can carry on.
+var ErrItemGone = errors.New("the provider does not have this item")
+
 // Batch is one page of incremental changes from a provider.
 type Batch struct {
 	Added      []model.Transaction

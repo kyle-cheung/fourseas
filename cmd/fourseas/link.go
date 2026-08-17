@@ -95,7 +95,7 @@ func parseLinkOptions(options []string) (int, error) {
 			}
 			days = parsed
 		default:
-			return 0, fmt.Errorf("unknown link options: %q", options)
+			return 0, fmt.Errorf("unknown option %q: `fourseas link` takes --days <n> or nothing", option)
 		}
 	}
 

@@ -78,6 +78,40 @@ func TestSetStatusKeepsTheCursor(t *testing.T) {
 	}
 }
 
+func TestClearCursorKeepsTheLastSyncOutcome(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	if err := s.SetCursor(ctx, "plaid", "item-1", "legacy-cursor"); err != nil {
+		t.Fatalf("set cursor: %v", err)
+	}
+	if err := s.SetStatus(ctx, "plaid", "item-1", "previous result"); err != nil {
+		t.Fatalf("set status: %v", err)
+	}
+	before, err := s.SyncStates(ctx)
+	if err != nil {
+		t.Fatalf("sync states before clear: %v", err)
+	}
+
+	if err := s.ClearCursor(ctx, "plaid", "item-1"); err != nil {
+		t.Fatalf("clear cursor: %v", err)
+	}
+	after, err := s.SyncStates(ctx)
+	if err != nil {
+		t.Fatalf("sync states after clear: %v", err)
+	}
+
+	if after[0].Cursor != "" {
+		t.Errorf("cursor = %q, want empty", after[0].Cursor)
+	}
+	if after[0].LastStatus != before[0].LastStatus {
+		t.Errorf("status = %q, want %q", after[0].LastStatus, before[0].LastStatus)
+	}
+	if !after[0].LastSyncedAt.Equal(*before[0].LastSyncedAt) {
+		t.Errorf("last sync = %v, want %v", after[0].LastSyncedAt, before[0].LastSyncedAt)
+	}
+}
+
 // TestSetStatusOnAnItemThatNeverSynced covers a failure on the very first run,
 // when there is no cursor row yet.
 func TestSetStatusOnAnItemThatNeverSynced(t *testing.T) {

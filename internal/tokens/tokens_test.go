@@ -31,6 +31,28 @@ func TestUpsertAddsANewItem(t *testing.T) {
 	}
 }
 
+func TestDeleteRemovesOneItemAndLeavesTheOriginalAlone(t *testing.T) {
+	original := File{Items: []Item{
+		{ItemID: "item-scotia", AccessToken: "scotia"},
+		{ItemID: "item-amex", AccessToken: "amex"},
+	}}
+
+	updated := original.Delete("item-scotia")
+
+	if len(updated.Items) != 1 {
+		t.Fatalf("got %d items, want 1", len(updated.Items))
+	}
+	if updated.Items[0].ItemID != "item-amex" {
+		t.Errorf("kept %q, want item-amex", updated.Items[0].ItemID)
+	}
+	if len(original.Items) != 2 {
+		t.Error("Delete changed the original file")
+	}
+	if unchanged := original.Delete("item-nothing"); len(unchanged.Items) != 2 {
+		t.Errorf("unknown delete kept %d items, want 2", len(unchanged.Items))
+	}
+}
+
 func TestUsableIn(t *testing.T) {
 	tests := []struct {
 		name string

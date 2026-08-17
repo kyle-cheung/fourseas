@@ -22,9 +22,9 @@ const maxPages = 100
 // provider's data moved while they were read.
 const maxRestarts = 5
 
-// restartDelay is how long to wait before the second attempt, and it grows with
-// each one after that. Tests set it to zero.
-var restartDelay = 3 * time.Second
+// legacyCursorFailures is how many immediate mutation errors show that a saved
+// cursor came from an unfinished pagination sequence made by an older version.
+const legacyCursorFailures = 2
 
 // rowsToShow is how many rows fourseas prints after a sync.
 const rowsToShow = 10
@@ -163,26 +163,17 @@ type counts struct {
 	removed  int
 }
 
-// drain reads every page of one item, and starts the item again when the
-// provider says the data moved under the page sequence.
-//
-// A restart is normal on a first sync of a long history: the bank keeps posting
-// while the pages are read. Rows already written are not a problem, because a
-// row is written by its id, so reading a page again writes the same row again.
-//
-// The restart goes back to the beginning of the available history, not to the
-// stored cursor. A mutation kills every cursor of the sequence it interrupted,
-// and a stored cursor can be one of them: the store keeps the cursor of the last
-// whole page, which is a page of a sequence that may never have finished. Only
-// the beginning is certain, and reading from it costs calls, not correctness.
+// drain reads every page of one item. If the provider changes the data during
+// pagination, the next attempt uses the cursor that started the sequence.
 func drain(ctx context.Context, db *store.Store, source provider.Provider, itemID string) (counts, error) {
 	cursor, err := db.Cursor(ctx, source.Name(), itemID)
 	if err != nil {
 		return counts{}, err
 	}
 
+	immediateFailures := 0
 	for attempt := 1; ; attempt++ {
-		total, err := drainFrom(ctx, db, source, itemID, cursor)
+		total, pagesRead, err := drainFrom(ctx, db, source, itemID, cursor)
 		if err == nil {
 			return total, nil
 		}
@@ -193,58 +184,47 @@ func drain(ctx context.Context, db *store.Store, source provider.Provider, itemI
 			return total, fmt.Errorf("the data kept changing over %d attempts: %w", attempt, err)
 		}
 
-		if cursor != "" {
-			fmt.Printf("  %s: the data changed while paging, and the stored cursor is dead.\n"+
-				"  Reading the whole history again. Stored rows are written by id, so none is doubled.\n", itemID)
-			cursor = ""
+		if pagesRead == 0 && cursor != "" {
+			immediateFailures++
 		} else {
-			fmt.Printf("  %s: the data changed again while paging. Attempt %d of %d.\n",
+			immediateFailures = 0
+		}
+
+		if immediateFailures >= legacyCursorFailures {
+			fmt.Printf("  %s: the saved cursor came from an unfinished page sequence. Reading the whole history once.\n", itemID)
+			cursor = ""
+			immediateFailures = 0
+			if err := db.ClearCursor(ctx, source.Name(), itemID); err != nil {
+				return total, err
+			}
+		} else {
+			fmt.Printf("  %s: the data changed while paging. Retrying from the starting cursor (attempt %d of %d).\n",
 				itemID, attempt+1, maxRestarts)
 		}
-
-		// Leave the store on the cursor the next read starts from, so an
-		// interrupted retry does not resume from the dead one.
-		if err := db.SetCursor(ctx, source.Name(), itemID, cursor); err != nil {
-			return total, err
-		}
-		if err := wait(ctx, restartDelay*time.Duration(attempt)); err != nil {
-			return total, err
-		}
 	}
 }
 
-// wait sleeps, and gives up early if the run is cancelled. A bank that is still
-// posting needs a moment, and asking again at once tends to race again.
-func wait(ctx context.Context, d time.Duration) error {
-	if d <= 0 {
-		return nil
-	}
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-
-	select {
-	case <-timer.C:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-// drainFrom reads every page the provider offers from cursor, and commits each
-// one to the store whole: its rows and its cursor land together, so an
-// interrupted run continues from the last whole page instead of starting over or
-// repeating one.
-func drainFrom(ctx context.Context, db *store.Store, source provider.Provider, itemID, cursor string) (counts, error) {
+// drainFrom applies each page, but it keeps the starting cursor as the durable
+// checkpoint until the final page completes.
+func drainFrom(ctx context.Context, db *store.Store, source provider.Provider, itemID, cursor string) (counts, int, error) {
 	var total counts
+	startCursor := cursor
+	pagesRead := 0
 
 	for page := 0; page < maxPages; page++ {
 		batch, err := source.Sync(ctx, cursor)
 		if err != nil {
-			return total, err
+			return total, pagesRead, err
 		}
-		if err := db.ApplyPage(ctx, toPage(source.Name(), itemID, batch)); err != nil {
-			return total, err
+
+		checkpoint := batch.NextCursor
+		if batch.HasMore {
+			checkpoint = startCursor
 		}
+		if err := db.ApplyPage(ctx, toPage(source.Name(), itemID, batch, checkpoint)); err != nil {
+			return total, pagesRead, err
+		}
+		pagesRead++
 
 		total.added += len(batch.Added)
 		total.modified += len(batch.Modified)
@@ -252,15 +232,15 @@ func drainFrom(ctx context.Context, db *store.Store, source provider.Provider, i
 		cursor = batch.NextCursor
 
 		if !batch.HasMore {
-			return total, nil
+			return total, pagesRead, nil
 		}
 	}
 
-	return total, fmt.Errorf("stopped after %d pages: the provider still reports more", maxPages)
+	return total, pagesRead, fmt.Errorf("stopped after %d pages: the provider still reports more", maxPages)
 }
 
 // toPage turns one provider batch into the unit the store commits.
-func toPage(providerName, itemID string, batch provider.Batch) store.Page {
+func toPage(providerName, itemID string, batch provider.Batch, cursor string) store.Page {
 	return store.Page{
 		Provider:   providerName,
 		ItemID:     itemID,
@@ -268,7 +248,7 @@ func toPage(providerName, itemID string, batch provider.Batch) store.Page {
 		Modified:   batch.Modified,
 		RemovedIDs: batch.RemovedIDs,
 		Accounts:   batch.Accounts,
-		Cursor:     batch.NextCursor,
+		Cursor:     cursor,
 	}
 }
 

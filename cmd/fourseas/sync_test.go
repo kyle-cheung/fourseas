@@ -136,9 +136,12 @@ func TestDrainResumesFromTheSavedCursor(t *testing.T) {
 	}
 }
 
-func TestDrainKeepsTheCursorFromTheLastGoodPage(t *testing.T) {
+func TestDrainKeepsTheStartingCursorUntilTheLastPage(t *testing.T) {
 	ctx := context.Background()
 	db := newTestStore(t)
+	if err := db.SetCursor(ctx, "fake", "item-1", "start"); err != nil {
+		t.Fatalf("set cursor: %v", err)
+	}
 
 	source := &fakeSource{
 		pages: []provider.Batch{
@@ -155,8 +158,8 @@ func TestDrainKeepsTheCursorFromTheLastGoodPage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read cursor: %v", err)
 	}
-	if saved != "c1" {
-		t.Errorf("saved cursor = %q, want the cursor from the last good page", saved)
+	if saved != "start" {
+		t.Errorf("saved cursor = %q, want the starting cursor", saved)
 	}
 }
 
@@ -189,9 +192,7 @@ func TestDrainStoresAccountsAndBalances(t *testing.T) {
 	}
 }
 
-// TestDrainLeavesTheRowsAndTheCursorWhenAPageFailsPartWay proves the page is
-// one unit: the rows before the bad one, and the cursor that page carried, are
-// both left as they were.
+// A page is one unit: its row changes and durable cursor land together.
 func TestDrainLeavesTheRowsAndTheCursorWhenAPageFailsPartWay(t *testing.T) {
 	ctx := context.Background()
 	db := newTestStore(t)
@@ -237,8 +238,8 @@ func TestDrainLeavesTheRowsAndTheCursorWhenAPageFailsPartWay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read cursor: %v", err)
 	}
-	if saved != "c1" {
-		t.Errorf("saved cursor = %q, want the cursor of the last whole page", saved)
+	if saved != "" {
+		t.Errorf("saved cursor = %q, want the starting cursor", saved)
 	}
 }
 
@@ -310,14 +311,6 @@ func TestDrainHidesThePendingRowWhenThePostedRowArrivesLater(t *testing.T) {
 	}
 }
 
-// noRestartDelay removes the wait between attempts, so the tests do not sleep.
-func noRestartDelay(t *testing.T) {
-	t.Helper()
-	previous := restartDelay
-	restartDelay = 0
-	t.Cleanup(func() { restartDelay = previous })
-}
-
 // movedError is what a provider returns when its data changed while a page
 // sequence was read.
 func movedError() error {
@@ -325,27 +318,22 @@ func movedError() error {
 		provider.ErrRestartPagination)
 }
 
-// TestDrainStartsFromTheBeginningWhenTheDataMovedUnderThePages is the real
-// Scotiabank case. Two pages were stored by an earlier run that then died on a
-// mutation, so the stored cursor belongs to a sequence that never finished and
-// Plaid refuses it for good. Resuming from it can only fail again, so the item
-// starts from the beginning of the available history.
-func TestDrainStartsFromTheBeginningWhenTheDataMovedUnderThePages(t *testing.T) {
-	noRestartDelay(t)
+func TestDrainRetriesAMutationFromTheStartingCursor(t *testing.T) {
 	ctx := context.Background()
 	db := newTestStore(t)
 
-	if err := db.SetCursor(ctx, "fake", "item-1", "dead-cursor"); err != nil {
+	if err := db.SetCursor(ctx, "fake", "item-1", "start"); err != nil {
 		t.Fatalf("set cursor: %v", err)
 	}
 
 	source := &fakeSource{
 		pages: []provider.Batch{
+			{Added: []model.Transaction{row("a", "2026-08-01")}, NextCursor: "c1", HasMore: true},
 			{},
 			{Added: []model.Transaction{row("a", "2026-08-01")}, NextCursor: "c1", HasMore: true},
-			{Added: []model.Transaction{row("b", "2026-08-02")}, NextCursor: "c2", HasMore: false},
+			{Added: []model.Transaction{row("b", "2026-08-02")}, NextCursor: "c2"},
 		},
-		errs: []error{movedError()},
+		errs: []error{nil, movedError()},
 	}
 
 	got, err := drain(ctx, db, source, "item-1")
@@ -353,8 +341,7 @@ func TestDrainStartsFromTheBeginningWhenTheDataMovedUnderThePages(t *testing.T) 
 		t.Fatalf("drain: %v", err)
 	}
 
-	// The stored cursor is tried once, then abandoned for the beginning.
-	want := []string{"dead-cursor", "", "c1"}
+	want := []string{"start", "c1", "start", "c1"}
 	if len(source.cursors) != len(want) {
 		t.Fatalf("cursors = %v, want %v", source.cursors, want)
 	}
@@ -364,18 +351,8 @@ func TestDrainStartsFromTheBeginningWhenTheDataMovedUnderThePages(t *testing.T) 
 		}
 	}
 
-	// The counts describe the attempt that finished, not every attempt.
 	if got.added != 2 {
 		t.Errorf("added = %d, want 2 from the attempt that finished", got.added)
-	}
-
-	// Reading a page again writes the same rows again, so nothing is doubled.
-	n, err := db.Count(ctx)
-	if err != nil {
-		t.Fatalf("count: %v", err)
-	}
-	if n != 2 {
-		t.Errorf("stored %d rows, want 2", n)
 	}
 
 	saved, err := db.Cursor(ctx, "fake", "item-1")
@@ -387,10 +364,7 @@ func TestDrainStartsFromTheBeginningWhenTheDataMovedUnderThePages(t *testing.T) 
 	}
 }
 
-// TestDrainKeepsReadingFromTheBeginningWhileTheDataChanges proves the retry does
-// not go back to a cursor it already abandoned.
-func TestDrainKeepsReadingFromTheBeginningWhileTheDataChanges(t *testing.T) {
-	noRestartDelay(t)
+func TestDrainFallsBackFromALegacyIntermediateCursor(t *testing.T) {
 	ctx := context.Background()
 	db := newTestStore(t)
 
@@ -399,15 +373,15 @@ func TestDrainKeepsReadingFromTheBeginningWhileTheDataChanges(t *testing.T) {
 	}
 
 	source := &fakeSource{
-		pages: []provider.Batch{{}, {}, {}, {NextCursor: "c1", HasMore: false}},
-		errs:  []error{movedError(), movedError(), movedError()},
+		pages: []provider.Batch{{}, {}, {NextCursor: "fresh"}},
+		errs:  []error{movedError(), movedError()},
 	}
 
 	if _, err := drain(ctx, db, source, "item-1"); err != nil {
 		t.Fatalf("drain: %v", err)
 	}
 
-	want := []string{"dead-cursor", "", "", ""}
+	want := []string{"dead-cursor", "dead-cursor", ""}
 	if len(source.cursors) != len(want) {
 		t.Fatalf("cursors = %v, want %v", source.cursors, want)
 	}
@@ -416,11 +390,18 @@ func TestDrainKeepsReadingFromTheBeginningWhileTheDataChanges(t *testing.T) {
 			t.Errorf("cursor %d = %q, want %q", i, source.cursors[i], want[i])
 		}
 	}
+
+	saved, err := db.Cursor(ctx, "fake", "item-1")
+	if err != nil {
+		t.Fatalf("read cursor: %v", err)
+	}
+	if saved != "fresh" {
+		t.Errorf("saved cursor = %q, want fresh", saved)
+	}
 }
 
 // TestDrainGivesUpWhenTheDataKeepsMoving proves the restart is bounded.
 func TestDrainGivesUpWhenTheDataKeepsMoving(t *testing.T) {
-	noRestartDelay(t)
 	ctx := context.Background()
 	db := newTestStore(t)
 

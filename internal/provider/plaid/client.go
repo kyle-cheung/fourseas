@@ -94,17 +94,23 @@ func apiError(op string, err error, resp *http.Response) error {
 }
 
 // mutationDuringPagination is the code Plaid returns when the transaction data
-// of an item changed while a page sequence was being read. The cursors of that
-// sequence are then dead, and the item must start again from the cursor the last
-// whole sync ended on.
+// of an item changed while a page sequence was being read. The caller must
+// discard its intermediate cursors and retry from the cursor that started it.
 const mutationDuringPagination = "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION"
+
+// itemNotFound is the code Plaid returns for an item it does not hold. An
+// unlink treats it as a success, because the item is already gone.
+const itemNotFound = "ITEM_NOT_FOUND"
 
 // codedError builds the error for one Plaid error body. Codes the caller can act
 // on carry a sentinel, so that acting on them needs no string matching.
 func codedError(op, code, errType, message string) error {
 	err := fmt.Errorf("plaid %s (%s): %s", code, errType, message)
-	if code == mutationDuringPagination {
+	switch code {
+	case mutationDuringPagination:
 		err = fmt.Errorf("%w: %w", provider.ErrRestartPagination, err)
+	case itemNotFound:
+		err = fmt.Errorf("%w: %w", provider.ErrItemGone, err)
 	}
 	return fmt.Errorf("%s: %w", op, err)
 }

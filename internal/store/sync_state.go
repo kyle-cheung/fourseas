@@ -32,6 +32,18 @@ func (s *Store) SetCursor(ctx context.Context, provider, itemID, cursor string) 
 	return saveCursor(ctx, s.db, provider, itemID, cursor)
 }
 
+// ClearCursor forces a full sync without changing the outcome of the last
+// completed attempt.
+func (s *Store) ClearCursor(ctx context.Context, provider, itemID string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE sync_state SET cursor = NULL
+		WHERE provider = ? AND item_id = ?`, provider, itemID)
+	if err != nil {
+		return fmt.Errorf("clear cursor for %s/%s: %w", provider, itemID, err)
+	}
+	return nil
+}
+
 // saveCursor writes the cursor through the caller's handle, so that a sync
 // page can save it in the same transaction as the rows it belongs to.
 func saveCursor(ctx context.Context, db execer, provider, itemID, cursor string) error {

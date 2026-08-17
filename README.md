@@ -32,6 +32,8 @@ Plaid needs setup in its dashboard before `link` works. See
 | `fourseas accounts` | List accounts with ids, balances, and nicknames |
 | `fourseas accounts nickname <id> "<name>"` | Name an account. An empty name clears it |
 | `fourseas show` | Print the newest stored rows without calling Plaid |
+| `fourseas unlink <item-id>` | Remove one institution at Plaid, then delete its local token and data. Asks first |
+| `fourseas unlink --list` | List the linked institutions with the item ids `unlink` takes |
 | `fourseas reset` | Drop all data and build the schema again. Asks first |
 
 Settings come from `.env`. The database is `data/fourseas.duckdb` unless you set
@@ -45,8 +47,14 @@ days when nothing is asked for, so fourseas asks at link time.
 **The amount is fixed when the card is linked.** Plaid sets it while it
 initializes the transactions product, and it cannot be changed for the life of
 the item. `fourseas sync` cannot ask for more history later. To get more history
-for a card that is already linked, you must remove the item in the Plaid
-dashboard and link the card again.
+for a card that is already linked, you must remove the item and link the card
+again:
+
+```bash
+bin/fourseas unlink --list          # find the item id
+bin/fourseas unlink <item-id>       # remove it at Plaid and delete its rows
+bin/fourseas link                   # link the card again, with a new window
+```
 
 Use `--days` to request less:
 
@@ -67,6 +75,33 @@ Two more points:
   looks short.
 - **The bank sets the real limit.** 730 days is what Plaid permits, not what
   every institution holds. You get what the bank provides.
+
+### Remove a card
+
+```bash
+bin/fourseas unlink --list       # the linked institutions, with their item ids
+bin/fourseas unlink <item-id>    # asks first. Add --yes to skip the question
+```
+
+`unlink` calls Plaid `/item/remove` first, then deletes that item's
+transactions, accounts, cursor, and institution row in one database
+transaction, and its access token last. A failure at any step leaves the
+earlier state, so the command can be run again.
+
+Two reasons to use it:
+
+- **Plaid bills each live item, each month.** Deleting the token on its own
+  leaves the item alive at Plaid, and removes the only way to reach it.
+- **A re-link is the only way to get more history.** The history window is
+  fixed when the item is created. `unlink` then `link` builds a new one.
+
+An access token only works in the environment that issued it, so `unlink`
+refuses an item that was linked in another `PLAID_ENV` and says which one to
+set. Without that the removal would fail at Plaid and leave the item billed.
+
+The transactions go too. A re-link gives new transaction ids to the same
+charges, so rows that were kept would count every charge twice. There is no
+undo, and none is needed: a new link fetches the data again.
 
 ### Refresh FX rates
 
