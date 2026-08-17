@@ -22,6 +22,10 @@ const maxPages = 100
 // provider's data moved while they were read.
 const maxRestarts = 5
 
+// restartDelay is how long to wait before the second attempt, and it grows with
+// each one after that. Tests set it to zero.
+var restartDelay = 3 * time.Second
+
 // rowsToShow is how many rows fourseas prints after a sync.
 const rowsToShow = 10
 
@@ -165,16 +169,20 @@ type counts struct {
 // A restart is normal on a first sync of a long history: the bank keeps posting
 // while the pages are read. Rows already written are not a problem, because a
 // row is written by its id, so reading a page again writes the same row again.
+//
+// The restart goes back to the beginning of the available history, not to the
+// stored cursor. A mutation kills every cursor of the sequence it interrupted,
+// and a stored cursor can be one of them: the store keeps the cursor of the last
+// whole page, which is a page of a sequence that may never have finished. Only
+// the beginning is certain, and reading from it costs calls, not correctness.
 func drain(ctx context.Context, db *store.Store, source provider.Provider, itemID string) (counts, error) {
-	// Where the last whole sync ended. Every attempt starts here, so the pages
-	// of a dead sequence are left behind instead of resumed.
-	start, err := db.Cursor(ctx, source.Name(), itemID)
+	cursor, err := db.Cursor(ctx, source.Name(), itemID)
 	if err != nil {
 		return counts{}, err
 	}
 
 	for attempt := 1; ; attempt++ {
-		total, err := drainFrom(ctx, db, source, itemID, start)
+		total, err := drainFrom(ctx, db, source, itemID, cursor)
 		if err == nil {
 			return total, nil
 		}
@@ -185,13 +193,40 @@ func drain(ctx context.Context, db *store.Store, source provider.Provider, itemI
 			return total, fmt.Errorf("the data kept changing over %d attempts: %w", attempt, err)
 		}
 
-		// The cursor of the failed sequence is dead, so put back the one the
-		// last whole sync ended on before asking again.
-		if err := db.SetCursor(ctx, source.Name(), itemID, start); err != nil {
+		if cursor != "" {
+			fmt.Printf("  %s: the data changed while paging, and the stored cursor is dead.\n"+
+				"  Reading the whole history again. Stored rows are written by id, so none is doubled.\n", itemID)
+			cursor = ""
+		} else {
+			fmt.Printf("  %s: the data changed again while paging. Attempt %d of %d.\n",
+				itemID, attempt+1, maxRestarts)
+		}
+
+		// Leave the store on the cursor the next read starts from, so an
+		// interrupted retry does not resume from the dead one.
+		if err := db.SetCursor(ctx, source.Name(), itemID, cursor); err != nil {
 			return total, err
 		}
-		fmt.Printf("  the data changed while paging %s: starting again (attempt %d of %d)\n",
-			itemID, attempt+1, maxRestarts)
+		if err := wait(ctx, restartDelay*time.Duration(attempt)); err != nil {
+			return total, err
+		}
+	}
+}
+
+// wait sleeps, and gives up early if the run is cancelled. A bank that is still
+// posting needs a moment, and asking again at once tends to race again.
+func wait(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

@@ -310,28 +310,42 @@ func TestDrainHidesThePendingRowWhenThePostedRowArrivesLater(t *testing.T) {
 	}
 }
 
-// TestDrainStartsAgainWhenTheDataMovedUnderThePages is the real Scotiabank
-// case: the bank posted a transaction while the first sync was paging through a
-// long history. The dead sequence is left behind and the item starts again from
-// the cursor the last whole sync ended on.
-func TestDrainStartsAgainWhenTheDataMovedUnderThePages(t *testing.T) {
+// noRestartDelay removes the wait between attempts, so the tests do not sleep.
+func noRestartDelay(t *testing.T) {
+	t.Helper()
+	previous := restartDelay
+	restartDelay = 0
+	t.Cleanup(func() { restartDelay = previous })
+}
+
+// movedError is what a provider returns when its data changed while a page
+// sequence was read.
+func movedError() error {
+	return fmt.Errorf("sync item item-1: %w: plaid TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION",
+		provider.ErrRestartPagination)
+}
+
+// TestDrainStartsFromTheBeginningWhenTheDataMovedUnderThePages is the real
+// Scotiabank case. Two pages were stored by an earlier run that then died on a
+// mutation, so the stored cursor belongs to a sequence that never finished and
+// Plaid refuses it for good. Resuming from it can only fail again, so the item
+// starts from the beginning of the available history.
+func TestDrainStartsFromTheBeginningWhenTheDataMovedUnderThePages(t *testing.T) {
+	noRestartDelay(t)
 	ctx := context.Background()
 	db := newTestStore(t)
 
-	if err := db.SetCursor(ctx, "fake", "item-1", "start"); err != nil {
+	if err := db.SetCursor(ctx, "fake", "item-1", "dead-cursor"); err != nil {
 		t.Fatalf("set cursor: %v", err)
 	}
 
-	moved := fmt.Errorf("sync item item-1: %w: plaid TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION",
-		provider.ErrRestartPagination)
 	source := &fakeSource{
 		pages: []provider.Batch{
-			{Added: []model.Transaction{row("a", "2026-08-01")}, NextCursor: "c1", HasMore: true},
 			{},
 			{Added: []model.Transaction{row("a", "2026-08-01")}, NextCursor: "c1", HasMore: true},
 			{Added: []model.Transaction{row("b", "2026-08-02")}, NextCursor: "c2", HasMore: false},
 		},
-		errs: []error{nil, moved},
+		errs: []error{movedError()},
 	}
 
 	got, err := drain(ctx, db, source, "item-1")
@@ -339,8 +353,8 @@ func TestDrainStartsAgainWhenTheDataMovedUnderThePages(t *testing.T) {
 		t.Fatalf("drain: %v", err)
 	}
 
-	// The second attempt asks from "start" again, not from "c1".
-	want := []string{"start", "c1", "start", "c1"}
+	// The stored cursor is tried once, then abandoned for the beginning.
+	want := []string{"dead-cursor", "", "c1"}
 	if len(source.cursors) != len(want) {
 		t.Fatalf("cursors = %v, want %v", source.cursors, want)
 	}
@@ -350,7 +364,7 @@ func TestDrainStartsAgainWhenTheDataMovedUnderThePages(t *testing.T) {
 		}
 	}
 
-	// The counts describe the attempt that finished, not both attempts.
+	// The counts describe the attempt that finished, not every attempt.
 	if got.added != 2 {
 		t.Errorf("added = %d, want 2 from the attempt that finished", got.added)
 	}
@@ -373,16 +387,46 @@ func TestDrainStartsAgainWhenTheDataMovedUnderThePages(t *testing.T) {
 	}
 }
 
-// TestDrainGivesUpWhenTheDataKeepsMoving proves the restart is bounded.
-func TestDrainGivesUpWhenTheDataKeepsMoving(t *testing.T) {
+// TestDrainKeepsReadingFromTheBeginningWhileTheDataChanges proves the retry does
+// not go back to a cursor it already abandoned.
+func TestDrainKeepsReadingFromTheBeginningWhileTheDataChanges(t *testing.T) {
+	noRestartDelay(t)
 	ctx := context.Background()
 	db := newTestStore(t)
 
-	moved := fmt.Errorf("%w: plaid TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION",
-		provider.ErrRestartPagination)
+	if err := db.SetCursor(ctx, "fake", "item-1", "dead-cursor"); err != nil {
+		t.Fatalf("set cursor: %v", err)
+	}
+
+	source := &fakeSource{
+		pages: []provider.Batch{{}, {}, {}, {NextCursor: "c1", HasMore: false}},
+		errs:  []error{movedError(), movedError(), movedError()},
+	}
+
+	if _, err := drain(ctx, db, source, "item-1"); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+
+	want := []string{"dead-cursor", "", "", ""}
+	if len(source.cursors) != len(want) {
+		t.Fatalf("cursors = %v, want %v", source.cursors, want)
+	}
+	for i := range want {
+		if source.cursors[i] != want[i] {
+			t.Errorf("cursor %d = %q, want %q", i, source.cursors[i], want[i])
+		}
+	}
+}
+
+// TestDrainGivesUpWhenTheDataKeepsMoving proves the restart is bounded.
+func TestDrainGivesUpWhenTheDataKeepsMoving(t *testing.T) {
+	noRestartDelay(t)
+	ctx := context.Background()
+	db := newTestStore(t)
+
 	errs := make([]error, maxRestarts)
 	for i := range errs {
-		errs[i] = moved
+		errs[i] = movedError()
 	}
 	source := &fakeSource{errs: errs}
 
