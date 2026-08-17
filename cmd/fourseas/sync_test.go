@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -318,5 +319,46 @@ func account(id, balance string) model.Account {
 		BalanceCurrent: decimal.NullDecimal{Decimal: decimal.RequireFromString(balance), Valid: true},
 		FirstSeenAt:    time.Now().UTC(),
 		LastSeenAt:     time.Now().UTC(),
+	}
+}
+
+func TestRunSyncFXOnlyBypassesPlaidConfigAndTokenLoading(t *testing.T) {
+	cfg := settings{
+		dbPath:     filepath.Join(t.TempDir(), "fourseas.duckdb"),
+		tokensPath: filepath.Join(t.TempDir(), "missing-tokens.json"),
+	}
+
+	if err := runSync(context.Background(), cfg, []string{"--fx"}); err != nil {
+		t.Fatalf("runSync(--fx) error = %v", err)
+	}
+}
+
+func TestRunSyncRejectsUnknownFXOptionsBeforePlaidValidation(t *testing.T) {
+	for _, options := range [][]string{
+		{"--future"},
+		{"--fx", "--future"},
+	} {
+		err := runSync(context.Background(), settings{}, options)
+		if err == nil {
+			t.Fatalf("runSync(%q) error = nil, want an error", options)
+		}
+		for _, option := range options {
+			if !strings.Contains(err.Error(), option) {
+				t.Errorf("runSync(%q) error = %q, want option %q", options, err, option)
+			}
+		}
+		if strings.Contains(err.Error(), "PLAID_CLIENT_ID") {
+			t.Errorf("runSync(%q) error = %q, parsed after Plaid validation", options, err)
+		}
+	}
+}
+
+func TestRunSyncWithoutFXOptionUsesNormalPlaidValidation(t *testing.T) {
+	err := runSync(context.Background(), settings{}, nil)
+	if err == nil {
+		t.Fatal("runSync() error = nil, want invalid Plaid configuration")
+	}
+	if !strings.Contains(err.Error(), "PLAID_CLIENT_ID") {
+		t.Errorf("runSync() error = %q, want Plaid validation error", err)
 	}
 }

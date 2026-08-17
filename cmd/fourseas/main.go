@@ -2,7 +2,8 @@
 // local DuckDB file and reads them back.
 //
 //	fourseas link      link one card, then repeat for the next card
-//	fourseas sync      fetch new transactions, store them, print the newest rows
+//	fourseas sync      fetch new transactions and FX rates, then print the newest rows
+//	fourseas sync --fx fetch FX rates only
 //	fourseas accounts  list the stored accounts with their balances
 //	fourseas accounts nickname <account-id> "Amex Daily"  name an account
 //	fourseas show      print the newest stored rows without calling Plaid
@@ -21,7 +22,8 @@ const usage = `fourseas - Plaid to DuckDB transactions
 
 Usage:
   fourseas link      Link one card through Plaid Link in your browser
-  fourseas sync      Fetch new transactions, store them, and print the newest rows
+  fourseas sync      Fetch new transactions and FX rates, then print the newest rows
+  fourseas sync --fx Fetch FX rates only
   fourseas accounts  List the stored accounts with their balances and ids
   fourseas accounts nickname <account-id> "Amex Daily"
                      Name an account. An empty name clears the nickname
@@ -53,7 +55,7 @@ func run() error {
 	case "link":
 		return runLink(ctx, cfg)
 	case "sync":
-		return runSync(ctx, cfg)
+		return runSync(ctx, cfg, os.Args[2:])
 	case "accounts":
 		return runAccounts(ctx, cfg, os.Args[2:])
 	case "show":
