@@ -612,8 +612,8 @@ func TestCustomHistoryKeepsAnUnusableValueOnThePrompt(t *testing.T) {
 		if m.prompt.err == nil {
 			t.Fatalf("value %q left no reason on the prompt", value)
 		}
-		if body := m.View().Content; !strings.Contains(body, "30") || !strings.Contains(body, "730") {
-			t.Errorf("prompt view = %q, want the accepted range", body)
+		if body := m.View().Content; !strings.Contains(body, errHistoryRange.Error()) {
+			t.Errorf("prompt view = %q, want %q", body, errHistoryRange.Error())
 		}
 	}
 	if len(fake.linkDays) != 0 {
@@ -693,6 +693,49 @@ func TestAddFlowSyncFailureKeepsLinkedItemForRetry(t *testing.T) {
 	}
 	if m.screen != nicknameScreen {
 		t.Fatalf("screen after a successful retry = %v, want nicknameScreen", m.screen)
+	}
+}
+
+func TestRetryLeavesTheRecoveryScreenBehind(t *testing.T) {
+	fake := &fakeService{linkErr: errors.New("plaid is unavailable")}
+	m := ready(t, fake)
+
+	openHistory(t, m)
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // the failing Link
+	if m.screen != recoveryScreen {
+		t.Fatalf("screen after a failed link = %v, want recoveryScreen", m.screen)
+	}
+
+	cmd := press(t, m, codeKey(tea.KeyEnter)) // Retry
+	if cmd == nil {
+		t.Fatal("Retry started no operation")
+	}
+	if m.screen != historyScreen {
+		t.Fatalf("screen while the retry runs = %v, want historyScreen", m.screen)
+	}
+	if body := m.View().Content; strings.Contains(body, "Something went wrong") {
+		t.Errorf("view while the retry runs = %q, want the retried screen, not the cleared failure", body)
+	}
+
+	// The user gives up on the retry.
+	fake.linkErr = context.Canceled
+	press(t, m, ctrlC())
+	if !m.running {
+		t.Fatal("ctrl+c cleared the running state before the retry returned")
+	}
+	runOperation(t, m, cmd)
+
+	if m.screen != historyScreen {
+		t.Fatalf("screen after a cancelled retry = %v, want historyScreen", m.screen)
+	}
+	if m.linked != (app.LinkedItem{}) {
+		t.Errorf("linked item = %+v, want it cleared", m.linked)
+	}
+	if body := m.View().Content; strings.Contains(body, "Something went wrong") {
+		t.Errorf("view after a cancelled retry = %q, want the history choice", body)
+	}
+	if len(fake.linkDays) != 2 {
+		t.Errorf("Link calls = %v, want the first call and the retry", fake.linkDays)
 	}
 }
 

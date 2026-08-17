@@ -444,6 +444,11 @@ func (m *Model) activate() tea.Cmd {
 // may still have changed the stored data.
 func (m *Model) recoverWith(choice string) tea.Cmd {
 	if choice == recoveryRetry && m.recovery.retry != nil {
+		// The retry belongs to the screen the failed operation ran on, which
+		// returnTo still holds. Leaving the recovery screen up would show a
+		// cleared failure while the retry runs, and would make a cancelled
+		// retry return to the failure instead of to that screen.
+		m.screen = m.returnTo
 		return m.recovery.retry()
 	}
 	m.screen = mainScreen
