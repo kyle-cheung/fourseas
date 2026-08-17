@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -21,6 +22,10 @@ const rowsToShow = 10
 
 // runSync fetches new transactions for every linked card and prints the newest.
 func runSync(ctx context.Context, cfg settings, options []string) error {
+	return runSyncWith(ctx, cfg, options, newFXSource(), os.Stdout)
+}
+
+func runSyncWith(ctx context.Context, cfg settings, options []string, source fxSource, out io.Writer) error {
 	fxOnly, err := parseSyncOptions(options)
 	if err != nil {
 		return err
@@ -32,7 +37,7 @@ func runSync(ctx context.Context, cfg settings, options []string) error {
 		}
 		defer db.Close()
 
-		return runFXPhase(ctx, db, newFXSource(), time.Now(), true, os.Stdout)
+		return runFXPhase(ctx, db, source, time.Now(), true, out)
 	}
 
 	if err := cfg.plaid.Validate(); err != nil {
@@ -78,7 +83,7 @@ func runSync(ctx context.Context, cfg settings, options []string) error {
 	if attempted > 0 && failed == attempted {
 		return fmt.Errorf("every card failed to sync")
 	}
-	if err := runFXPhase(ctx, db, newFXSource(), time.Now(), false, os.Stdout); err != nil {
+	if err := runFXPhase(ctx, db, source, time.Now(), false, out); err != nil {
 		return err
 	}
 	return printNewest(ctx, db, rowsToShow)

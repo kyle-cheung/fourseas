@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"path/filepath"
@@ -327,9 +328,13 @@ func TestRunSyncFXOnlyBypassesPlaidConfigAndTokenLoading(t *testing.T) {
 		dbPath:     filepath.Join(t.TempDir(), "fourseas.duckdb"),
 		tokensPath: filepath.Join(t.TempDir(), "missing-tokens.json"),
 	}
+	var out bytes.Buffer
 
-	if err := runSync(context.Background(), cfg, []string{"--fx"}); err != nil {
-		t.Fatalf("runSync(--fx) error = %v", err)
+	if err := runSyncWith(context.Background(), cfg, []string{"--fx"}, &fakeFXSource{}, &out); err != nil {
+		t.Fatalf("runSyncWith(--fx) error = %v", err)
+	}
+	if got, want := out.String(), "No FX rates are required.\n"; got != want {
+		t.Errorf("output = %q, want %q", got, want)
 	}
 }
 
@@ -338,27 +343,27 @@ func TestRunSyncRejectsUnknownFXOptionsBeforePlaidValidation(t *testing.T) {
 		{"--future"},
 		{"--fx", "--future"},
 	} {
-		err := runSync(context.Background(), settings{}, options)
+		err := runSyncWith(context.Background(), settings{}, options, &fakeFXSource{}, &bytes.Buffer{})
 		if err == nil {
-			t.Fatalf("runSync(%q) error = nil, want an error", options)
+			t.Fatalf("runSyncWith(%q) error = nil, want an error", options)
 		}
 		for _, option := range options {
 			if !strings.Contains(err.Error(), option) {
-				t.Errorf("runSync(%q) error = %q, want option %q", options, err, option)
+				t.Errorf("runSyncWith(%q) error = %q, want option %q", options, err, option)
 			}
 		}
 		if strings.Contains(err.Error(), "PLAID_CLIENT_ID") {
-			t.Errorf("runSync(%q) error = %q, parsed after Plaid validation", options, err)
+			t.Errorf("runSyncWith(%q) error = %q, parsed after Plaid validation", options, err)
 		}
 	}
 }
 
 func TestRunSyncWithoutFXOptionUsesNormalPlaidValidation(t *testing.T) {
-	err := runSync(context.Background(), settings{}, nil)
+	err := runSyncWith(context.Background(), settings{}, nil, &fakeFXSource{}, &bytes.Buffer{})
 	if err == nil {
-		t.Fatal("runSync() error = nil, want invalid Plaid configuration")
+		t.Fatal("runSyncWith() error = nil, want invalid Plaid configuration")
 	}
 	if !strings.Contains(err.Error(), "PLAID_CLIENT_ID") {
-		t.Errorf("runSync() error = %q, want Plaid validation error", err)
+		t.Errorf("runSyncWith() error = %q, want Plaid validation error", err)
 	}
 }
