@@ -13,16 +13,16 @@ import (
 const transactionColumns = `
 	provider, external_id, item_id, account_id,
 	date, authorized_date, name, merchant_name,
-	amount, currency, base_amount, base_currency, fx_rate, fx_date,
+	amount, currency,
 	pending, pending_transaction_id, superseded_by, category, synced_at`
 
 const upsertTransactionSQL = `
 INSERT INTO transactions (
 	provider, external_id, item_id, account_id,
 	date, authorized_date, name, merchant_name,
-	amount, currency, base_amount, base_currency, fx_rate, fx_date,
+	amount, currency,
 	pending, pending_transaction_id, superseded_by, category, synced_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (provider, external_id) DO UPDATE SET
 	item_id                = excluded.item_id,
 	account_id             = excluded.account_id,
@@ -32,10 +32,6 @@ ON CONFLICT (provider, external_id) DO UPDATE SET
 	merchant_name          = excluded.merchant_name,
 	amount                 = excluded.amount,
 	currency               = excluded.currency,
-	base_amount            = excluded.base_amount,
-	base_currency          = excluded.base_currency,
-	fx_rate                = excluded.fx_rate,
-	fx_date                = excluded.fx_date,
 	pending                = excluded.pending,
 	pending_transaction_id = excluded.pending_transaction_id,
 	superseded_by          = excluded.superseded_by,
@@ -74,9 +70,7 @@ func upsertTransactions(ctx context.Context, db execer, txs []model.Transaction)
 		_, err := stmt.ExecContext(ctx,
 			t.Provider, t.ExternalID, textArg(t.ItemID), textArg(t.AccountID),
 			t.Date, timeArg(t.AuthorizedDate), textArg(t.Name), textArg(t.MerchantName),
-			decimalArg(t.Amount), textArg(t.Currency),
-			nullDecimalArg(t.BaseAmount), textArg(t.BaseCurrency),
-			nullDecimalArg(t.FXRate), timeArg(t.FXDate),
+			decimalArg(t.Amount), textArg(model.NormalizeCurrency(t.Currency)),
 			t.Pending, textArg(t.PendingTransactionID), textArg(t.SupersededBy),
 			textArg(t.Category), syncedAt,
 		)
@@ -165,15 +159,15 @@ func scanTransaction(row scanner) (model.Transaction, error) {
 	var (
 		t                                               model.Transaction
 		itemID, accountID, name, merchantName, currency sql.NullString
-		baseCurrency, pendingID, supersededBy, category sql.NullString
-		authorizedDate, fxDate, syncedAt                sql.NullTime
-		amount, baseAmount, fxRate                      any
+		pendingID, supersededBy, category               sql.NullString
+		authorizedDate, syncedAt                        sql.NullTime
+		amount                                          any
 	)
 
 	err := row.Scan(
 		&t.Provider, &t.ExternalID, &itemID, &accountID,
 		&t.Date, &authorizedDate, &name, &merchantName,
-		&amount, &currency, &baseAmount, &baseCurrency, &fxRate, &fxDate,
+		&amount, &currency,
 		&t.Pending, &pendingID, &supersededBy, &category, &syncedAt,
 	)
 	if err != nil {
@@ -183,21 +177,12 @@ func scanTransaction(row scanner) (model.Transaction, error) {
 	if t.Amount, err = toDecimal(amount); err != nil {
 		return model.Transaction{}, fmt.Errorf("amount: %w", err)
 	}
-	if t.BaseAmount, err = toNullDecimal(baseAmount); err != nil {
-		return model.Transaction{}, fmt.Errorf("base_amount: %w", err)
-	}
-	if t.FXRate, err = toNullDecimal(fxRate); err != nil {
-		return model.Transaction{}, fmt.Errorf("fx_rate: %w", err)
-	}
-
 	t.ItemID = text(itemID)
 	t.AccountID = text(accountID)
 	t.AuthorizedDate = timePtr(authorizedDate)
 	t.Name = text(name)
 	t.MerchantName = text(merchantName)
 	t.Currency = text(currency)
-	t.BaseCurrency = text(baseCurrency)
-	t.FXDate = timePtr(fxDate)
 	t.PendingTransactionID = text(pendingID)
 	t.SupersededBy = text(supersededBy)
 	t.Category = text(category)

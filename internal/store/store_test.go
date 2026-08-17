@@ -64,10 +64,6 @@ func sample() model.Transaction {
 		MerchantName:         "Blue Bottle Coffee",
 		Amount:               dec("24.75"),
 		Currency:             "USD",
-		BaseAmount:           nullDec("24.75"),
-		BaseCurrency:         "USD",
-		FXRate:               nullDec("1"),
-		FXDate:               dayPtr("2026-08-10"),
 		Pending:              true,
 		PendingTransactionID: "txn-pending-1",
 		SupersededBy:         "",
@@ -117,7 +113,6 @@ func TestDecimalRoundTripsExactly(t *testing.T) {
 	one, two := sample(), sample()
 	one.ExternalID, one.Amount = "txn-tenth", dec("0.1")
 	two.ExternalID, two.Amount = "txn-fifth", dec("0.2")
-	one.BaseAmount, two.BaseAmount = decimal.NullDecimal{}, decimal.NullDecimal{}
 
 	big := sample()
 	big.ExternalID, big.Amount = "txn-big", dec("12345678.9012")
@@ -167,8 +162,8 @@ func TestTransactionRoundTrip(t *testing.T) {
 	assertSameTransaction(t, got, want)
 }
 
-// TestNullableColumnsRoundTripAsNull proves the columns issues 4 and 6 fill in
-// accept nothing at all today.
+// TestNullableColumnsRoundTripAsNull proves optional provider fields accept
+// nothing at all.
 func TestNullableColumnsRoundTripAsNull(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
@@ -176,10 +171,6 @@ func TestNullableColumnsRoundTripAsNull(t *testing.T) {
 	want := sample()
 	want.AuthorizedDate = nil
 	want.MerchantName = ""
-	want.BaseAmount = decimal.NullDecimal{}
-	want.BaseCurrency = ""
-	want.FXRate = decimal.NullDecimal{}
-	want.FXDate = nil
 	want.PendingTransactionID = ""
 	want.SupersededBy = ""
 
@@ -199,14 +190,6 @@ func assertSameTransaction(t *testing.T, got, want model.Transaction) {
 	if !got.Amount.Equal(want.Amount) {
 		t.Errorf("Amount = %s, want %s", got.Amount, want.Amount)
 	}
-	if got.BaseAmount.Valid != want.BaseAmount.Valid ||
-		(want.BaseAmount.Valid && !got.BaseAmount.Decimal.Equal(want.BaseAmount.Decimal)) {
-		t.Errorf("BaseAmount = %+v, want %+v", got.BaseAmount, want.BaseAmount)
-	}
-	if got.FXRate.Valid != want.FXRate.Valid ||
-		(want.FXRate.Valid && !got.FXRate.Decimal.Equal(want.FXRate.Decimal)) {
-		t.Errorf("FXRate = %+v, want %+v", got.FXRate, want.FXRate)
-	}
 	if !got.Date.Equal(want.Date) {
 		t.Errorf("Date = %v, want %v", got.Date, want.Date)
 	}
@@ -214,16 +197,12 @@ func assertSameTransaction(t *testing.T, got, want model.Transaction) {
 		t.Errorf("SyncedAt = %v, want %v", got.SyncedAt, want.SyncedAt)
 	}
 	assertSameDate(t, "AuthorizedDate", got.AuthorizedDate, want.AuthorizedDate)
-	assertSameDate(t, "FXDate", got.FXDate, want.FXDate)
 
 	// Compare everything else field by field, with the compared fields cleared.
 	got.Amount, want.Amount = decimal.Decimal{}, decimal.Decimal{}
-	got.BaseAmount, want.BaseAmount = decimal.NullDecimal{}, decimal.NullDecimal{}
-	got.FXRate, want.FXRate = decimal.NullDecimal{}, decimal.NullDecimal{}
 	got.Date, want.Date = time.Time{}, time.Time{}
 	got.SyncedAt, want.SyncedAt = time.Time{}, time.Time{}
 	got.AuthorizedDate, want.AuthorizedDate = nil, nil
-	got.FXDate, want.FXDate = nil, nil
 	if got != want {
 		t.Errorf("round trip changed the row:\n got %+v\nwant %+v", got, want)
 	}

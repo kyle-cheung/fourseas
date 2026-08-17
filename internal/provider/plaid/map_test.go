@@ -235,37 +235,6 @@ func TestToModels(t *testing.T) {
 	}
 }
 
-// TestToModelsFillsTheBaseCurrencyColumns proves the sign a total can be
-// trusted: a USD row carries its base amount, and a CAD row carries null so
-// that a sum over it is null instead of a plausible wrong number.
-func TestToModelsFillsTheBaseCurrencyColumns(t *testing.T) {
-	resp := decodeSample(t)
-
-	got, err := toModels(resp.Added, "item-1")
-	if err != nil {
-		t.Fatalf("toModels: %v", err)
-	}
-
-	usd := got[0] // txn-1, 24.75 USD, posted 2026-08-10
-	if !usd.BaseAmount.Valid || !usd.BaseAmount.Decimal.Equal(usd.Amount) {
-		t.Errorf("BaseAmount = %+v, want the amount %v", usd.BaseAmount, usd.Amount)
-	}
-	if usd.BaseCurrency != "USD" {
-		t.Errorf("BaseCurrency = %q, want USD", usd.BaseCurrency)
-	}
-	if !usd.FXRate.Valid || !usd.FXRate.Decimal.Equal(decimal.NewFromInt(1)) {
-		t.Errorf("FXRate = %+v, want 1", usd.FXRate)
-	}
-	if usd.FXDate == nil || !usd.FXDate.Equal(usd.Date) {
-		t.Errorf("FXDate = %v, want the posted date %v", usd.FXDate, usd.Date)
-	}
-
-	cad := got[2] // txn-3, 13.20 CAD
-	if cad.BaseAmount.Valid || cad.BaseCurrency != "" || cad.FXRate.Valid || cad.FXDate != nil {
-		t.Errorf("CAD row = %+v, want all four base columns null", cad)
-	}
-}
-
 // TestToModelCarriesThePendingTransactionID keeps the link Plaid draws between
 // the posted row and the pending row it replaces. Without it the store cannot
 // hide the duplicate, and one charge is counted two times.

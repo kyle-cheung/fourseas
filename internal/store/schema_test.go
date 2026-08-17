@@ -31,6 +31,37 @@ func TestSchemaIsCreatedFromNothingAndStamped(t *testing.T) {
 	}
 }
 
+func TestTransactionsTableDoesNotPersistConversionFields(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT column_name
+		FROM information_schema.columns
+		WHERE table_schema = 'main' AND table_name = 'transactions'`)
+	if err != nil {
+		t.Fatalf("list transaction columns: %v", err)
+	}
+	defer rows.Close()
+
+	columns := make(map[string]bool)
+	for rows.Next() {
+		var column string
+		if err := rows.Scan(&column); err != nil {
+			t.Fatalf("scan transaction column: %v", err)
+		}
+		columns[column] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("list transaction columns: %v", err)
+	}
+	for _, column := range []string{"base_amount", "base_currency", "fx_rate", "fx_date"} {
+		if columns[column] {
+			t.Errorf("transactions has computed column %q, want raw provider fields only", column)
+		}
+	}
+}
+
 func TestReopeningTheSameFileKeepsOneVersionRow(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "fourseas.duckdb")

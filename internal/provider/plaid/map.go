@@ -36,10 +36,7 @@ func toModel(t plaidsdk.Transaction, itemID string) (model.Transaction, error) {
 		currency = t.GetUnofficialCurrencyCode()
 	}
 
-	// The base currency columns are filled in here, so that every row reaches
-	// the store ready to sum. Build 2 replaces model.WithBase with a real rate
-	// lookup and this call stays as it is.
-	return model.WithBase(model.Transaction{
+	return model.Transaction{
 		Provider:       ProviderName,
 		ExternalID:     t.TransactionId,
 		ItemID:         itemID,
@@ -57,7 +54,7 @@ func toModel(t plaidsdk.Transaction, itemID string) (model.Transaction, error) {
 		// hide the duplicate; nothing here proposes a superseded_by.
 		PendingTransactionID: t.GetPendingTransactionId(),
 		Category:             category(t),
-	}), nil
+	}, nil
 }
 
 // optionalDate parses a date Plaid may leave empty.

@@ -13,7 +13,6 @@ func badRow() model.Transaction {
 	t := sample()
 	t.ExternalID = "txn-too-big"
 	t.Amount = dec("99999999999999999999.99")
-	t.BaseAmount = nullDec("99999999999999999999.99")
 	return t
 }
 

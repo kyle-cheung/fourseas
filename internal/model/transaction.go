@@ -35,14 +35,6 @@ type Transaction struct {
 	Amount   decimal.Decimal
 	Currency string
 
-	// BaseAmount is Amount in the base currency. It is null when no rate is
-	// known, so that a total which cannot be trusted is null instead of a
-	// plausible wrong number.
-	BaseAmount   decimal.NullDecimal
-	BaseCurrency string
-	FXRate       decimal.NullDecimal
-	FXDate       *time.Time
-
 	Pending bool
 	// PendingTransactionID is the pending row that this posted row replaces.
 	PendingTransactionID string
