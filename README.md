@@ -45,6 +45,10 @@ Use `fourseas sync --fx` when the stored non-USD transactions need fresh rates
 without a Plaid sync. It refreshes FX rates only. This mode is strict: an FX
 failure makes the command fail.
 
+FX rates come from `api.frankfurter.dev`. No API key is required. A request
+contains the non-USD currency and its oldest required date range. It does not
+contain transaction amounts or Plaid credentials.
+
 ## Exploring the data
 
 ### Open the file
@@ -135,10 +139,13 @@ Group by `currency` as well as by month. A sum across currencies is not a
 number you can trust. See [Limits](#limits) below.
 
 **Spend in USD.** `base_amount` uses the rate that applied on each transaction
-date. Check the conversion coverage before you use this total.
+date. The total is complete only when `unconverted` is zero.
 
 ```sql
-SELECT strftime(date, '%Y-%m') AS month, sum(base_amount) AS spend_usd
+SELECT
+  strftime(date, '%Y-%m') AS month,
+  sum(base_amount) AS spend_usd,
+  count(*) - count(base_amount) AS unconverted
 FROM v_transactions
 WHERE date >= '2026-08-01'
 GROUP BY month
@@ -265,8 +272,9 @@ command stops and tells you to run `fourseas reset`. All of this data can be
 fetched again from Plaid, so migrations would be ceremony.
 
 Upgrading from schema version 1 requires `fourseas reset`, followed by a full
-`fourseas sync`. The reset removes the local database, and the full sync fetches
-the source data again.
+`fourseas sync`. Reset drops the local tables and data, then rebuilds schema
+version 2. It does not delete the database file. The full sync fetches the
+source data again.
 
 The full design is in
 [docs/superpowers/specs/2026-08-12-fourseas-build1-design.md](docs/superpowers/specs/2026-08-12-fourseas-build1-design.md).
