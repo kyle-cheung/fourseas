@@ -22,6 +22,9 @@ var ErrRestartPagination = errors.New("pagination must start again from the last
 // wanted the item removed has what it asked for and can carry on.
 var ErrItemGone = errors.New("the provider does not have this item")
 
+// ErrProductNotReady says Plaid is still preparing the first transaction sync.
+var ErrProductNotReady = errors.New("the transactions product is not ready")
+
 // Batch is one page of incremental changes from a provider.
 type Batch struct {
 	Added      []model.Transaction

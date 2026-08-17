@@ -102,6 +102,10 @@ const mutationDuringPagination = "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION"
 // unlink treats it as a success, because the item is already gone.
 const itemNotFound = "ITEM_NOT_FOUND"
 
+// productNotReady is the code Plaid returns while it is still preparing the
+// first transaction sync for a newly linked item.
+const productNotReady = "PRODUCT_NOT_READY"
+
 // codedError builds the error for one Plaid error body. Codes the caller can act
 // on carry a sentinel, so that acting on them needs no string matching.
 func codedError(op, code, errType, message string) error {
@@ -111,6 +115,8 @@ func codedError(op, code, errType, message string) error {
 		err = fmt.Errorf("%w: %w", provider.ErrRestartPagination, err)
 	case itemNotFound:
 		err = fmt.Errorf("%w: %w", provider.ErrItemGone, err)
+	case productNotReady:
+		err = fmt.Errorf("%w: %w", provider.ErrProductNotReady, err)
 	}
 	return fmt.Errorf("%s: %w", op, err)
 }

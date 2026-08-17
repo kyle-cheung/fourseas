@@ -78,9 +78,7 @@ func Link(ctx context.Context, cfg Config, days int) (LinkResult, error) {
 	go server.Serve(listener)
 	defer server.Shutdown(context.Background())
 
-	url := fmt.Sprintf("http://localhost:%d", cfg.LinkPort)
-	fmt.Printf("Open %s in your browser to sign in to the bank.\n", url)
-	openBrowser(url)
+	openBrowser(LinkURL(cfg))
 
 	select {
 	case result := <-results:
@@ -88,8 +86,23 @@ func Link(ctx context.Context, cfg Config, days int) (LinkResult, error) {
 	case err := <-failures:
 		return LinkResult{}, err
 	case <-ctx.Done():
-		return LinkResult{}, fmt.Errorf("link was not completed: %w", ctx.Err())
+		shutdownCtx, stopShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = server.Shutdown(shutdownCtx)
+		stopShutdown()
+
+		select {
+		case result := <-results:
+			return result, nil
+		default:
+			return LinkResult{}, fmt.Errorf("link was not completed: %w", ctx.Err())
+		}
 	}
+}
+
+// LinkURL is the local address the Link widget serves on. Both the CLI and
+// the TUI show this URL to the user before the browser opens.
+func LinkURL(cfg Config) string {
+	return fmt.Sprintf("http://localhost:%d", cfg.LinkPort)
 }
 
 func createLinkToken(ctx context.Context, client *plaidsdk.APIClient, cfg Config, days int) (string, error) {

@@ -40,6 +40,8 @@ func runLink(ctx context.Context, cfg settings, options []string) error {
 		fmt.Printf("  http://localhost:%d/oauth\n\n", cfg.plaid.LinkPort)
 	}
 
+	fmt.Printf("Open %s in your browser to sign in to the bank.\n", plaidprovider.LinkURL(cfg.plaid))
+
 	result, err := plaidprovider.Link(ctx, cfg.plaid, days)
 	if err != nil {
 		return err
