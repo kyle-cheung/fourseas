@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
+	"time"
 
 	"github.com/kyle-cheung/fourseas/providence/internal/model"
 	"github.com/kyle-cheung/fourseas/providence/internal/provider"
@@ -18,7 +21,25 @@ const maxPages = 100
 const rowsToShow = 10
 
 // runSync fetches new transactions for every linked card and prints the newest.
-func runSync(ctx context.Context, cfg settings) error {
+func runSync(ctx context.Context, cfg settings, options []string) error {
+	return runSyncWith(ctx, cfg, options, newFXSource(), os.Stdout)
+}
+
+func runSyncWith(ctx context.Context, cfg settings, options []string, source fxSource, out io.Writer) error {
+	fxOnly, err := parseSyncOptions(options)
+	if err != nil {
+		return err
+	}
+	if fxOnly {
+		db, err := store.Open(cfg.dbPath)
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+
+		return runFXPhase(ctx, db, source, time.Now(), true, out)
+	}
+
 	if err := cfg.plaid.Validate(); err != nil {
 		return err
 	}
@@ -62,7 +83,20 @@ func runSync(ctx context.Context, cfg settings) error {
 	if attempted > 0 && failed == attempted {
 		return fmt.Errorf("every card failed to sync")
 	}
+	if err := runFXPhase(ctx, db, source, time.Now(), false, out); err != nil {
+		return err
+	}
 	return printNewest(ctx, db, rowsToShow)
+}
+
+func parseSyncOptions(options []string) (bool, error) {
+	if len(options) == 0 {
+		return false, nil
+	}
+	if len(options) == 1 && options[0] == "--fx" {
+		return true, nil
+	}
+	return false, fmt.Errorf("unknown sync options: %q", options)
 }
 
 // label is the name to show for an item in terminal output.

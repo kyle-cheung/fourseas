@@ -9,7 +9,7 @@ import (
 // SchemaVersion is the version this build writes and reads. Raise it whenever
 // a column changes. There is no migration framework: a mismatch stops the
 // command and the user runs `fourseas reset`.
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 // VersionError says the file on disk belongs to another build.
 type VersionError struct {
@@ -28,14 +28,10 @@ func (e *VersionError) Error() string {
 }
 
 // tables is every table the schema owns, in the order they are dropped.
-var tables = []string{"transactions", "accounts", "institutions", "sync_state", "schema_version"}
+var tables = []string{"transactions", "fx_rates", "accounts", "institutions", "sync_state", "schema_version"}
 
 // ddl builds the schema. Every money column is DECIMAL, never DOUBLE, because
 // a float sum of money is wrong.
-//
-// Every column of version 1 is here, including the ones issues 4 and 6 are the
-// first to fill in. Landing them together keeps later parallel work out of this
-// file.
 const ddl = `
 CREATE TABLE IF NOT EXISTS schema_version (
 	version INTEGER NOT NULL
@@ -82,16 +78,20 @@ CREATE TABLE IF NOT EXISTS transactions (
 	merchant_name          VARCHAR,
 	amount                 DECIMAL(18,4),
 	currency               VARCHAR,
-	base_amount            DECIMAL(18,4),
-	base_currency          VARCHAR,
-	fx_rate                DECIMAL(18,8),
-	fx_date                DATE,
 	pending                BOOLEAN,
 	pending_transaction_id VARCHAR,
 	superseded_by          VARCHAR,
 	category               VARCHAR,
 	synced_at              TIMESTAMP,
 	PRIMARY KEY (provider, external_id)
+);
+
+CREATE TABLE IF NOT EXISTS fx_rates (
+	date          DATE NOT NULL,
+	currency      VARCHAR NOT NULL,
+	base_currency VARCHAR NOT NULL,
+	rate          DECIMAL(18,8) NOT NULL,
+	PRIMARY KEY (date, currency, base_currency)
 );
 
 CREATE TABLE IF NOT EXISTS sync_state (

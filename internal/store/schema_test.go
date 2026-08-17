@@ -23,10 +23,41 @@ func TestSchemaIsCreatedFromNothingAndStamped(t *testing.T) {
 		t.Errorf("version = %d, want %d", version, SchemaVersion)
 	}
 
-	for _, table := range []string{"institutions", "accounts", "transactions", "sync_state", "schema_version"} {
+	for _, table := range []string{"institutions", "accounts", "transactions", "fx_rates", "sync_state", "schema_version"} {
 		var n int
 		if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM `+table).Scan(&n); err != nil {
 			t.Errorf("table %s is missing: %v", table, err)
+		}
+	}
+}
+
+func TestTransactionsTableDoesNotPersistConversionFields(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT column_name
+		FROM information_schema.columns
+		WHERE table_schema = 'main' AND table_name = 'transactions'`)
+	if err != nil {
+		t.Fatalf("list transaction columns: %v", err)
+	}
+	defer rows.Close()
+
+	columns := make(map[string]bool)
+	for rows.Next() {
+		var column string
+		if err := rows.Scan(&column); err != nil {
+			t.Fatalf("scan transaction column: %v", err)
+		}
+		columns[column] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("list transaction columns: %v", err)
+	}
+	for _, column := range []string{"base_amount", "base_currency", "fx_rate", "fx_date"} {
+		if columns[column] {
+			t.Errorf("transactions has computed column %q, want raw provider fields only", column)
 		}
 	}
 }

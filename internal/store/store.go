@@ -1,10 +1,10 @@
-// Package store keeps institutions, accounts, transactions, and sync cursors
-// in a local DuckDB file.
+// Package store keeps institutions, accounts, transactions, exchange rates,
+// and sync cursors in a local DuckDB file.
 //
 // It must not import any provider SDK.
 //
 // One file holds each table: schema.go, accounts.go, transactions.go,
-// sync_state.go, and views.go.
+// fx_rates.go, sync_state.go, and views.go.
 package store
 
 import (

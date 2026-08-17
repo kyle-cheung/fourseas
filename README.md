@@ -26,7 +26,8 @@ Plaid needs setup in its dashboard before `link` works. See
 | Command | What it does |
 | ------- | ------------ |
 | `fourseas link` | Link one institution through Plaid Link in the browser |
-| `fourseas sync` | Fetch what changed, store it, and print the newest rows |
+| `fourseas sync` | Fetch what changed from Plaid, refresh FX rates, and print the newest rows |
+| `fourseas sync --fx` | Refresh FX rates only |
 | `fourseas accounts` | List accounts with ids, balances, and nicknames |
 | `fourseas accounts nickname <id> "<name>"` | Name an account. An empty name clears it |
 | `fourseas show` | Print the newest stored rows without calling Plaid |
@@ -34,6 +35,19 @@ Plaid needs setup in its dashboard before `link` works. See
 
 Settings come from `.env`. The database is `data/fourseas.duckdb` unless you set
 `FOURSEAS_DB_PATH`.
+
+### Refresh FX rates
+
+Normal `fourseas sync` refreshes FX rates after it fetches transactions from
+Plaid. An FX failure prints a warning and does not fail the transaction sync.
+
+Use `fourseas sync --fx` when the stored non-USD transactions need fresh rates
+without a Plaid sync. It refreshes FX rates only. This mode is strict: an FX
+failure makes the command fail.
+
+FX rates come from `api.frankfurter.dev`. No API key is required. A request
+contains the non-USD currency and its oldest required date range. It does not
+contain transaction amounts or Plaid credentials.
 
 ## Exploring the data
 
@@ -60,7 +74,7 @@ command line tool can refuse the file. `duckdb --version` reports yours.
 
 ### Read `v_transactions`, not `transactions`
 
-`v_transactions` is the view to explore. It does two things the raw table does
+`v_transactions` is the view to explore. It does three things the raw table does
 not:
 
 1. It joins each transaction to its account and institution, so a row carries
@@ -68,13 +82,25 @@ not:
 2. It hides superseded rows. Plaid gives the pending and the posted version of
    one charge different transaction ids. Both are stored. Without the view, one
    charge is counted two times.
+3. It adds USD conversion fields: `base_amount`, `base_currency`, and
+   `fx_rate`.
 
 The `account` column is the name to group by. It is the nickname, or the
 provider's name when there is no nickname, or the raw account id when there is
 no account row yet.
 
-The raw tables stay available. Query `transactions` when you want the superseded
-rows, for example to see what a charge looked like while it was pending.
+`base_amount` is the transaction amount in USD. `base_currency` is `USD` when a
+conversion is available. `fx_rate` is the rate used for that conversion. USD
+transactions have an `fx_rate` of 1.
+
+For a non-USD transaction, the view uses an ASOF join to select the latest rate
+on or before the transaction date. A weekend or holiday uses the prior available
+rate. A transaction before the first stored rate has null conversion fields.
+
+The raw tables stay available. `transactions` keeps the provider fields, such as
+the original `amount` and `currency`; conversion fields exist in the view only.
+Query `transactions` when you want the superseded rows, for example to see what
+a charge looked like while it was pending.
 
 ### Worked examples
 
@@ -111,6 +137,20 @@ ORDER BY month, currency;
 
 Group by `currency` as well as by month. A sum across currencies is not a
 number you can trust. See [Limits](#limits) below.
+
+**Spend in USD.** `base_amount` uses the rate that applied on each transaction
+date. The total is complete only when `unconverted` is zero.
+
+```sql
+SELECT
+  strftime(date, '%Y-%m') AS month,
+  sum(base_amount) AS spend_usd,
+  count(*) - count(base_amount) AS unconverted
+FROM v_transactions
+WHERE date >= '2026-08-01'
+GROUP BY month
+ORDER BY month;
+```
 
 **Spend by category.** The category is Plaid's primary personal finance
 category, such as `FOOD_AND_DRINK`.
@@ -171,10 +211,9 @@ DESCRIBE v_transactions;
 
 ## Limits
 
-**Cross-currency totals do not work yet.** `base_amount` holds the amount in
-USD, the base currency. USD rows carry it with an `fx_rate` of 1.0. Rows in
-another currency, such as a Canadian card, carry **null**, because no exchange
-rate is stored.
+**Cross-currency totals need a coverage check.** `base_amount` holds the amount
+in USD, the base currency. USD rows carry it with an `fx_rate` of 1.0. A
+non-USD row has a value only after a rate is stored for it.
 
 This is deliberate. A wrong total is worse than a missing one. But note what
 `sum` does with nulls: it skips them silently. So a sum of `base_amount` across
@@ -198,8 +237,8 @@ ORDER BY currency;
 └──────────┴───────┴─────────────┘
 ```
 
-Until exchange rates arrive, group by `currency` and read one currency at a
-time.
+Use `fourseas sync --fx` to refresh missing rates, or group by `currency` and
+read one currency at a time.
 
 **About 90 days of history.** That is Plaid's default window for a newly linked
 Item. More history needs an explicit historical request.
@@ -215,7 +254,7 @@ git. This is good enough for one local user, and not for anything shared.
 
 ## Schema
 
-Version 1. Money columns are `DECIMAL(18,4)`, never `DOUBLE`, because a float
+Version 2. Money columns are `DECIMAL(18,4)`, never `DOUBLE`, because a float
 sum of money is wrong.
 
 | Table | Holds |
@@ -223,6 +262,7 @@ sum of money is wrong.
 | `institutions` | One row for each linked Plaid Item |
 | `accounts` | One row for each card, with balances and the nickname |
 | `transactions` | Every transaction, including the superseded ones |
+| `fx_rates` | Daily exchange rates from each currency to USD |
 | `sync_state` | The cursor for each institution |
 | `schema_version` | One integer |
 | `v_transactions` | The view above: joined, and without superseded rows |
@@ -230,6 +270,11 @@ sum of money is wrong.
 There is no migration framework. When the file on disk has another version, the
 command stops and tells you to run `fourseas reset`. All of this data can be
 fetched again from Plaid, so migrations would be ceremony.
+
+Upgrading from schema version 1 requires `fourseas reset`, followed by a full
+`fourseas sync`. Reset drops the local tables and data, then rebuilds schema
+version 2. It does not delete the database file. The full sync fetches the
+source data again.
 
 The full design is in
 [docs/superpowers/specs/2026-08-12-fourseas-build1-design.md](docs/superpowers/specs/2026-08-12-fourseas-build1-design.md).

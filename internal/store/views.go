@@ -12,6 +12,14 @@ import (
 // tool. The raw tables stay available for anyone who wants superseded rows.
 const transactionsView = "v_transactions"
 
+// transactionViewColumns is the read order used by NewestView.
+const transactionViewColumns = `
+	provider, external_id, item_id, account_id,
+	date, authorized_date, name, merchant_name,
+	amount, currency,
+	pending, pending_transaction_id, superseded_by, category, synced_at,
+	base_amount, base_currency, fx_rate, account, institution_name`
+
 // viewDDL joins transactions to their account and institution, and hides the
 // pending row of a charge whose posted row has arrived. Without that, a sum
 // counts one charge two times.
@@ -28,14 +36,22 @@ SELECT
 	coalesce(t.merchant_name, t.name) AS description,
 	t.amount,
 	t.currency,
-	t.base_amount,
-	t.base_currency,
+	CAST(CASE
+		WHEN t.currency = 'USD' THEN t.amount
+		WHEN r.rate IS NOT NULL THEN
+			CAST(t.amount AS DECIMAL(38,4)) * CAST(r.rate AS DECIMAL(38,8))
+	END AS DECIMAL(18,4)) AS base_amount,
+	CASE
+		WHEN t.currency = 'USD' OR r.rate IS NOT NULL THEN 'USD'
+	END AS base_currency,
 	t.category,
 	t.pending,
 	t.name,
 	t.merchant_name,
-	t.fx_rate,
-	t.fx_date,
+	CAST(CASE
+		WHEN t.currency = 'USD' THEN 1
+		WHEN r.rate IS NOT NULL THEN r.rate
+	END AS DECIMAL(18,8)) AS fx_rate,
 	t.pending_transaction_id,
 	t.superseded_by,
 	t.provider,
@@ -44,6 +60,10 @@ SELECT
 	t.account_id,
 	t.synced_at
 FROM transactions t
+ASOF LEFT JOIN fx_rates r
+	ON r.currency = t.currency
+	AND r.base_currency = 'USD'
+	AND r.date <= t.date
 LEFT JOIN accounts a
 	ON a.provider = t.provider AND a.account_id = t.account_id
 LEFT JOIN institutions i
@@ -55,7 +75,7 @@ WHERE t.superseded_by IS NULL;
 // rows are left out, and each row carries its account and institution name.
 func (s *Store) NewestView(ctx context.Context, n int) ([]model.TransactionView, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT `+transactionColumns+`, account, institution_name
+		SELECT `+transactionViewColumns+`
 		FROM `+transactionsView+`
 		ORDER BY date DESC, external_id DESC
 		LIMIT ?`, n)
@@ -66,30 +86,60 @@ func (s *Store) NewestView(ctx context.Context, n int) ([]model.TransactionView,
 
 	var out []model.TransactionView
 	for rows.Next() {
-		var (
-			view            model.TransactionView
-			label, instName sql.NullString
-			row             = &viewScanner{rows: rows, extra: []any{&label, &instName}}
-		)
-		t, err := scanTransaction(row)
+		view, err := scanTransactionView(rows)
 		if err != nil {
 			return nil, fmt.Errorf("scan view row: %w", err)
 		}
-		view.Transaction = t
-		view.AccountLabel = text(label)
-		view.InstitutionName = text(instName)
 		out = append(out, view)
 	}
 	return out, rows.Err()
 }
 
-// viewScanner lets scanTransaction read the transaction columns while the
-// view's extra display columns are scanned beside them.
-type viewScanner struct {
-	rows  *sql.Rows
-	extra []any
-}
+// scanTransactionView reads one row in transactionViewColumns order.
+func scanTransactionView(row scanner) (model.TransactionView, error) {
+	var (
+		view                                                             model.TransactionView
+		itemID, accountID, name, merchantName, currency                  sql.NullString
+		pendingID, supersededBy, category, baseCurrency, label, instName sql.NullString
+		authorizedDate, syncedAt                                         sql.NullTime
+		amount, baseAmount, fxRate                                       any
+	)
 
-func (v *viewScanner) Scan(dest ...any) error {
-	return v.rows.Scan(append(dest, v.extra...)...)
+	err := row.Scan(
+		&view.Provider, &view.ExternalID, &itemID, &accountID,
+		&view.Date, &authorizedDate, &name, &merchantName,
+		&amount, &currency,
+		&view.Pending, &pendingID, &supersededBy, &category, &syncedAt,
+		&baseAmount, &baseCurrency, &fxRate, &label, &instName,
+	)
+	if err != nil {
+		return model.TransactionView{}, err
+	}
+
+	if view.Amount, err = toDecimal(amount); err != nil {
+		return model.TransactionView{}, fmt.Errorf("amount: %w", err)
+	}
+	if view.BaseAmount, err = toNullDecimal(baseAmount); err != nil {
+		return model.TransactionView{}, fmt.Errorf("base_amount: %w", err)
+	}
+	if view.FXRate, err = toNullDecimal(fxRate); err != nil {
+		return model.TransactionView{}, fmt.Errorf("fx_rate: %w", err)
+	}
+
+	view.ItemID = text(itemID)
+	view.AccountID = text(accountID)
+	view.AuthorizedDate = timePtr(authorizedDate)
+	view.Name = text(name)
+	view.MerchantName = text(merchantName)
+	view.Currency = text(currency)
+	view.PendingTransactionID = text(pendingID)
+	view.SupersededBy = text(supersededBy)
+	view.Category = text(category)
+	if when := timePtr(syncedAt); when != nil {
+		view.SyncedAt = *when
+	}
+	view.BaseCurrency = text(baseCurrency)
+	view.AccountLabel = text(label)
+	view.InstitutionName = text(instName)
+	return view, nil
 }

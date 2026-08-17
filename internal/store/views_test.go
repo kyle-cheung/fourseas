@@ -74,12 +74,137 @@ func TestViewExposesTheDocumentedColumns(t *testing.T) {
 
 	for _, want := range []string{
 		"date", "account", "nickname", "institution_name", "description",
-		"amount", "currency", "base_amount", "category", "pending",
+		"amount", "currency", "base_amount", "base_currency", "fx_rate",
+		"category", "pending",
 	} {
 		if !found[want] {
 			t.Errorf("%s has no column %q, and the README tells people to query it",
 				transactionsView, want)
 		}
+	}
+	if found["fx_date"] {
+		t.Errorf("%s exposes fx_date, want conversion dates to stay internal", transactionsView)
+	}
+}
+
+func TestViewCalculatesBaseValuesWithASOFRates(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	transactions := []model.Transaction{
+		viewTransaction("txn-usd", "2026-08-11", "24.75", "USD"),
+		viewTransaction("txn-cad-exact", "2026-08-07", "10", "CAD"),
+		viewTransaction("txn-cad-weekend", "2026-08-09", "20", "CAD"),
+		viewTransaction("txn-cad-future", "2026-08-12", "30", "CAD"),
+		viewTransaction("txn-cad-too-old", "2026-08-05", "40", "CAD"),
+	}
+	if err := s.Upsert(ctx, transactions); err != nil {
+		t.Fatalf("upsert transactions: %v", err)
+	}
+
+	rates := []model.FXRate{
+		{Date: day("2026-08-06"), Currency: "CAD", BaseCurrency: "USD", Rate: dec("0.72")},
+		{Date: day("2026-08-07"), Currency: "CAD", BaseCurrency: "USD", Rate: dec("0.73")},
+		{Date: day("2026-08-10"), Currency: "CAD", BaseCurrency: "USD", Rate: dec("0.74")},
+	}
+	if err := s.UpsertFXRates(ctx, rates); err != nil {
+		t.Fatalf("upsert rates: %v", err)
+	}
+
+	got, err := s.NewestView(ctx, len(transactions))
+	if err != nil {
+		t.Fatalf("newest view: %v", err)
+	}
+	byID := make(map[string]model.TransactionView, len(got))
+	for _, row := range got {
+		byID[row.ExternalID] = row
+	}
+
+	tests := []struct {
+		name       string
+		id         string
+		wantAmount string
+		wantRate   string
+		wantValid  bool
+	}{
+		{name: "USD needs no rate row", id: "txn-usd", wantAmount: "24.75", wantRate: "1", wantValid: true},
+		{name: "CAD uses an exact-date rate", id: "txn-cad-exact", wantAmount: "7.3", wantRate: "0.73", wantValid: true},
+		{name: "CAD uses the prior Friday on a weekend", id: "txn-cad-weekend", wantAmount: "14.6", wantRate: "0.73", wantValid: true},
+		{name: "future CAD uses the newest stored rate", id: "txn-cad-future", wantAmount: "22.2", wantRate: "0.74", wantValid: true},
+		{name: "CAD older than the first rate stays null", id: "txn-cad-too-old", wantValid: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			row, ok := byID[tc.id]
+			if !ok {
+				t.Fatalf("view has no row %q", tc.id)
+			}
+			if row.BaseAmount.Valid != tc.wantValid {
+				t.Fatalf("BaseAmount.Valid = %v, want %v", row.BaseAmount.Valid, tc.wantValid)
+			}
+			if row.FXRate.Valid != tc.wantValid {
+				t.Fatalf("FXRate.Valid = %v, want %v", row.FXRate.Valid, tc.wantValid)
+			}
+			if !tc.wantValid {
+				if row.BaseCurrency != "" {
+					t.Errorf("BaseCurrency = %q, want empty", row.BaseCurrency)
+				}
+				return
+			}
+			if !row.BaseAmount.Decimal.Equal(dec(tc.wantAmount)) {
+				t.Errorf("BaseAmount = %s, want %s", row.BaseAmount.Decimal, tc.wantAmount)
+			}
+			if row.BaseCurrency != model.BaseCurrency {
+				t.Errorf("BaseCurrency = %q, want %q", row.BaseCurrency, model.BaseCurrency)
+			}
+			if !row.FXRate.Decimal.Equal(dec(tc.wantRate)) {
+				t.Errorf("FXRate = %s, want %s", row.FXRate.Decimal, tc.wantRate)
+			}
+		})
+	}
+}
+
+func TestViewConvertsALargeForeignAmountWithoutIntermediateOverflow(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	txn := viewTransaction("txn-cad-large", "2026-08-07", "2000000.0000", "CAD")
+	if err := s.Upsert(ctx, []model.Transaction{txn}); err != nil {
+		t.Fatalf("upsert transaction: %v", err)
+	}
+	rate := model.FXRate{
+		Date: day("2026-08-07"), Currency: "CAD", BaseCurrency: "USD", Rate: dec("0.73"),
+	}
+	if err := s.UpsertFXRates(ctx, []model.FXRate{rate}); err != nil {
+		t.Fatalf("upsert rate: %v", err)
+	}
+
+	got, err := s.NewestView(ctx, 1)
+	if err != nil {
+		t.Fatalf("newest view: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("newest view returned %d rows, want 1", len(got))
+	}
+	if !got[0].BaseAmount.Valid || !got[0].BaseAmount.Decimal.Equal(dec("1460000.0000")) {
+		t.Errorf("BaseAmount = %+v, want 1460000.0000", got[0].BaseAmount)
+	}
+	if got[0].BaseCurrency != model.BaseCurrency {
+		t.Errorf("BaseCurrency = %q, want %q", got[0].BaseCurrency, model.BaseCurrency)
+	}
+	if !got[0].FXRate.Valid || !got[0].FXRate.Decimal.Equal(dec("0.73")) {
+		t.Errorf("FXRate = %+v, want 0.73", got[0].FXRate)
+	}
+}
+
+func viewTransaction(id, date, amount, currency string) model.Transaction {
+	return model.Transaction{
+		Provider:   "plaid",
+		ExternalID: id,
+		AccountID:  "acct-amex",
+		Date:       day(date),
+		Amount:     dec(amount),
+		Currency:   currency,
 	}
 }
 

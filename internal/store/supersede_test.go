@@ -16,7 +16,6 @@ func pgePending() model.Transaction {
 	t.Name = "Pacific Gas Electric Company"
 	t.Date = day("2026-08-10")
 	t.Amount = dec("138.98")
-	t.BaseAmount = nullDec("138.98")
 	t.Pending = true
 	t.PendingTransactionID = ""
 	t.SupersededBy = ""
@@ -29,7 +28,6 @@ func pgePosted() model.Transaction {
 	t.Name = "Pacific Gas And Elecwest"
 	t.Date = day("2026-08-11")
 	t.Amount = dec("138.98")
-	t.BaseAmount = nullDec("138.98")
 	t.Pending = false
 	t.PendingTransactionID = "txn-pge-pending"
 	t.SupersededBy = ""

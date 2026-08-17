@@ -71,6 +71,12 @@ type SyncState struct {
 // and institution names joined in, for display.
 type TransactionView struct {
 	Transaction
+	// BaseAmount is Amount in the base currency. It is null when no rate is
+	// known, so that a total which cannot be trusted is null instead of a
+	// plausible wrong number.
+	BaseAmount   decimal.NullDecimal
+	BaseCurrency string
+	FXRate       decimal.NullDecimal
 	// AccountLabel is the nickname, or the account name, or the raw account
 	// id when neither is known yet.
 	AccountLabel    string
