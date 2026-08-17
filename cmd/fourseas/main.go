@@ -2,6 +2,7 @@
 // local DuckDB file and reads them back.
 //
 //	fourseas link      link one card, then repeat for the next card
+//	fourseas link --days 365  request less history than the default 730 days
 //	fourseas sync      fetch new transactions and FX rates, then print the newest rows
 //	fourseas sync --fx fetch FX rates only
 //	fourseas accounts  list the stored accounts with their balances
@@ -21,7 +22,11 @@ import (
 const usage = `fourseas - Plaid to DuckDB transactions
 
 Usage:
-  fourseas link      Link one card through Plaid Link in your browser
+  fourseas link      Link one card through Plaid Link in your browser. Requests
+                     730 days of history, the most Plaid permits
+  fourseas link --days 365
+                     Link with less history. 30 to 730 days. Plaid fixes the
+                     amount when the card is linked and cannot change it later
   fourseas sync      Fetch new transactions and FX rates, then print the newest rows
   fourseas sync --fx Fetch FX rates only
   fourseas accounts  List the stored accounts with their balances and ids
@@ -53,7 +58,7 @@ func run() error {
 
 	switch os.Args[1] {
 	case "link":
-		return runLink(ctx, cfg)
+		return runLink(ctx, cfg, os.Args[2:])
 	case "sync":
 		return runSync(ctx, cfg, os.Args[2:])
 	case "accounts":

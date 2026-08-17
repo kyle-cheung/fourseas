@@ -79,8 +79,15 @@ after moving to production, they are left over from a sandbox run.
 
 ## Limits worth knowing
 
-**About 90 days of history.** That is Plaid's default window for a newly linked
-Item. More history needs an explicit historical request.
+**History is chosen once, at link time.** `fourseas link` sends
+`transactions.days_requested` in the link token request and asks for 730 days,
+the most Plaid permits. Plaid would request 90 days if nothing were asked for.
+
+Plaid fixes this amount while it initializes the transactions product, and it
+cannot be raised for the life of the item: `days_requested` in a later
+`/transactions/sync` call is ignored. To get more history for a card that is
+already linked, remove the item and link the card again. Use
+`fourseas link --days <n>` (30 to 730) to ask for less.
 
 **One cursor for each institution, not for each account.** `/transactions/sync`
 works on an access token, and one access token covers every account in that
