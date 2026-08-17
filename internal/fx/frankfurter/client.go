@@ -41,8 +41,10 @@ type rateResponse struct {
 
 // Rates returns exchange rates for currency in baseCurrency from from through to.
 func (c *Client) Rates(ctx context.Context, currency, baseCurrency string, from, to time.Time) ([]model.FXRate, error) {
-	if to.Before(from) {
-		return nil, fmt.Errorf("invalid request range: to %s is before from %s", to.Format(time.DateOnly), from.Format(time.DateOnly))
+	fromDate := from.Format(time.DateOnly)
+	toDate := to.Format(time.DateOnly)
+	if toDate < fromDate {
+		return nil, fmt.Errorf("invalid request range: to %s is before from %s", toDate, fromDate)
 	}
 
 	currency = model.NormalizeCurrency(currency)
@@ -55,8 +57,8 @@ func (c *Client) Rates(ctx context.Context, currency, baseCurrency string, from,
 	query := req.URL.Query()
 	query.Set("base", currency)
 	query.Set("quotes", baseCurrency)
-	query.Set("from", from.Format(time.DateOnly))
-	query.Set("to", to.Format(time.DateOnly))
+	query.Set("from", fromDate)
+	query.Set("to", toDate)
 	req.URL.RawQuery = query.Encode()
 
 	resp, err := c.httpClient.Do(req)
@@ -73,6 +75,9 @@ func (c *Client) Rates(ctx context.Context, currency, baseCurrency string, from,
 	decoder := json.NewDecoder(resp.Body)
 	if err := decoder.Decode(&response); err != nil {
 		return nil, fmt.Errorf("decode Frankfurter rates response: %w", err)
+	}
+	if response == nil {
+		return nil, fmt.Errorf("decode Frankfurter rates response: want an array, got null")
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		if err == nil {
