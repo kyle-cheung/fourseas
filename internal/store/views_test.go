@@ -164,6 +164,39 @@ func TestViewCalculatesBaseValuesWithASOFRates(t *testing.T) {
 	}
 }
 
+func TestViewConvertsALargeForeignAmountWithoutIntermediateOverflow(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	txn := viewTransaction("txn-cad-large", "2026-08-07", "2000000.0000", "CAD")
+	if err := s.Upsert(ctx, []model.Transaction{txn}); err != nil {
+		t.Fatalf("upsert transaction: %v", err)
+	}
+	rate := model.FXRate{
+		Date: day("2026-08-07"), Currency: "CAD", BaseCurrency: "USD", Rate: dec("0.73"),
+	}
+	if err := s.UpsertFXRates(ctx, []model.FXRate{rate}); err != nil {
+		t.Fatalf("upsert rate: %v", err)
+	}
+
+	got, err := s.NewestView(ctx, 1)
+	if err != nil {
+		t.Fatalf("newest view: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("newest view returned %d rows, want 1", len(got))
+	}
+	if !got[0].BaseAmount.Valid || !got[0].BaseAmount.Decimal.Equal(dec("1460000.0000")) {
+		t.Errorf("BaseAmount = %+v, want 1460000.0000", got[0].BaseAmount)
+	}
+	if got[0].BaseCurrency != model.BaseCurrency {
+		t.Errorf("BaseCurrency = %q, want %q", got[0].BaseCurrency, model.BaseCurrency)
+	}
+	if !got[0].FXRate.Valid || !got[0].FXRate.Decimal.Equal(dec("0.73")) {
+		t.Errorf("FXRate = %+v, want 0.73", got[0].FXRate)
+	}
+}
+
 func viewTransaction(id, date, amount, currency string) model.Transaction {
 	return model.Transaction{
 		Provider:   "plaid",

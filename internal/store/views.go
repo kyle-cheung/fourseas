@@ -38,7 +38,8 @@ SELECT
 	t.currency,
 	CAST(CASE
 		WHEN t.currency = 'USD' THEN t.amount
-		WHEN r.rate IS NOT NULL THEN t.amount * r.rate
+		WHEN r.rate IS NOT NULL THEN
+			CAST(t.amount AS DECIMAL(38,4)) * CAST(r.rate AS DECIMAL(38,8))
 	END AS DECIMAL(18,4)) AS base_amount,
 	CASE
 		WHEN t.currency = 'USD' OR r.rate IS NOT NULL THEN 'USD'
