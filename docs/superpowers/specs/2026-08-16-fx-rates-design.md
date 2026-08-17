@@ -160,6 +160,10 @@ the current UTC date. Choose the start date as follows:
   oldest transaction date.
 - Otherwise, start at the newest stored rate date.
 
+If the selected start date is after today, clamp it to today. This lets a
+future-dated transaction acquire the latest available rate for its ASOF
+lookup without sending an inverted date range to Frankfurter.
+
 Starting again at the newest stored rate refreshes the latest published value.
 The idempotent upsert replaces that row and inserts any newer rows. A newly
 discovered older transaction causes a complete backfill for the expanded
