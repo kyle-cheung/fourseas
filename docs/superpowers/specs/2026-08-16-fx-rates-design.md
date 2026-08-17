@@ -20,10 +20,10 @@ The raw transaction remains the provider record. It keeps its original
 The base currency remains the existing `model.BaseCurrency` value, `USD`.
 Account linking does not ask the user to select a base currency.
 
-FX sync runs when at least one stored transaction has a non-empty currency
-other than USD. It does not use the number of distinct account currencies as
-its trigger. This rule also converts a database that contains only one CAD
-account.
+One store query lists each non-USD transaction currency and its oldest
+transaction date. A non-empty result both triggers FX sync and defines its
+work. Do not add a separate trigger query. This rule also converts a database
+that contains only one CAD account.
 
 ### Rate source
 
@@ -42,6 +42,18 @@ amount in CAD * CAD-to-USD rate = amount in USD
 Frankfurter supports base and quote filters, historical dates, and date
 ranges. Its v2 documentation is at <https://frankfurter.dev/>.
 
+Frankfurter's default mode blends rates from many providers. It is not limited
+to ECB publication dates. However, the design must also work when a provider
+does not publish on a weekend, holiday, or the current date.
+
+### Currency normalization
+
+Store `transactions.currency`, `fx_rates.currency`, and
+`fx_rates.base_currency` as uppercase ISO codes. Normalize at both store write
+boundaries so a provider-specific mapper cannot bypass the rule. Compare the
+base currency with `upper(currency)` in the work query. Validate Frankfurter
+response currencies after normalizing them to uppercase.
+
 ### Derived values
 
 Remove `base_amount`, `base_currency`, `fx_rate`, and `fx_date` from the raw
@@ -55,18 +67,29 @@ Keep these computed columns in `v_transactions`:
 - `base_currency`
 - `fx_rate`
 
-Do not expose `fx_date`. The rate joins on the transaction date, so another
-date column would repeat that value.
+Do not expose `fx_date`.
 
 For a USD transaction, the view uses rate `1`, copies `amount` to
 `base_amount`, and sets `base_currency` to `USD`. It does not need an
 `fx_rates` row for USD.
 
-For a non-USD transaction, the view left-joins the rate for its currency and
-transaction date. It multiplies `amount` by `rate` and casts `base_amount` to
-`DECIMAL(18,4)`. If no matching rate exists, `base_amount`, `base_currency`,
-and `fx_rate` are null. This keeps an incomplete conversion visible and avoids
-a plausible but wrong total.
+For a non-USD transaction, the view uses an `ASOF LEFT JOIN` to select the
+newest rate on or before the transaction date:
+
+```sql
+ASOF LEFT JOIN fx_rates r
+  ON r.currency = t.currency
+ AND r.base_currency = 'USD'
+ AND r.date <= t.date
+```
+
+This rule carries the most recent published rate across weekends, holidays,
+publication lag, and future-dated transactions. It multiplies `amount` by
+`rate` and casts `base_amount` to `DECIMAL(18,4)`. If no rate exists on or
+before the transaction date, `base_amount`, `base_currency`, and `fx_rate` are
+null. This keeps a real coverage gap visible and avoids a plausible but wrong
+total. DuckDB documents this lookup behavior in its
+[ASOF JOIN reference](https://duckdb.org/docs/stable/sql/query_syntax/from.html#as-of-joins).
 
 ## Schema
 
@@ -116,21 +139,31 @@ No production code or test depends on a Frankfurter API key.
 Add focused store operations that:
 
 - list each non-USD transaction currency and its oldest transaction date;
-- find missing contiguous date ranges from that date through yesterday;
+- read the oldest and newest stored rate date for one currency pair;
 - upsert one returned range in a database transaction;
 - read rates through `v_transactions`.
 
-Missing ranges are calculated for calendar dates. This supports the daily
-series returned by the default Frankfurter blend. A missing date remains
-eligible for a later retry.
+Split the raw and view read paths. `transactionColumns` and `scanTransaction`
+continue to read only the raw transaction fields. Add a separate view column
+list and `scanTransactionView` for the raw fields plus computed conversion and
+display fields. Remove `viewScanner`; the view scanner reads its own explicit
+shape.
 
 ### FX sync service
 
 Keep orchestration separate from the Frankfurter HTTP client and the store.
-For each required currency, the FX sync service finds missing ranges, fetches
-them in date order, and stores them. It then fetches today once as a separate
-one-day refresh, even when today's row already exists. Older stored dates are
-not fetched again unless they are missing.
+For each required currency, the FX sync service makes one range request through
+the current UTC date. Choose the start date as follows:
+
+- If no rates are stored, start at the oldest transaction date.
+- If the oldest transaction is before the oldest stored rate, start at the
+  oldest transaction date.
+- Otherwise, start at the newest stored rate date.
+
+Starting again at the newest stored rate refreshes the latest published value.
+The idempotent upsert replaces that row and inserts any newer rows. A newly
+discovered older transaction causes a complete backfill for the expanded
+span. Do not detect individual missing calendar dates.
 
 Process currencies sequentially. The expected data set is small, and
 parallel requests add no useful behavior in this build.
@@ -176,11 +209,11 @@ Normal sync:
 2. Sync each usable Plaid item with the existing page and cursor rules.
 3. Stop with the existing error if every attempted Plaid item failed.
 4. Query stored transactions for non-USD currencies and their oldest dates.
-5. Find missing ranges through the day before the current UTC date.
-6. Fetch and atomically upsert each range.
-7. Fetch and upsert the current UTC date once.
-8. Print FX warnings without failing the Plaid sync.
-9. Print the newest transactions.
+5. For each currency, choose one start date from its transaction and stored
+   rate bounds.
+6. Fetch through the current UTC date and atomically upsert the response.
+7. Print FX warnings without failing the Plaid sync.
+8. Print the newest transactions.
 
 FX-only sync starts at step 4. It returns an error after processing all
 currencies when one or more currencies failed.
@@ -205,10 +238,13 @@ No test uses the network.
 - Frankfurter client tests use an HTTP test server for the request path,
   query parameters, decimal parsing, bad status, bad JSON, and invalid rows.
 - Store tests cover exact `DECIMAL(18,8)` round trips and idempotent upserts.
-- Missing-range tests cover an empty rate table, an incremental tail, an
-  internal gap, and today's forced refresh.
-- View tests cover USD rate `1`, a converted non-USD amount, and null values
-  when a rate is missing.
+- Range-bound tests cover an empty rate table, an incremental refresh, and a
+  newly discovered older transaction.
+- View tests cover USD rate `1`, an exact-date conversion, a weekend or holiday
+  conversion from the prior rate, a future-dated conversion, and null values
+  for a transaction older than the first rate.
+- Store tests prove transaction and rate currencies are normalized to
+  uppercase.
 - Transaction store tests prove raw rows no longer contain derived FX values.
 - Command tests prove normal sync warns without failing, while `sync --fx`
   returns an error on an FX failure and bypasses Plaid requirements.
