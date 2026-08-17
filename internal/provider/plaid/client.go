@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/kyle-cheung/fourseas/providence/internal/provider"
 	plaidsdk "github.com/plaid/plaid-go/v40/plaid"
 )
 
@@ -80,8 +81,7 @@ func apiError(op string, err error, resp *http.Response) error {
 	if errors.As(err, &plaidErr) {
 		var body plaidsdk.PlaidError
 		if jsonErr := body.UnmarshalJSON(plaidErr.Body()); jsonErr == nil && body.ErrorCode != "" {
-			return fmt.Errorf("%s: plaid %s (%s): %s",
-				op, body.ErrorCode, body.GetErrorType(), body.GetErrorMessage())
+			return codedError(op, body.ErrorCode, string(body.GetErrorType()), body.GetErrorMessage())
 		}
 		if len(plaidErr.Body()) > 0 {
 			return fmt.Errorf("%s: plaid error: %s", op, plaidErr.Body())
@@ -89,6 +89,22 @@ func apiError(op string, err error, resp *http.Response) error {
 	}
 	if resp != nil {
 		return fmt.Errorf("%s: %w (http %d)", op, err, resp.StatusCode)
+	}
+	return fmt.Errorf("%s: %w", op, err)
+}
+
+// mutationDuringPagination is the code Plaid returns when the transaction data
+// of an item changed while a page sequence was being read. The cursors of that
+// sequence are then dead, and the item must start again from the cursor the last
+// whole sync ended on.
+const mutationDuringPagination = "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION"
+
+// codedError builds the error for one Plaid error body. Codes the caller can act
+// on carry a sentinel, so that acting on them needs no string matching.
+func codedError(op, code, errType, message string) error {
+	err := fmt.Errorf("plaid %s (%s): %s", code, errType, message)
+	if code == mutationDuringPagination {
+		err = fmt.Errorf("%w: %w", provider.ErrRestartPagination, err)
 	}
 	return fmt.Errorf("%s: %w", op, err)
 }

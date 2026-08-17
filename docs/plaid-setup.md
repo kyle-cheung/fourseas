@@ -89,6 +89,16 @@ cannot be raised for the life of the item: `days_requested` in a later
 already linked, remove the item and link the card again. Use
 `fourseas link --days <n>` (30 to 730) to ask for less.
 
+**A long first sync can be interrupted by the bank.** When the transaction data
+of an item changes while the pages are read, Plaid fails the call with
+`TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION` and the cursors of that sequence
+are dead. This is common on a first sync of 730 days, because the bank keeps
+posting while the pages arrive.
+
+`fourseas sync` handles it: it puts back the cursor the last whole sync ended on
+and reads the item again, up to five times. Rows read two times are written by
+their id, so nothing is doubled.
+
 **One cursor for each institution, not for each account.** `/transactions/sync`
 works on an access token, and one access token covers every account in that
 institution. A single card cannot be synced alone.

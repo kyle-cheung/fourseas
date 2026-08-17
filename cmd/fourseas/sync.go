@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,10 @@ import (
 
 // maxPages stops a runaway pagination loop.
 const maxPages = 100
+
+// maxRestarts is how many times one item may start its pages again because the
+// provider's data moved while they were read.
+const maxRestarts = 5
 
 // rowsToShow is how many rows fourseas prints after a sync.
 const rowsToShow = 10
@@ -154,16 +159,48 @@ type counts struct {
 	removed  int
 }
 
-// drain reads every page the provider offers and commits each one to the store
-// whole: its rows and its cursor land together, so an interrupted run continues
-// from the last whole page instead of starting over or repeating one.
+// drain reads every page of one item, and starts the item again when the
+// provider says the data moved under the page sequence.
+//
+// A restart is normal on a first sync of a long history: the bank keeps posting
+// while the pages are read. Rows already written are not a problem, because a
+// row is written by its id, so reading a page again writes the same row again.
 func drain(ctx context.Context, db *store.Store, source provider.Provider, itemID string) (counts, error) {
-	var total counts
-
-	cursor, err := db.Cursor(ctx, source.Name(), itemID)
+	// Where the last whole sync ended. Every attempt starts here, so the pages
+	// of a dead sequence are left behind instead of resumed.
+	start, err := db.Cursor(ctx, source.Name(), itemID)
 	if err != nil {
-		return total, err
+		return counts{}, err
 	}
+
+	for attempt := 1; ; attempt++ {
+		total, err := drainFrom(ctx, db, source, itemID, start)
+		if err == nil {
+			return total, nil
+		}
+		if !errors.Is(err, provider.ErrRestartPagination) {
+			return total, err
+		}
+		if attempt >= maxRestarts {
+			return total, fmt.Errorf("the data kept changing over %d attempts: %w", attempt, err)
+		}
+
+		// The cursor of the failed sequence is dead, so put back the one the
+		// last whole sync ended on before asking again.
+		if err := db.SetCursor(ctx, source.Name(), itemID, start); err != nil {
+			return total, err
+		}
+		fmt.Printf("  the data changed while paging %s: starting again (attempt %d of %d)\n",
+			itemID, attempt+1, maxRestarts)
+	}
+}
+
+// drainFrom reads every page the provider offers from cursor, and commits each
+// one to the store whole: its rows and its cursor land together, so an
+// interrupted run continues from the last whole page instead of starting over or
+// repeating one.
+func drainFrom(ctx context.Context, db *store.Store, source provider.Provider, itemID, cursor string) (counts, error) {
+	var total counts
 
 	for page := 0; page < maxPages; page++ {
 		batch, err := source.Sync(ctx, cursor)

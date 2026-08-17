@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -306,6 +307,90 @@ func TestDrainHidesThePendingRowWhenThePostedRowArrivesLater(t *testing.T) {
 	}
 	if len(shown) != 1 || shown[0].ExternalID != "txn-pge-posted" {
 		t.Fatalf("v_transactions shows %d rows %+v, want the posted row only", len(shown), shown)
+	}
+}
+
+// TestDrainStartsAgainWhenTheDataMovedUnderThePages is the real Scotiabank
+// case: the bank posted a transaction while the first sync was paging through a
+// long history. The dead sequence is left behind and the item starts again from
+// the cursor the last whole sync ended on.
+func TestDrainStartsAgainWhenTheDataMovedUnderThePages(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+
+	if err := db.SetCursor(ctx, "fake", "item-1", "start"); err != nil {
+		t.Fatalf("set cursor: %v", err)
+	}
+
+	moved := fmt.Errorf("sync item item-1: %w: plaid TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION",
+		provider.ErrRestartPagination)
+	source := &fakeSource{
+		pages: []provider.Batch{
+			{Added: []model.Transaction{row("a", "2026-08-01")}, NextCursor: "c1", HasMore: true},
+			{},
+			{Added: []model.Transaction{row("a", "2026-08-01")}, NextCursor: "c1", HasMore: true},
+			{Added: []model.Transaction{row("b", "2026-08-02")}, NextCursor: "c2", HasMore: false},
+		},
+		errs: []error{nil, moved},
+	}
+
+	got, err := drain(ctx, db, source, "item-1")
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+
+	// The second attempt asks from "start" again, not from "c1".
+	want := []string{"start", "c1", "start", "c1"}
+	if len(source.cursors) != len(want) {
+		t.Fatalf("cursors = %v, want %v", source.cursors, want)
+	}
+	for i := range want {
+		if source.cursors[i] != want[i] {
+			t.Errorf("cursor %d = %q, want %q", i, source.cursors[i], want[i])
+		}
+	}
+
+	// The counts describe the attempt that finished, not both attempts.
+	if got.added != 2 {
+		t.Errorf("added = %d, want 2 from the attempt that finished", got.added)
+	}
+
+	// Reading a page again writes the same rows again, so nothing is doubled.
+	n, err := db.Count(ctx)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("stored %d rows, want 2", n)
+	}
+
+	saved, err := db.Cursor(ctx, "fake", "item-1")
+	if err != nil {
+		t.Fatalf("read cursor: %v", err)
+	}
+	if saved != "c2" {
+		t.Errorf("saved cursor = %q, want %q", saved, "c2")
+	}
+}
+
+// TestDrainGivesUpWhenTheDataKeepsMoving proves the restart is bounded.
+func TestDrainGivesUpWhenTheDataKeepsMoving(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+
+	moved := fmt.Errorf("%w: plaid TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION",
+		provider.ErrRestartPagination)
+	errs := make([]error, maxRestarts)
+	for i := range errs {
+		errs[i] = moved
+	}
+	source := &fakeSource{errs: errs}
+
+	if _, err := drain(ctx, db, source, "item-1"); err == nil {
+		t.Fatal("drain error = nil, want it to give up")
+	}
+	if source.call != maxRestarts {
+		t.Errorf("made %d attempts, want %d", source.call, maxRestarts)
 	}
 }
 
