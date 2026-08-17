@@ -63,7 +63,8 @@ the number of rows that the operation will delete.
 - All menus and lists: Arrow keys move, `Enter` selects, and `Esc` goes back.
 - Main, list, and detail screens: `q` quits.
 - Text prompts: Character keys enter text, including `q`. `Enter` submits and
-  `Esc` cancels the prompt.
+  `Esc` cancels the prompt. In the add flow, `Esc` skips that account and keeps
+  its provider name.
 - Confirmation screens: Arrow keys select an action. `Enter` applies it and
   `Esc` cancels it.
 - Running operation: `Ctrl+C` requests cancellation. Other keys have no effect.
@@ -98,6 +99,7 @@ The main screen reads `last_synced_at` and `last_status` from `sync_state`.
 
 - If all item statuses are `ok`, show the latest successful sync time.
 - If an item has a failure status, show the institution and failure time.
+- If `sync_state` is empty, show `Never synced`.
 - Do not label a failed attempt as a successful sync.
 
 ## Architecture
@@ -160,14 +162,13 @@ packages directly.
 The Plaid provider must not print. `cmd/fourseas/link.go` prints the local Link
 URL, and the TUI shows the same URL on its link screen.
 
-On cancellation, Plaid Link stops accepting new requests and waits for an
-active `/exchange` handler. It then checks for a completed result before it
-returns a cancellation error. This prevents fourseas from losing the access
-token for a live, billed Plaid item.
+On cancellation, Plaid Link calls `server.Shutdown` in the cancellation branch
+with a five-second timeout. It then checks for a completed result before it
+returns a cancellation error. The deferred shutdown is not sufficient because
+it runs after the return value is selected.
 
-If bank sign-in completes before cancellation finishes, `Link` saves the item.
-The TUI reports that the link completed and offers to continue setup or unlink
-the institution.
+When a result is already complete, `Link` returns it with no error.
+`internal/app` saves the item and reports that the link completed.
 
 `UnlinkPreview` checks that the item belongs to the active `PLAID_ENV` before
 the TUI shows its confirmation screen. `Unlink` checks the environment again
@@ -185,18 +186,25 @@ If local cleanup fails, the token stays available for a retry.
 
 - Plaid Link cancellation before bank sign-in completes saves nothing and
   returns to the add screen.
+- A first sync can return Plaid `PRODUCT_NOT_READY` while the bank prepares its
+  data. The Plaid client maps this code to `The bank is still preparing the
+  data`. The TUI offers retry or return to the main screen. Do not add webhooks
+  or automatic retry.
 - If link succeeds but sync fails, the item stays linked. The TUI offers retry
   or return to the main screen.
-- A nickname write failure keeps the nickname prompt open.
+- A nickname write failure keeps the nickname prompt open. `Esc` skips the
+  account and keeps its provider name.
 - Sync-all continues after one item fails and reports each item result.
 - Recoverable errors stay in the TUI and show a recovery action.
 - Normal exit, cancellation, and fatal errors restore the terminal state.
 
 ## Verification
 
-Automated tests cover current CLI behavior and the complete add flow. Add-flow
-tests cover success and a sync failure after a successful link. The failure
-test confirms that the saved item remains recoverable.
+Automated tests cover current CLI behavior and the complete add flow. The
+application Link operation uses an injected `linkFunc`, as unlink uses
+`removeFunc`, so tests do not start a server or browser. Add-flow tests cover
+success and a sync failure after a successful link. The failure test confirms
+that the saved item remains recoverable.
 
 A manual smoke check covers navigation, resizing, cancellation, and terminal
 restoration. Run `go test -race ./...` for full automated verification.
