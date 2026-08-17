@@ -33,9 +33,8 @@ var tables = []string{"transactions", "fx_rates", "accounts", "institutions", "s
 // ddl builds the schema. Every money column is DECIMAL, never DOUBLE, because
 // a float sum of money is wrong.
 //
-// Every column of version 1 is here, including the ones issues 4 and 6 are the
-// first to fill in. Landing them together keeps later parallel work out of this
-// file.
+// The schema includes columns that later work will fill. Keeping them here
+// avoids schema changes for that work.
 const ddl = `
 CREATE TABLE IF NOT EXISTS schema_version (
 	version INTEGER NOT NULL
