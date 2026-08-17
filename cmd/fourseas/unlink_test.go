@@ -54,8 +54,18 @@ func seedUnlink(t *testing.T) settings {
 		t.Fatalf("upsert: %v", err)
 	}
 	for _, item := range linked().Items {
-		if err := recordInstitution(ctx, db, item, "sandbox"); err != nil {
-			t.Fatalf("record institution: %v", err)
+		env := item.Env
+		if env == "" {
+			env = cfg.plaid.Env
+		}
+		if err := db.UpsertInstitution(ctx, model.Institution{
+			Provider:        plaidprovider.ProviderName,
+			ItemID:          item.ItemID,
+			InstitutionName: item.Institution,
+			Env:             env,
+			LinkedAt:        item.LinkedAt,
+		}); err != nil {
+			t.Fatalf("upsert institution: %v", err)
 		}
 	}
 	if err := db.Close(); err != nil {

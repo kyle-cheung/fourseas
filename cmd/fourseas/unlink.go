@@ -135,7 +135,7 @@ func planUnlink(saved tokens.File, options []string) (unlinkPlan, error) {
 // confirmUnlink shows what will be deleted and waits for the word yes.
 func confirmUnlink(in io.Reader, out io.Writer, item tokens.Item, counts app.RowCounts) (bool, error) {
 	fmt.Fprintf(out, "This removes %s (%s) at Plaid and deletes it here:\n",
-		label(item), item.ItemID)
+		app.Label(item), item.ItemID)
 	fmt.Fprintf(out, "  %d transactions\n", counts.Transactions)
 	fmt.Fprintf(out, "  %d accounts\n", counts.Accounts)
 	fmt.Fprintln(out, "The removal at Plaid cannot be undone. To get this data back you link the")
@@ -158,7 +158,7 @@ func printLinked(out io.Writer, saved tokens.File) {
 		if !item.LinkedAt.IsZero() {
 			linkedAt = item.LinkedAt.Format("2006-01-02")
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", truncate(label(item)), item.Env, linkedAt, item.ItemID)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", truncate(app.Label(item)), item.Env, linkedAt, item.ItemID)
 	}
 	w.Flush()
 
