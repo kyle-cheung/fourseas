@@ -1046,6 +1046,111 @@ func TestUnlinkSuccessRefreshesAccounts(t *testing.T) {
 	}
 }
 
+// Ctrl+c during a sync is a deliberate stop. Showing "Something went wrong"
+// with the context error is the failure screen the cancellation branch exists
+// to prevent.
+func TestSyncAllCancellationShowsNoFailure(t *testing.T) {
+	fake := &fakeService{
+		data:       app.AccountData{Accounts: []model.AccountView{account("acc-1", "", "Everyday Checking", "1234", "Chase", 10)}},
+		syncAllErr: context.Canceled,
+	}
+	m := ready(t, fake)
+
+	if cmd := openSync(t, m); cmd != nil {
+		t.Fatal("a cancelled sync started another command")
+	}
+	if m.screen != mainScreen {
+		t.Fatalf("screen after a cancelled sync = %v, want the main menu it started from", m.screen)
+	}
+	body := m.View().Content
+	for _, unwanted := range []string{"Something went wrong", "context canceled"} {
+		if strings.Contains(body, unwanted) {
+			t.Errorf("view = %q, want it not to contain %q", body, unwanted)
+		}
+	}
+}
+
+// A removal changes what Plaid bills before it changes anything here, so its
+// error must be shown even when the user cancelled. Swallowing it would leave
+// the item gone at Plaid, the local data here, and the user never told.
+func TestUnlinkErrorIsShownEvenWhenCancelled(t *testing.T) {
+	fake := unlinkFake()
+	fake.unlinkErr = fmt.Errorf("the item is gone at Plaid but the local data is not: %w", context.Canceled)
+	m := ready(t, fake)
+
+	openUnlink(t, m)
+	press(t, m, codeKey(tea.KeyDown)) // Unlink
+	if cmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))); cmd != nil {
+		t.Fatal("a failed removal started another command")
+	}
+
+	if m.screen != recoveryScreen {
+		t.Fatalf("screen after a cancelled removal = %v, want recoveryScreen", m.screen)
+	}
+	if body := m.View().Content; !strings.Contains(body, "the item is gone at Plaid") {
+		t.Errorf("view = %q, want the removal failure shown", body)
+	}
+}
+
+// The first sync of a just-linked item runs from the history menu. Landing
+// back there hides the finished link and turns enter into a second billed
+// link at the same bank.
+func TestCancelledFirstSyncLandsOnTheAccountsScreen(t *testing.T) {
+	fake := &fakeService{
+		data:     app.AccountData{Accounts: []model.AccountView{account("acc-1", "", "Everyday Checking", "1234", "Chase", 10)}},
+		linkItem: app.LinkedItem{ItemID: "item-new", Institution: "Bank of Nowhere"},
+		syncErrs: []error{context.Canceled},
+	}
+	m := ready(t, fake)
+
+	openHistory(t, m)
+	cmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // Link
+	if cmd = runOperation(t, m, cmd); cmd != nil {                // the cancelled first sync
+		t.Fatal("a cancelled first sync started another command")
+	}
+
+	if m.screen == historyScreen {
+		t.Fatal("a cancelled first sync left the user on the history menu, where enter links again")
+	}
+	if m.screen != accountsScreen {
+		t.Fatalf("screen after a cancelled first sync = %v, want accountsScreen", m.screen)
+	}
+	body := m.View().Content
+	if !strings.Contains(body, "Bank of Nowhere") {
+		t.Errorf("view = %q, want it to name the institution that was linked", body)
+	}
+	if strings.Contains(body, "Something went wrong") {
+		t.Errorf("view = %q, want cancellation not shown as a failure", body)
+	}
+	if len(fake.linkDays) != 1 {
+		t.Errorf("Link calls = %v, want only the one the user asked for", fake.linkDays)
+	}
+}
+
+// Every line is cut to the terminal width. The status line and the title were
+// the only two that were not, and a progress line carrying a whole provider
+// error is the longest string the interface shows.
+func TestNarrowWidthCutsTheStatusLineAndTheTitle(t *testing.T) {
+	// The width is the narrowest that still holds the fixed key help line, so
+	// the test is about the two lines that grow with the stored data.
+	const narrow = 50
+	long := strings.Repeat("Institution of Considerable Length ", 4)
+	fake := &fakeService{data: app.AccountData{
+		Accounts: []model.AccountView{account("acc-1", long, "Everyday Checking", "1234", long, 10)},
+	}}
+	m := ready(t, fake)
+	m.width = narrow
+
+	openDetail(t, m, 0) // the title is the long nickname
+	m.status = strings.Repeat("x", 28) + " failed: " + long
+
+	for _, line := range strings.Split(m.View().Content, "\n") {
+		if got := lipgloss.Width(line); got > narrow {
+			t.Errorf("line %q is %d columns wide, want at most %d", line, got, narrow)
+		}
+	}
+}
+
 func TestSyncAllShowsEveryResultAndRefreshesStatus(t *testing.T) {
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
 	synced := now.Add(-5 * time.Minute)

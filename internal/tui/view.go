@@ -116,10 +116,13 @@ func (m *Model) body() string {
 	case recoveryScreen:
 		lines = m.recoveryLines()
 	default:
-		lines = []string{header("Accounts"), "", footer("esc back · ctrl+c quit")}
+		lines = []string{m.header("Accounts"), "", footer("esc back · ctrl+c quit")}
 	}
+	// A progress line carries a whole provider error behind a padded label, so
+	// it is the longest string the interface ever shows. Left whole it wraps
+	// and pushes the footer out of the screen.
 	if m.status != "" {
-		lines = append(lines, "", blankMark+m.status)
+		lines = append(lines, "", truncate(blankMark+m.status, m.contentWidth()))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -132,7 +135,7 @@ func (m *Model) mainLines() []string {
 		choiceSync:     syncStatus(m.syncStates, m.clock()),
 	}
 
-	lines := []string{header("Main menu"), ""}
+	lines := []string{m.header("Main menu"), ""}
 	for i, choice := range mainChoices {
 		row := mark(i == m.main.cursor) + choice
 		if note := notes[i]; note != "" {
@@ -172,7 +175,7 @@ func syncResultLine(result app.SyncResult) string {
 
 // accountLines is every stored account, one row each.
 func (m *Model) accountLines() []string {
-	lines := []string{header("Accounts"), ""}
+	lines := []string{m.header("Accounts"), ""}
 	if len(m.accounts.rows) == 0 {
 		lines = append(lines, blankMark+"No accounts are linked yet.")
 		return append(lines, "", footer("esc back · q quit"))
@@ -187,7 +190,7 @@ func (m *Model) accountLines() []string {
 // detailLines is everything stored about one account.
 func (m *Model) detailLines() []string {
 	account := m.detail.account
-	lines := []string{header(accountName(account)), ""}
+	lines := []string{m.header(accountName(account)), ""}
 	for _, field := range [][2]string{
 		{"Institution", account.InstitutionName},
 		{"Account", account.Name},
@@ -212,7 +215,7 @@ func (m *Model) detailLines() []string {
 // the confirmation.
 func (m *Model) unlinkLines() []string {
 	preview := m.unlink.preview
-	lines := []string{header("Unlink " + preview.Institution), "",
+	lines := []string{m.header("Unlink " + preview.Institution), "",
 		blankMark + "This deletes every stored row of this institution:"}
 	for _, view := range preview.Accounts {
 		lines = append(lines, truncate(blankMark+"Account: "+accountName(view), m.contentWidth()))
@@ -234,7 +237,7 @@ func (m *Model) unlinkLines() []string {
 
 // promptLines is one text prompt with its own error, if it has one.
 func (m *Model) promptLines() []string {
-	lines := []string{header(promptTitle(m.screen)), "", blankMark + m.prompt.input.View()}
+	lines := []string{m.header(promptTitle(m.screen)), "", blankMark + m.prompt.input.View()}
 	if m.prompt.err != nil {
 		lines = append(lines, "", blankMark+displayError(m.prompt.err))
 	}
@@ -243,7 +246,7 @@ func (m *Model) promptLines() []string {
 
 // historyLines is how much history a new link may ask for.
 func (m *Model) historyLines() []string {
-	lines := []string{header(promptTitle(historyScreen)), ""}
+	lines := []string{m.header(promptTitle(historyScreen)), ""}
 	for i, choice := range historyChoices {
 		lines = append(lines, mark(i == m.history.cursor)+choice)
 	}
@@ -252,7 +255,7 @@ func (m *Model) historyLines() []string {
 
 // recoveryLines shows what failed and what the user can do about it.
 func (m *Model) recoveryLines() []string {
-	lines := []string{header("Something went wrong"), "",
+	lines := []string{m.header("Something went wrong"), "",
 		truncate(blankMark+m.recovery.message, m.contentWidth()), ""}
 	for i, choice := range m.recovery.choices() {
 		lines = append(lines, mark(i == m.recovery.cursor)+choice)
@@ -269,8 +272,11 @@ func promptTitle(s screen) string {
 	return "How many days of history"
 }
 
-// header is the title line of one screen.
-func header(title string) string { return blankMark + "fourseas — " + title }
+// header is the title line of one screen. A nickname or an institution name
+// has no length limit, so the title is cut like every other line.
+func (m *Model) header(title string) string {
+	return truncate(blankMark+"fourseas — "+title, m.contentWidth())
+}
 
 // footer is the key help line of one screen.
 func footer(keys string) string { return blankMark + keys }

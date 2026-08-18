@@ -265,13 +265,11 @@ func (m *Model) finish(msg operationMsg) tea.Cmd {
 	m.cancel = nil
 	m.status = ""
 
-	// A cancellation is what the user asked for, not a failure.
-	if errors.Is(msg.err, context.Canceled) {
-		if msg.kind == linkOperation {
-			m.linked = app.LinkedItem{}
-		}
-		m.screen = m.returnTo
-		return nil
+	// A cancellation is what the user asked for, not a failure. A destructive
+	// operation is the exception: it changes data at Plaid before it changes
+	// anything here, so whatever it reports has to be shown.
+	if errors.Is(msg.err, context.Canceled) && !destructive(msg.kind) {
+		return m.cancelled(msg.kind)
 	}
 	if msg.err != nil {
 		return m.failed(msg)
@@ -308,6 +306,41 @@ func (m *Model) finish(msg operationMsg) tea.Cmd {
 		return m.finishUnlink()
 	}
 	return nil
+}
+
+// destructive says whether the operation changes stored or billed state. Such
+// an operation cannot be treated as if nothing happened.
+func destructive(kind operation) bool { return kind == unlinkOperation }
+
+// cancelled leaves one cancelled operation behind.
+//
+// The screen the operation started from is the right place to land, except
+// after the first sync of a just-linked item: that screen is the history menu,
+// where enter would create a second billed item at the same bank. The account
+// list is shown instead, with a line saying the link did succeed.
+func (m *Model) cancelled(kind operation) tea.Cmd {
+	switch kind {
+	case linkOperation:
+		m.linked = app.LinkedItem{}
+	case syncItemOperation:
+		if m.linked.ItemID != "" {
+			m.status = "Linked " + linkedName(m.linked) + ". Choose Sync to fetch its data."
+			m.linked = app.LinkedItem{}
+			m.screen = accountsScreen
+			return nil
+		}
+	}
+	m.screen = m.returnTo
+	return nil
+}
+
+// linkedName is the institution of a new link, or its item id while no name is
+// known.
+func linkedName(linked app.LinkedItem) string {
+	if linked.Institution != "" {
+		return linked.Institution
+	}
+	return linked.ItemID
 }
 
 // finishSyncAll keeps the summary of every item and reports a failure once.
