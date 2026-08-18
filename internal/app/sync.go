@@ -48,7 +48,10 @@ func (a *App) SyncItem(ctx context.Context, itemID string, report Progress) ([]m
 // SyncAll fetches the new transactions of every linked institution.
 //
 // One bad card must not stop the others, so an item error is carried in its own
-// result and the next item is tried. Only a canceled context ends the run.
+// result and the next item is tried. Only a canceled context ends the run, and
+// that cancellation is the error of the whole operation: every caller asks
+// whether the operation was cancelled, not whether one item was. The results
+// gathered before the stop are returned with it.
 func (a *App) SyncAll(ctx context.Context, report Progress) ([]SyncResult, error) {
 	// Validation comes first, and the empty token file next, so neither an
 	// unusable configuration nor an empty setup opens DuckDB.
@@ -84,7 +87,7 @@ func (a *App) SyncAll(ctx context.Context, report Progress) ([]SyncResult, error
 
 		results = append(results, result)
 		if ctx.Err() != nil {
-			return results, nil
+			return results, ctx.Err()
 		}
 	}
 	return results, nil
@@ -95,10 +98,17 @@ func (a *App) SyncAll(ctx context.Context, report Progress) ([]SyncResult, error
 // The cursor is left where it was, so the next run asks for the same page
 // again. The stored status is the whole provider error, because it is the only
 // place the detail survives.
+//
+// A cancelled context records nothing. The write would use the same dead
+// context and fail, and a cancellation is not a state of the item: storing it
+// would show "Sync failed: context canceled" until the next successful run.
 func (a *App) syncItem(ctx context.Context, db *store.Store, item tokens.Item, report Progress) ([]model.AccountView, error) {
 	views, err := a.readItem(ctx, db, item, report)
 	if err == nil {
 		return views, nil
+	}
+	if ctx.Err() != nil {
+		return nil, err
 	}
 	statusErr := db.SetStatus(ctx, plaid.ProviderName, item.ItemID, err.Error())
 	if statusErr != nil {

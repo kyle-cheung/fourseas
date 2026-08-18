@@ -3,9 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	plaidprovider "github.com/kyle-cheung/fourseas/providence/internal/provider/plaid"
+	"github.com/kyle-cheung/fourseas/providence/internal/tokens"
 )
 
 // The sync engine itself lives in internal/app. See internal/app/sync_test.go.
@@ -42,6 +46,40 @@ func TestRunSyncRejectsUnknownFXOptionsBeforePlaidValidation(t *testing.T) {
 		if strings.Contains(err.Error(), "PLAID_CLIENT_ID") {
 			t.Errorf("runSyncWith(%q) error = %q, parsed after Plaid validation", options, err)
 		}
+	}
+}
+
+// Ctrl+c is not a failed card. With one linked card the old count made
+// attempted equal failed and reported "every card failed to sync", and the FX
+// phase then ran on the dead context and blamed FX for the stop.
+func TestRunSyncStopsAtACancellationWithoutTheFXPhase(t *testing.T) {
+	dir := t.TempDir()
+	cfg := settings{
+		plaid:      plaidprovider.Config{ClientID: "id", Secret: "secret", Env: "sandbox", LinkPort: 8080},
+		dbPath:     filepath.Join(dir, "fourseas.duckdb"),
+		tokensPath: filepath.Join(dir, "tokens.json"),
+	}
+	if err := tokens.Save(cfg.tokensPath, tokens.File{Items: []tokens.Item{{
+		ItemID: "item-amex", AccessToken: "token", Institution: "American Express", Env: "sandbox",
+	}}}); err != nil {
+		t.Fatalf("save tokens: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	source := &fakeFXSource{}
+	var out bytes.Buffer
+	err := runSyncWith(ctx, cfg, nil, source, &out)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("runSyncWith() error = %v, want the cancellation", err)
+	}
+	if strings.Contains(err.Error(), "every card failed") {
+		t.Errorf("runSyncWith() error = %q, want a stop, not a failed sync", err)
+	}
+	if len(source.calls) != 0 {
+		t.Errorf("the FX source was asked %d times, want none after a cancellation", len(source.calls))
 	}
 }
 

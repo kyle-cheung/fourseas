@@ -696,6 +696,41 @@ func TestSyncAllUsesItemIDWhenInstitutionIsEmpty(t *testing.T) {
 	}
 }
 
+// A cancellation is the error of the whole operation, not a state of one card.
+// Both callers ask whether the run was cancelled, and neither reads the item
+// results to find out. Nothing about the cancellation may be recorded either:
+// the item is unchanged, and a stored "context canceled" would be shown as a
+// failed sync until the next successful run.
+func TestSyncAllReportsCancellationAsTheOperationError(t *testing.T) {
+	cfg := tempConfig(t, "sandbox")
+	amex := item("item-amex", "American Express", "sandbox")
+	seedTokens(t, cfg.TokensPath, amex)
+
+	sources := sourcesByItem(map[string]*fakeSource{
+		"item-amex": onePage(syncAccount("item-amex", "acct-amex")),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	results, err := newWith(cfg, nil, nil, sources).SyncAll(ctx, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("SyncAll error = %v, want it to report the cancellation", err)
+	}
+	// The partial results of the run still come back with it.
+	if len(results) != 1 || results[0].ItemID != "item-amex" {
+		t.Errorf("results = %+v, want the item reached before the stop", results)
+	}
+	// Recording the failure would use the same dead context and fail as well,
+	// so the item error must not carry a second, meaningless write failure.
+	if got := results[0].Err; got == nil || strings.Contains(got.Error(), "save status") {
+		t.Errorf("item error = %v, want the read failure alone", got)
+	}
+	if status := lastStatus(t, cfg.DBPath, "item-amex"); status != "" {
+		t.Errorf("last_status = %q, want a cancellation to record nothing", status)
+	}
+}
+
 // Nothing linked is a setup mistake, not an empty success.
 func TestSyncAllRefusesWhenNothingIsLinked(t *testing.T) {
 	cfg := tempConfig(t, "sandbox")

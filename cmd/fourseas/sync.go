@@ -38,6 +38,9 @@ func runSyncWith(ctx context.Context, cfg settings, options []string, source fxS
 	// success, and failure through the progress lines below and carries on.
 	client := app.New(cfg.appConfig())
 	results, err := client.SyncAll(ctx, func(line string) { fmt.Fprintln(out, line) })
+	// A cancellation arrives here, not inside a result. Carrying on would run
+	// the FX phase and the print on a dead context and report a Plaid stop as
+	// an FX failure, or as every card having failed.
 	if err != nil {
 		return err
 	}
