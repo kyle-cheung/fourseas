@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -133,9 +134,39 @@ func TestUnlinkKeepsRowsAndTokenWhenPlaidFails(t *testing.T) {
 	}
 }
 
-// The token names the local rows. While they are there the token has to stay,
-// because a second run needs it.
+// The token names the local rows. While a step of the local cleanup has not
+// finished, the token has to stay, because a second run needs it.
 func TestUnlinkKeepsTokenWhenLocalCleanupFails(t *testing.T) {
+	cfg := tempConfig(t, "sandbox")
+	amex := item("item-amex", "American Express", "sandbox")
+	seedTokens(t, cfg.TokensPath, amex)
+	seedStore(t, cfg.DBPath, amex)
+
+	// Plaid agrees, and the token file then refuses the write that would
+	// forget the item.
+	remove := func(context.Context, plaid.Config, string) error {
+		if err := os.Chmod(cfg.TokensPath, 0o400); err != nil {
+			t.Fatalf("chmod %s: %v", cfg.TokensPath, err)
+		}
+		t.Cleanup(func() { os.Chmod(cfg.TokensPath, 0o600) })
+		return nil
+	}
+
+	_, err := New(cfg, WithRemove(remove)).Unlink(context.Background(), "item-amex", nil)
+	if err == nil {
+		t.Fatal("error = nil, want the local cleanup failure")
+	}
+	if _, found := loadTokens(t, cfg.TokensPath).Find("item-amex"); !found {
+		t.Error("the token is gone although the cleanup did not finish")
+	}
+}
+
+// A cancellation after Plaid agreed must not abandon the local half.
+//
+// The item is removed and unbilled at Plaid, and that cannot be undone. Leaving
+// the rows and the token here would keep a dead item in the account list, and
+// the next sync would fail with ITEM_NOT_FOUND.
+func TestUnlinkFinishesTheLocalCleanupAfterACancellation(t *testing.T) {
 	cfg := tempConfig(t, "sandbox")
 	amex := item("item-amex", "American Express", "sandbox")
 	seedTokens(t, cfg.TokensPath, amex)
@@ -148,14 +179,17 @@ func TestUnlinkKeepsTokenWhenLocalCleanupFails(t *testing.T) {
 		return nil
 	}
 
-	_, err := New(cfg, WithRemove(remove)).Unlink(ctx, "item-amex", nil)
-	if err == nil {
-		t.Fatal("error = nil, want the local cleanup failure")
+	result, err := New(cfg, WithRemove(remove)).Unlink(ctx, "item-amex", nil)
+	if err != nil {
+		t.Fatalf("Unlink: %v", err)
 	}
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("error = %v, want the canceled context", err)
+	if result.Rows.Transactions != 1 || result.Rows.Accounts != 1 {
+		t.Errorf("rows = %+v, want the stored rows deleted", result.Rows)
 	}
-	if _, found := loadTokens(t, cfg.TokensPath).Find("item-amex"); !found {
-		t.Error("the token was deleted although the local data is still there")
+	if got := itemCounts(t, cfg.DBPath, "item-amex"); got != (store.Removed{}) {
+		t.Errorf("item-amex still holds %+v, want nothing", got)
+	}
+	if _, found := loadTokens(t, cfg.TokensPath).Find("item-amex"); found {
+		t.Error("the token of the item Plaid no longer has is still in the token file")
 	}
 }

@@ -58,6 +58,9 @@ func (a *App) UnlinkPreview(ctx context.Context, itemID string) (UnlinkData, err
 // each month, and a token deleted on its own leaves that item alive with no
 // way left to reach it. Plaid is therefore called first, the local rows go
 // next, and the token last, because a second attempt needs it.
+//
+// Everything after the Plaid call runs on an uncancellable context, so the
+// half that is already irreversible is never abandoned part way.
 func (a *App) Unlink(ctx context.Context, itemID string, report Progress) (UnlinkResult, error) {
 	// Validation comes before start, so unusable provider settings do not open
 	// DuckDB.
@@ -79,7 +82,12 @@ func (a *App) Unlink(ctx context.Context, itemID string, report Progress) (Unlin
 		return UnlinkResult{}, fmt.Errorf("plaid still has this item, so nothing local was deleted: %w", removeErr)
 	}
 	progress(report, "Deleting local data")
-	removed, err := db.Unlink(ctx, plaid.ProviderName, item.ItemID)
+	// Plaid has agreed, and that cannot be undone. The local half must finish
+	// even if the user cancels now: stopping here would leave the item removed
+	// and unbilled at Plaid with its rows and its token still here, and the
+	// next sync would fail with ITEM_NOT_FOUND.
+	local := context.WithoutCancel(ctx)
+	removed, err := db.Unlink(local, plaid.ProviderName, item.ItemID)
 	if err != nil {
 		return UnlinkResult{}, fmt.Errorf("the item is gone at Plaid but the local data is not: %w", err)
 	}
