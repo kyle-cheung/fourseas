@@ -108,8 +108,13 @@ Bubble Tea methods use pointer receivers, so `Update` returns the same model.
   `Main` costs: an item that stays billed with no saved token. Every other link
   failure keeps its own retry.
 - `m.recovery.notes` are the lines under the failure message. They are written
-  in the muted style and each one is cut with `truncate`, so a note has to fit
-  80 cells with the gutter.
+  in the muted style and **wrapped**, never cut: `recoveryLines` runs both the
+  message and every note through `wrapText` at `m.noteWidth()`. The notes carry
+  the consequence of each choice, and `truncate` is a hard cut with no
+  ellipsis, so it would turn "It does not open the bank" into "It does n" on a
+  narrow terminal, which says the opposite. `wrapText` breaks at a space and
+  cuts a word that is longer than the whole width, because a file path holds no
+  space to break at.
 - `start` writes `returnTo` with the screen the operation started from.
   `cancelled` and `recoverWith` return to that screen. The exception is a
   cancelled first sync of a new link: the model shows the account list, because
@@ -149,7 +154,9 @@ follows.
   narrow for both keeps the whole label and cuts the note.
 - `cursorMark` (`› `) and `blankMark` are the same printable width, so a row
   never moves when the cursor does.
-- Every line is cut with `truncate`, which uses `MaxWidth`. Use
+- Every line is cut with `truncate`, which uses `MaxWidth`. A cut that would
+  change the meaning of a line is a defect: wrap that line with `wrapText`
+  first, as the recovery screen does. Use
   `lipgloss.Width` and never `len` for layout, because a line holds escape
   sequences and wide characters.
 - `m.resizePrompt` gives the text input the width it may use. `openPrompt` and

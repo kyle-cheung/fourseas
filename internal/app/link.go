@@ -30,6 +30,11 @@ func (p PendingSave) Institution() string { return p.item.Institution }
 func (p PendingSave) ItemID() string { return p.item.ItemID }
 
 // String redacts the access token, so a stray %v or %s cannot print it.
+//
+// Known and accepted: %#v ignores String and prints the unexported fields by
+// Go syntax. That would print file as well, which is every access token of the
+// whole token file and not only the new one. No code here uses %#v, and Go
+// offers no way to refuse it. Never format a PendingSave with %#v.
 func (p PendingSave) String() string {
 	return fmt.Sprintf("PendingSave{item_id:%q institution:%q access_token:[redacted]}",
 		p.item.ItemID, p.item.Institution)

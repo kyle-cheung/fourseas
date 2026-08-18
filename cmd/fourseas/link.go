@@ -84,12 +84,16 @@ func linkOnce(ctx context.Context, svc linkService, days int, report app.Progres
 	if retryErr == nil {
 		return saved, nil
 	}
+	// The reason the user reads is why the *retry* failed. A retry that fails
+	// with a plain error keeps the handle of the first failure, because that
+	// handle still names the item Plaid bills.
+	cause := retryErr
 	var again *app.TokenNotSavedError
 	if errors.As(retryErr, &again) {
-		notSaved = again
+		notSaved, cause = again, again.Err
 	}
 	return app.LinkedItem{}, tokenNotSavedMessage(
-		notSaved.Pending.Institution(), notSaved.Pending.ItemID(), notSaved.Err)
+		notSaved.Pending.Institution(), notSaved.Pending.ItemID(), cause)
 }
 
 // tokenNotSavedMessage is what the user reads when the token of a billed item

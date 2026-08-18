@@ -155,6 +155,26 @@ func TestLinkOnceReportsTheUnsavedTokenWithoutASecondLink(t *testing.T) {
 	}
 }
 
+// A retry that fails with a plain error must report that error, not the reason
+// the first save failed for. The user acts on what is broken now.
+func TestLinkOnceReportsWhyTheRetryFailed(t *testing.T) {
+	fake := &fakeLinker{
+		linkErr:     tokenNotSaved(),
+		completeErr: errors.New("no unsaved link to complete"),
+	}
+
+	_, err := linkOnce(context.Background(), fake, 730, nil)
+	if err == nil {
+		t.Fatal("error = nil, want the failed retry to end the command")
+	}
+	if !strings.Contains(err.Error(), "no unsaved link to complete") {
+		t.Errorf("error = %q, want the reason the retry failed", err)
+	}
+	if strings.Contains(err.Error(), "permission denied") {
+		t.Errorf("error = %q, want it to drop the reason of the first failure", err)
+	}
+}
+
 // Every other link failure keeps its own error and starts no save.
 func TestLinkOnceLeavesAnOrdinaryFailureAlone(t *testing.T) {
 	fake := &fakeLinker{linkErr: errors.New("plaid is unavailable")}

@@ -1682,6 +1682,32 @@ func TestASecondSaveFailureStillRetriesTheSave(t *testing.T) {
 	}
 }
 
+// A failed save that reports a plain error is still a failed save: the token is
+// still unsaved and Plaid still bills the item, so Retry must stay the save.
+// This is the one case where the retry inside startLinkSave is load-bearing,
+// because a *TokenNotSavedError would set that retry again from failed.
+func TestASaveFailingWithAnOrdinaryErrorStillRetriesTheSave(t *testing.T) {
+	fake := &fakeService{
+		linkErr:     tokenNotSaved(),
+		completeErr: errors.New("no unsaved link to complete"),
+	}
+	m := ready(t, fake)
+	openHistory(t, m)
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // the failed link
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // Retry, which fails plainly
+	if m.screen != recoveryScreen {
+		t.Fatalf("screen after the plain failure = %v, want recoveryScreen", m.screen)
+	}
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // Retry again
+
+	if len(fake.linkDays) != 1 {
+		t.Errorf("Link ran %d times, want the one link Plaid already billed", len(fake.linkDays))
+	}
+	if len(fake.completeCalls) != 2 {
+		t.Errorf("CompleteLinkSave ran %d times, want twice", len(fake.completeCalls))
+	}
+}
+
 // Every other link failure keeps the behaviour it has today: Retry links again,
 // because Plaid created no item.
 func TestAnOrdinaryLinkFailureStillRetriesTheLink(t *testing.T) {
@@ -1726,21 +1752,68 @@ func TestTokenNotSavedWording(t *testing.T) {
 	}
 }
 
-// The failure screen carries the notes, and no note holds an access token: the
-// interface never receives one.
-func TestTokenNotSavedScreenShowsTheNotes(t *testing.T) {
-	fake := &fakeService{linkErr: tokenNotSaved()}
-	m := ready(t, fake)
-	openHistory(t, m)
-	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+// The failure screen carries the notes at every width. The notes hold the whole
+// mitigation, so a narrow terminal must wrap them and must never cut them: a
+// cut turns "It does not open the bank" into "It does n", which says the
+// opposite.
+func TestTokenNotSavedScreenKeepsTheMeaningAtEveryWidth(t *testing.T) {
+	for _, width := range []int{40, 80, 100} {
+		fake := &fakeService{linkErr: tokenNotSaved()}
+		m := ready(t, fake)
+		m.width = width
+		openHistory(t, m)
+		runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
 
-	body := content(m)
-	for _, want := range []string{
-		"Retry saves the token again. It does not open the bank a second time.",
-		"Main leaves this item billed with no saved token.",
-	} {
-		if !hasLine(body, want) {
-			t.Errorf("the recovery screen does not hold the line %q:\n%s", want, body)
+		body := content(m)
+		flat := strings.Join(strings.Fields(body), " ")
+		for _, want := range []string{
+			tokenNotSavedMessage,
+			"Retry saves the token again. It does not open the bank a second time.",
+			"Main leaves this item billed with no saved token.",
+			"Without the token you cannot sync this item or remove it.",
+		} {
+			if !strings.Contains(flat, want) {
+				t.Errorf("at width %d the recovery screen does not say %q:\n%s", width, want, body)
+			}
 		}
+		for _, line := range strings.Split(body, "\n") {
+			if lipgloss.Width(line) > width {
+				t.Errorf("at width %d the line %q is %d cells wide", width, line, lipgloss.Width(line))
+			}
+		}
+	}
+}
+
+// A note longer than the screen is wrapped word by word, and a word longer than
+// the screen, such as a file path, is cut into whole lines instead of being
+// dropped.
+func TestWrapTextKeepsEveryWord(t *testing.T) {
+	tests := []struct {
+		name  string
+		text  string
+		width int
+		want  []string
+	}{
+		{"a short note is one line", "Main leaves this item billed.", 40,
+			[]string{"Main leaves this item billed."}},
+		{"a long note breaks at a space", "It does not open the bank a second time.", 20,
+			[]string{"It does not open the", "bank a second time."}},
+		{"a word longer than the width is cut", "Reason: /a/very/long/path/tokens.json", 12,
+			[]string{"Reason:", "/a/very/long", "/path/tokens", ".json"}},
+		{"nothing is nothing", "", 10, []string{""}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := wrapText(tt.text, tt.width)
+			if strings.Join(got, "|") != strings.Join(tt.want, "|") {
+				t.Errorf("wrapText(%q, %d) = %q, want %q", tt.text, tt.width, got, tt.want)
+			}
+			for _, line := range got {
+				if lipgloss.Width(line) > tt.width {
+					t.Errorf("line %q is wider than %d", line, tt.width)
+				}
+			}
+		})
 	}
 }

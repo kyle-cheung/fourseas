@@ -338,8 +338,16 @@ func TestTokenNotSavedErrorKeepsItsCause(t *testing.T) {
 func TestCompleteLinkSaveRefusesAnEmptyHandle(t *testing.T) {
 	cfg := tempConfig(t, "sandbox")
 
-	if _, err := newWith(cfg, linkNever(t), nil, nil).CompleteLinkSave(PendingSave{}); err == nil {
+	_, err := newWith(cfg, linkNever(t), nil, nil).CompleteLinkSave(PendingSave{})
+	if err == nil {
 		t.Fatal("error = nil, want a refusal of the empty handle")
+	}
+	// The type is what matters. A *TokenNotSavedError would tell a presenter
+	// that Plaid bills an item whose token is lost, and the interface would
+	// warn the user about an item that does not exist.
+	var notSaved *TokenNotSavedError
+	if errors.As(err, &notSaved) {
+		t.Errorf("error = %v (%T), want a plain refusal and not an unsaved token", err, err)
 	}
 	if _, err := os.Stat(cfg.TokensPath); err == nil {
 		t.Error("the empty handle wrote a token file")

@@ -321,10 +321,25 @@ func tokenNotSavedNotes(institution, itemID string, cause error) []string {
 
 // recoveryLines shows what failed and what the user can do about it.
 func (m *Model) recoveryLines() []string {
-	lines := append(m.header("Something went wrong"),
-		truncate(blankMark+warnStyle.Render(failedMark+" "+m.recovery.message), m.contentWidth()))
+	lines := m.header("Something went wrong")
+	// The message is wrapped for the same reason the notes are, and the lines
+	// under the first one keep the width of the mark, so the sentence reads as
+	// one block.
+	mark := failedMark + " "
+	for i, line := range wrapText(m.recovery.message, max(m.noteWidth()-lipgloss.Width(mark), 1)) {
+		if i > 0 {
+			mark = strings.Repeat(" ", lipgloss.Width(failedMark)+1)
+		}
+		lines = append(lines, truncate(blankMark+warnStyle.Render(mark+line), m.contentWidth()))
+	}
+	// A note is wrapped and never cut. A note carries the consequence of each
+	// choice, and truncate is a hard cut: it would turn "It does not open the
+	// bank" into "It does n", which says the opposite of what the user must
+	// read here.
 	for _, note := range m.recovery.notes {
-		lines = append(lines, truncate(blankMark+mutedStyle.Render(note), m.contentWidth()))
+		for _, line := range wrapText(note, m.noteWidth()) {
+			lines = append(lines, truncate(blankMark+mutedStyle.Render(line), m.contentWidth()))
+		}
 	}
 	lines = append(lines, "")
 	for i, choice := range m.recovery.choices() {
@@ -544,6 +559,61 @@ func displayError(err error) string {
 		return "The bank is still preparing the data"
 	}
 	return err.Error()
+}
+
+// noteWidth is the room one wrapped note has: the content width, less the left
+// gutter and the same right pad the two columns keep.
+func (m *Model) noteWidth() int {
+	return max(m.contentWidth()-lipgloss.Width(blankMark)-rightPad, 1)
+}
+
+// wrapText breaks plain text into lines that fit width cells. It breaks at a
+// space, and it cuts a word that is longer than the whole width, because a file
+// path has no space to break at. The text it takes holds no escape sequence, so
+// the styles are applied to the lines it returns.
+func wrapText(text string, width int) []string {
+	var lines []string
+	line := ""
+	for _, word := range strings.Fields(text) {
+		for lipgloss.Width(word) > width {
+			if line != "" {
+				lines, line = append(lines, line), ""
+			}
+			head, tail := cutCells(word, width)
+			lines, word = append(lines, head), tail
+		}
+		switch {
+		case word == "":
+		case line == "":
+			line = word
+		case lipgloss.Width(line)+1+lipgloss.Width(word) <= width:
+			line += " " + word
+		default:
+			lines, line = append(lines, line), word
+		}
+	}
+	if line != "" {
+		lines = append(lines, line)
+	}
+	if len(lines) == 0 {
+		return []string{""}
+	}
+	return lines
+}
+
+// cutCells splits text after the given number of cells, without splitting a
+// character. It always takes at least one character, so a caller that cuts a
+// long word makes progress even on a terminal narrower than one wide glyph.
+func cutCells(text string, cells int) (string, string) {
+	used := 0
+	for i, r := range text {
+		cell := lipgloss.Width(string(r))
+		if i > 0 && used+cell > cells {
+			return text[:i], text[i:]
+		}
+		used += cell
+	}
+	return text, ""
 }
 
 // truncate cuts one line to the width of the terminal without splitting a
