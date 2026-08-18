@@ -76,19 +76,53 @@ func Link(ctx context.Context, cfg Config, days int) (LinkResult, error) {
 
 	server := &http.Server{Handler: mux}
 	go server.Serve(listener)
-	defer server.Shutdown(context.Background())
+	// The last stop is bounded too, and closes the server by force when the
+	// bound expires. An unbounded wait here would undo the bound on the stops
+	// inside waitForOutcome and hold the caller with no way out.
+	defer func() {
+		shutdownCtx, stopShutdown := context.WithTimeout(context.Background(), shutdownGrace)
+		defer stopShutdown()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			server.Close()
+		}
+	}()
 
 	openBrowser(LinkURL(cfg))
 
+	return waitForOutcome(ctx, server, results, failures)
+}
+
+// shutdownGrace is how long a stopping server may take to let the handlers
+// that are still running finish.
+const shutdownGrace = 5 * time.Second
+
+// shutdowner is the part of *http.Server that waitForOutcome needs.
+type shutdowner interface {
+	Shutdown(ctx context.Context) error
+}
+
+// waitForOutcome waits for the browser part to produce a token, a failure, or
+// nothing before the deadline.
+func waitForOutcome(ctx context.Context, server shutdowner, results <-chan LinkResult, failures <-chan error) (LinkResult, error) {
 	select {
 	case result := <-results:
 		return result, nil
 	case err := <-failures:
-		return LinkResult{}, err
+		// An exit can arrive while an exchange is still running: the OAuth
+		// flow serves the widget twice, so a stale tab can report an exit
+		// after the other tab signed in. Stop the server first, which lets
+		// that exchange finish, then look for its token. A token always wins,
+		// because it is the only handle on an item that Plaid now bills.
+		stopServer(server)
+
+		select {
+		case result := <-results:
+			return result, nil
+		default:
+			return LinkResult{}, err
+		}
 	case <-ctx.Done():
-		shutdownCtx, stopShutdown := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = server.Shutdown(shutdownCtx)
-		stopShutdown()
+		stopServer(server)
 
 		select {
 		case result := <-results:
@@ -97,6 +131,14 @@ func Link(ctx context.Context, cfg Config, days int) (LinkResult, error) {
 			return LinkResult{}, fmt.Errorf("link was not completed: %w", ctx.Err())
 		}
 	}
+}
+
+// stopServer stops the server and waits, for a bounded time, for the handlers
+// that are still running.
+func stopServer(server shutdowner) {
+	shutdownCtx, stopShutdown := context.WithTimeout(context.Background(), shutdownGrace)
+	defer stopShutdown()
+	_ = server.Shutdown(shutdownCtx)
 }
 
 // LinkURL is the local address the Link widget serves on. Both the CLI and
@@ -156,7 +198,7 @@ func exchangeHandler(client *plaidsdk.APIClient, results chan<- LinkResult, fail
 		if err != nil {
 			wrapped := apiError("exchange public token", err, httpResp)
 			http.Error(w, wrapped.Error(), http.StatusBadGateway)
-			failures <- wrapped
+			report(failures, wrapped)
 			return
 		}
 
@@ -166,7 +208,26 @@ func exchangeHandler(client *plaidsdk.APIClient, results chan<- LinkResult, fail
 			Institution: institutionName(r.Context(), client, resp.AccessToken),
 		}
 		w.Write([]byte("ok"))
-		results <- result
+		deliver(results, result)
+	}
+}
+
+// deliver puts the result on the channel if the channel is empty. The reader
+// takes one result only, so a repeated exchange must not hold the handler open:
+// a handler that waits forever keeps the server from stopping.
+func deliver(results chan<- LinkResult, result LinkResult) {
+	select {
+	case results <- result:
+	default:
+	}
+}
+
+// report puts the failure on the channel if the channel is empty, for the same
+// reason as deliver. The first failure is the one that describes the problem.
+func report(failures chan<- error, err error) {
+	select {
+	case failures <- err:
+	default:
 	}
 }
 
@@ -180,10 +241,10 @@ func exitHandler(failures chan<- error) http.HandlerFunc {
 		w.Write([]byte("ok"))
 
 		if body.ErrorCode == "" {
-			failures <- fmt.Errorf("link was closed before the bank sign-in finished")
+			report(failures, fmt.Errorf("link was closed before the bank sign-in finished"))
 			return
 		}
-		failures <- fmt.Errorf("link failed: %s: %s", body.ErrorCode, body.ErrorMessage)
+		report(failures, fmt.Errorf("link failed: %s: %s", body.ErrorCode, body.ErrorMessage))
 	}
 }
 
