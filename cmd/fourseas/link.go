@@ -5,10 +5,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/kyle-cheung/fourseas/providence/internal/app"
-	plaidprovider "github.com/kyle-cheung/fourseas/providence/internal/provider/plaid"
 	"github.com/kyle-cheung/fourseas/providence/internal/tokens"
 )
 
@@ -37,9 +35,10 @@ func runLink(ctx context.Context, cfg settings, options []string) error {
 		fmt.Printf("  http://localhost:%d/oauth\n\n", cfg.plaid.LinkPort)
 	}
 
-	fmt.Printf("Open %s in your browser to sign in to the bank.\n", plaidprovider.LinkURL(cfg.plaid))
-
-	result, err := plaidprovider.Link(ctx, cfg.plaid, days)
+	// app.Link reads the token file before the browser opens, so an unreadable
+	// one fails before Plaid creates an item it would bill. Doing it here in
+	// the other order would drop the only handle to that item.
+	linked, err := app.New(cfg.appConfig()).Link(ctx, days, signInLine)
 	if err != nil {
 		return err
 	}
@@ -48,25 +47,28 @@ func runLink(ctx context.Context, cfg settings, options []string) error {
 	if err != nil {
 		return err
 	}
-	saved = saved.Upsert(tokens.Item{
-		ItemID:      result.ItemID,
-		AccessToken: result.AccessToken,
-		Institution: result.Institution,
-		Env:         cfg.plaid.Env,
-		LinkedAt:    time.Now().UTC(),
-	})
-	if err := tokens.Save(cfg.tokensPath, saved); err != nil {
-		return err
-	}
 
-	name := result.Institution
+	name := linked.Institution
 	if name == "" {
-		name = result.ItemID
+		name = linked.ItemID
 	}
 	fmt.Printf("\nLinked %s. Token saved to %s (%d linked in total).\n",
 		name, cfg.tokensPath, len(saved.Items))
 	fmt.Println("Run `fourseas link` again for the next card, or `fourseas sync` to fetch transactions.")
 	return nil
+}
+
+// signInLinePrefix is how app.Link starts the one progress line that names the
+// sign-in URL. It is reported once, just before the browser step.
+const signInLinePrefix = "Open "
+
+// signInLine prints the sign-in instruction of the command line. Every other
+// progress line app.Link reports is for the terminal interface, which shows a
+// status line the command line does not have.
+func signInLine(line string) {
+	if strings.HasPrefix(line, signInLinePrefix) {
+		fmt.Println(line + " to sign in to the bank.")
+	}
 }
 
 // parseLinkOptions reads the link command line. It accepts --days N and

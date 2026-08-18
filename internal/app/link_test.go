@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -55,6 +56,49 @@ func TestLinkSavesCompletedItem(t *testing.T) {
 	}
 	if len(reported) == 0 {
 		t.Error("Link reported no progress")
+	}
+}
+
+// An unusable token file must be found before the browser opens. Plaid bills
+// the item it creates there, and the access token is the only handle to it: a
+// token file that cannot be written afterwards loses that item for good. This
+// is the guarantee the command line now relies on.
+func TestLinkRefusesAnUnreadableTokenFileBeforeTheBrowserStep(t *testing.T) {
+	cfg := tempConfig(t, "sandbox")
+	if err := os.WriteFile(cfg.TokensPath, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", cfg.TokensPath, err)
+	}
+
+	_, err := newWith(cfg, linkNever(t), nil, nil).Link(context.Background(), 730, nil)
+	if err == nil {
+		t.Fatal("error = nil, want the unreadable token file")
+	}
+	if !strings.Contains(err.Error(), "tokens.json") {
+		t.Errorf("error = %q, want it to name the token file", err)
+	}
+}
+
+// The command line builds its own sign-in instruction from this line, so both
+// the wording and the place it is reported are part of the contract: it must
+// come before the browser step, and it must start with the URL to open.
+func TestLinkReportsTheSignInURLBeforeTheBrowserStep(t *testing.T) {
+	cfg := tempConfig(t, "sandbox")
+	var reported []string
+	link := func(_ context.Context, _ plaid.Config, _ int) (plaid.LinkResult, error) {
+		if len(reported) != 1 {
+			t.Errorf("reported %q before the browser step, want the sign-in line only", reported)
+		}
+		return plaid.LinkResult{ItemID: "item-new", AccessToken: "secret"}, nil
+	}
+
+	if _, err := newWith(cfg, link, nil, nil).Link(context.Background(), 730,
+		func(text string) { reported = append(reported, text) }); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+
+	want := "Open " + plaid.LinkURL(cfg.Plaid) + " in your browser"
+	if len(reported) == 0 || reported[0] != want {
+		t.Errorf("first reported line = %q, want %q", reported, want)
 	}
 }
 

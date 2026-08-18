@@ -1,6 +1,45 @@
 package main
 
-import "testing"
+import (
+	"io"
+	"os"
+	"testing"
+)
+
+// captureStdout returns everything print writes while fn runs.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	saved := os.Stdout
+	os.Stdout = write
+	fn()
+	os.Stdout = saved
+	write.Close()
+
+	out, err := io.ReadAll(read)
+	if err != nil {
+		t.Fatalf("read the captured output: %v", err)
+	}
+	return string(out)
+}
+
+// runLink now gets the sign-in URL from app.Link, which reports it just before
+// the browser opens. The line the user reads must not change because of that.
+func TestSignInLineKeepsTheWording(t *testing.T) {
+	const reported = "Open http://localhost:8080/link in your browser"
+	const want = "Open http://localhost:8080/link in your browser to sign in to the bank.\n"
+
+	if got := captureStdout(t, func() { signInLine(reported) }); got != want {
+		t.Errorf("signInLine printed %q, want %q", got, want)
+	}
+	// Every other line app.Link reports belongs to the terminal interface.
+	if got := captureStdout(t, func() { signInLine("Link completed") }); got != "" {
+		t.Errorf("signInLine printed %q for a line the command line does not show", got)
+	}
+}
 
 func TestParseLinkOptions(t *testing.T) {
 	tests := []struct {
