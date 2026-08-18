@@ -22,9 +22,9 @@ text.
 
 ## The internal/app contract
 
-`*app.App` has seven operations: `Accounts`, `Link`, `SyncItem`, `SyncAll`,
-`SetNickname`, `UnlinkPreview`, and `Unlink`. The `service` interface in
-`internal/tui/model.go` lists the same seven.
+`*app.App` has eight operations: `Accounts`, `Link`, `CompleteLinkSave`,
+`SyncItem`, `SyncAll`, `SetNickname`, `UnlinkPreview`, and `Unlink`. The
+`service` interface in `internal/tui/model.go` lists the same eight.
 
 Rules that the code depends on:
 
@@ -39,6 +39,24 @@ Rules that the code depends on:
   `app.progress` accepts nil.
 - Cancellation crosses the boundary as the returned error. The caller passes a
   context and reads `context.Canceled` from the error.
+- A failed token save is the one failure a presenter must classify.
+  `App.Link` saves the access token before it returns, because Plaid bills the
+  item it has created and the token is the only handle to it. When that save
+  fails, `Link` returns a `*app.TokenNotSavedError`, which a caller reads with
+  `errors.As`. Its `Pending` field is an opaque `app.PendingSave`: every field
+  is unexported, so the token stays inside `internal/app`. A presenter reads
+  `Pending.Institution()` and `Pending.ItemID()` only, and `PendingSave.String`
+  redacts the token so a stray `%v` cannot print it.
+- `App.CompleteLinkSave(pending)` is the retry of that save. It calls no
+  provider and returns the same `LinkedItem` a successful `Link` returns. It
+  reads the token file again first and falls back to the snapshot of the
+  failure only when that read fails, so a file the user repaired in another
+  terminal is not overwritten. A save that fails again returns another
+  `*app.TokenNotSavedError`, so the retry is never a one-shot.
+- **Never run `Link` again after a `*app.TokenNotSavedError`.** Plaid has an
+  item and bills it. A second link creates a second billed item and leaves the
+  first one unreachable. `internal/tui` retries with `startLinkSave`, and
+  `cmd/fourseas` retries in `linkOnce`.
 - The local half of `Unlink` runs on `context.WithoutCancel` with the bound
   `localCleanupTimeout`, after Plaid agrees to the removal. The user cannot stop
   the local deletes, because Plaid no longer bills the item.
@@ -82,6 +100,16 @@ Bubble Tea methods use pointer receivers, so `Update` returns the same model.
   to the main menu. A clean sync drops the per-item `Last sync` block, so one
   run reads as one outcome; a run with a skipped or a failed item keeps that
   block.
+- `failed` classifies one failure. A `*app.TokenNotSavedError` opens the
+  recovery screen with `tokenNotSavedMessage`, the notes of
+  `tokenNotSavedNotes`, and a retry that runs `startLinkSave` instead of
+  `startLink`. The wording says that the bank connected and that only the save
+  failed, so `Retry` never reads as "try the bank again", and it says what
+  `Main` costs: an item that stays billed with no saved token. Every other link
+  failure keeps its own retry.
+- `m.recovery.notes` are the lines under the failure message. They are written
+  in the muted style and each one is cut with `truncate`, so a note has to fit
+  80 cells with the gutter.
 - `start` writes `returnTo` with the screen the operation started from.
   `cancelled` and `recoverWith` return to that screen. The exception is a
   cancelled first sync of a new link: the model shows the account list, because
@@ -163,6 +191,9 @@ follows.
   returns prepared answers, so no store and no provider are opened. `ready`
   builds a model whose first refresh is complete: it calls `Init`, runs the
   command, and passes the message to `Update`.
+- `fakeService` records `completeCalls` beside `linkDays`. A test of a failed
+  save asserts both: the retry must call `CompleteLinkSave` once and must not
+  call `Link` a second time.
 - To read a screen, call the `content` helper. It returns `m.View().Content`
   with the escape sequences removed, so an assertion compares printable text.
   The `hasRow` helper checks that one line holds a label and its value in the

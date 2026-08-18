@@ -26,6 +26,7 @@ import (
 type service interface {
 	Accounts(context.Context, string) (app.AccountData, error)
 	Link(context.Context, int, app.Progress) (app.LinkedItem, error)
+	CompleteLinkSave(app.PendingSave) (app.LinkedItem, error)
 	SyncItem(context.Context, string, app.Progress) ([]model.AccountView, error)
 	SyncAll(context.Context, app.Progress) ([]app.SyncResult, error)
 	SetNickname(context.Context, string, string) error
@@ -71,8 +72,11 @@ type unlinkState struct {
 
 type recoveryState struct {
 	message string
-	cursor  int
-	retry   func() tea.Cmd
+	// notes are the extra lines under the message. A failure the user has to
+	// understand before choosing needs more than one line.
+	notes  []string
+	cursor int
+	retry  func() tea.Cmd
 }
 
 // Model is the one owner of every screen's state.
@@ -132,6 +136,7 @@ type operation uint8
 const (
 	accountsOperation operation = iota
 	linkOperation
+	linkSaveOperation
 	syncItemOperation
 	syncAllOperation
 	nicknameOperation
@@ -202,6 +207,17 @@ func (m *Model) startLink(days int) tea.Cmd {
 		return m.app.Link(ctx, days, m.report)
 	})
 	m.recovery.retry = func() tea.Cmd { return m.startLink(days) }
+	return cmd
+}
+
+// startLinkSave writes the access token of an item Plaid has already created.
+// It is the only retry a failed save may offer: the browser step must not run
+// again, because it would create a second billed item at the same bank.
+func (m *Model) startLinkSave(pending app.PendingSave) tea.Cmd {
+	cmd := m.start(linkSaveOperation, func(context.Context) (any, error) {
+		return m.app.CompleteLinkSave(pending)
+	})
+	m.recovery.retry = func() tea.Cmd { return m.startLinkSave(pending) }
 	return cmd
 }
 
@@ -333,7 +349,9 @@ func (m *Model) finish(msg operationMsg) tea.Cmd {
 		m.accounts.cursor = clampCursor(m.accounts.cursor, len(data.Accounts))
 		m.syncStates = data.States
 		m.refreshDetail()
-	case linkOperation:
+	case linkOperation, linkSaveOperation:
+		// A completed save ends where a successful link ends, because both
+		// leave the same saved item behind.
 		// Only the non-secret metadata of the new item is kept.
 		item, _ := msg.value.(app.LinkedItem)
 		m.linked = app.LinkedItem{ItemID: item.ItemID, Institution: item.Institution}
@@ -483,7 +501,24 @@ func (m *Model) failed(msg operationMsg) tea.Cmd {
 	}
 	// The summary of an older sync does not describe this failure.
 	m.syncResults = nil
+	var notSaved *app.TokenNotSavedError
+	if errors.As(msg.err, &notSaved) {
+		return m.showTokenNotSaved(notSaved)
+	}
 	return m.showFailure(msg.err)
+}
+
+// showTokenNotSaved opens the recovery screen of a link whose item Plaid has
+// already created and already bills. The retry saves the token again, and the
+// notes say that the bank part is done, so the user does not read Retry as
+// "try the bank again".
+func (m *Model) showTokenNotSaved(err *app.TokenNotSavedError) tea.Cmd {
+	pending := err.Pending
+	m.showFailure(err)
+	m.recovery.message = tokenNotSavedMessage
+	m.recovery.notes = tokenNotSavedNotes(pending.Institution(), pending.ItemID(), err.Err)
+	m.recovery.retry = func() tea.Cmd { return m.startLinkSave(pending) }
+	return nil
 }
 
 // showFailure opens the recovery screen for one error, with the ways out the

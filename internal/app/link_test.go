@@ -2,7 +2,10 @@ package app
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -149,5 +152,196 @@ func TestLinkDoesNotOpenDuckDB(t *testing.T) {
 	}
 	if _, found := loadTokens(t, cfg.TokensPath).Find("item-new"); !found {
 		t.Error("the token was not saved although the database is not part of Link")
+	}
+}
+
+// secretToken is the access token of the tests below. It is written to look
+// like nothing else on the screen, so a leak of it is easy to find.
+const secretToken = "access-token-DO-NOT-LEAK"
+
+// linkSecret is a browser step that returns the secret token.
+func linkSecret(context.Context, plaid.Config, int) (plaid.LinkResult, error) {
+	return plaid.LinkResult{
+		ItemID: "item-new", AccessToken: secretToken, Institution: "TD Canada Trust",
+	}, nil
+}
+
+// closedDirConfig returns a configuration whose token file does not exist yet
+// and cannot be created, because its directory refuses a write. The returned
+// function opens the directory again, which lets the save succeed.
+func closedDirConfig(t *testing.T) (Config, func()) {
+	t.Helper()
+	skipAsRoot(t)
+	dir := t.TempDir()
+	cfg := Config{
+		Plaid:      validPlaid("sandbox"),
+		DBPath:     filepath.Join(dir, "fourseas.duckdb"),
+		TokensPath: filepath.Join(dir, "tokens.json"),
+	}
+	open := func() {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Fatalf("chmod %s: %v", dir, err)
+		}
+	}
+	// The cleanup of the temporary directory needs the write permission back.
+	t.Cleanup(open)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod %s: %v", dir, err)
+	}
+	return cfg, open
+}
+
+// Plaid bills the item it has already created, and the access token is the only
+// handle to it. A failed save must therefore hand the token back to the caller,
+// not drop it.
+func TestLinkKeepsTheTokenWhenTheSaveFails(t *testing.T) {
+	cfg, open := closedDirConfig(t)
+
+	_, err := newWith(cfg, linkSecret, nil, nil).Link(context.Background(), 730, nil)
+	if err == nil {
+		t.Fatal("error = nil, want the failed save")
+	}
+	var notSaved *TokenNotSavedError
+	if !errors.As(err, &notSaved) {
+		t.Fatalf("error = %v (%T), want a *TokenNotSavedError", err, err)
+	}
+	if notSaved.Pending.ItemID() != "item-new" {
+		t.Errorf("pending item id = %q, want item-new", notSaved.Pending.ItemID())
+	}
+	if notSaved.Pending.Institution() != "TD Canada Trust" {
+		t.Errorf("pending institution = %q, want TD Canada Trust", notSaved.Pending.Institution())
+	}
+
+	open()
+	linked, err := newWith(cfg, linkNever(t), nil, nil).CompleteLinkSave(notSaved.Pending)
+	if err != nil {
+		t.Fatalf("CompleteLinkSave: %v", err)
+	}
+	if linked.ItemID != "item-new" || linked.Institution != "TD Canada Trust" {
+		t.Errorf("linked = %+v, want item-new at TD Canada Trust", linked)
+	}
+	saved, found := loadTokens(t, cfg.TokensPath).Find("item-new")
+	if !found {
+		t.Fatal("the token file has no item-new after the save was completed")
+	}
+	if saved.AccessToken != secretToken || saved.Env != "sandbox" {
+		t.Errorf("saved = %+v, want the secret token in sandbox", saved)
+	}
+	if saved.LinkedAt.IsZero() {
+		t.Error("the saved item has no link time")
+	}
+}
+
+// The user may repair the token file in another terminal between the failure
+// and the retry. The snapshot taken at the failure would throw that work away,
+// so the save reads the file again first.
+func TestCompleteLinkSaveKeepsWhatTheFileHoldsNow(t *testing.T) {
+	cfg, open := closedDirConfig(t)
+
+	_, err := newWith(cfg, linkSecret, nil, nil).Link(context.Background(), 730, nil)
+	var notSaved *TokenNotSavedError
+	if !errors.As(err, &notSaved) {
+		t.Fatalf("error = %v (%T), want a *TokenNotSavedError", err, err)
+	}
+
+	// The user repairs the file and puts another item in it.
+	open()
+	seedTokens(t, cfg.TokensPath, item("item-other", "Amex", "sandbox"))
+
+	if _, err := newWith(cfg, linkNever(t), nil, nil).CompleteLinkSave(notSaved.Pending); err != nil {
+		t.Fatalf("CompleteLinkSave: %v", err)
+	}
+
+	file := loadTokens(t, cfg.TokensPath)
+	if len(file.Items) != 2 {
+		t.Fatalf("the token file holds %d items, want the repaired one and the new one", len(file.Items))
+	}
+	other, found := file.Find("item-other")
+	if !found {
+		t.Fatal("the item the user added between the failure and the retry is gone")
+	}
+	if other.AccessToken != "item-other-token" {
+		t.Errorf("item-other = %+v, want the token the user wrote", other)
+	}
+	if _, found := file.Find("item-new"); !found {
+		t.Error("the token file has no item-new after the save was completed")
+	}
+}
+
+// A second failure has to stay recoverable, or the retry is a one-shot.
+func TestCompleteLinkSaveReportsTheTokenAsStillUnsaved(t *testing.T) {
+	cfg, _ := closedDirConfig(t)
+
+	_, err := newWith(cfg, linkSecret, nil, nil).Link(context.Background(), 730, nil)
+	var notSaved *TokenNotSavedError
+	if !errors.As(err, &notSaved) {
+		t.Fatalf("error = %v (%T), want a *TokenNotSavedError", err, err)
+	}
+
+	_, err = newWith(cfg, linkNever(t), nil, nil).CompleteLinkSave(notSaved.Pending)
+	var again *TokenNotSavedError
+	if !errors.As(err, &again) {
+		t.Fatalf("second error = %v (%T), want a *TokenNotSavedError", err, err)
+	}
+	if again.Pending.ItemID() != "item-new" {
+		t.Errorf("pending item id = %q, want item-new", again.Pending.ItemID())
+	}
+}
+
+// The access token must never reach a log, an error string, or the screen.
+func TestTheUnsavedTokenIsNeverWritten(t *testing.T) {
+	cfg, _ := closedDirConfig(t)
+
+	_, err := newWith(cfg, linkSecret, nil, nil).Link(context.Background(), 730, nil)
+	var notSaved *TokenNotSavedError
+	if !errors.As(err, &notSaved) {
+		t.Fatalf("error = %v (%T), want a *TokenNotSavedError", err, err)
+	}
+
+	written := []string{
+		err.Error(),
+		notSaved.Error(),
+		fmt.Sprintf("%v", err),
+		fmt.Sprintf("%s", err),
+		fmt.Sprintf("%v", notSaved.Pending),
+		fmt.Sprintf("%s", notSaved.Pending),
+		fmt.Sprintf("%+v", notSaved.Pending),
+		notSaved.Pending.String(),
+		fmt.Sprintf("%v", []PendingSave{notSaved.Pending}),
+		fmt.Sprintf("%v", struct{ P PendingSave }{notSaved.Pending}),
+	}
+	for _, text := range written {
+		if strings.Contains(text, secretToken) {
+			t.Errorf("the access token appears in %q", text)
+		}
+	}
+	if !strings.Contains(notSaved.Pending.String(), "item-new") {
+		t.Errorf("the handle prints %q, want it to name the item", notSaved.Pending.String())
+	}
+}
+
+// The error still has to say what went wrong, and it must keep the cause for
+// errors.Is and errors.As.
+func TestTokenNotSavedErrorKeepsItsCause(t *testing.T) {
+	cause := errors.New("write tokens.json: permission denied")
+	err := error(&TokenNotSavedError{Err: cause})
+
+	if !errors.Is(err, cause) {
+		t.Error("the error does not unwrap to its cause")
+	}
+	if !strings.Contains(err.Error(), cause.Error()) {
+		t.Errorf("error = %q, want it to hold the cause", err)
+	}
+}
+
+// A handle a caller never got from Link saves nothing.
+func TestCompleteLinkSaveRefusesAnEmptyHandle(t *testing.T) {
+	cfg := tempConfig(t, "sandbox")
+
+	if _, err := newWith(cfg, linkNever(t), nil, nil).CompleteLinkSave(PendingSave{}); err == nil {
+		t.Fatal("error = nil, want a refusal of the empty handle")
+	}
+	if _, err := os.Stat(cfg.TokensPath); err == nil {
+		t.Error("the empty handle wrote a token file")
 	}
 }

@@ -147,6 +147,8 @@ func (m *Model) runningLine() string {
 	switch m.runningKind {
 	case linkOperation:
 		return "Linking"
+	case linkSaveOperation:
+		return "Saving the token"
 	case syncItemOperation, syncAllOperation:
 		return "Syncing"
 	case nicknameOperation:
@@ -289,10 +291,42 @@ func (m *Model) historyLines() []string {
 	return append(lines, m.footer("↑/↓ move · enter select · esc back")...)
 }
 
+// tokenNotSavedMessage is the first line of the one failure where the provider
+// part succeeded. It says so first, because the choices under it read
+// differently once the user knows that the bank is linked.
+const tokenNotSavedMessage = "The bank connected. Only the save of the access token failed."
+
+// tokenNotSavedNotes explains what the user now owns and what each choice
+// does. The item is billed from now on, and the access token is the only way to
+// reach it, so both choices have a cost the user must read before choosing.
+func tokenNotSavedNotes(institution, itemID string, cause error) []string {
+	name := institution
+	if name == "" {
+		name = itemID
+	}
+	if name == "" {
+		name = "The new item"
+	}
+	notes := []string{name + " is linked at Plaid. Plaid bills this item each month."}
+	if itemID != "" {
+		notes = append(notes, "Item id: "+itemID)
+	}
+	return append(notes,
+		"Reason: "+displayError(cause),
+		"Retry saves the token again. It does not open the bank a second time.",
+		"Main leaves this item billed with no saved token.",
+		"Without the token you cannot sync this item or remove it.",
+	)
+}
+
 // recoveryLines shows what failed and what the user can do about it.
 func (m *Model) recoveryLines() []string {
 	lines := append(m.header("Something went wrong"),
-		truncate(blankMark+warnStyle.Render(failedMark+" "+m.recovery.message), m.contentWidth()), "")
+		truncate(blankMark+warnStyle.Render(failedMark+" "+m.recovery.message), m.contentWidth()))
+	for _, note := range m.recovery.notes {
+		lines = append(lines, truncate(blankMark+mutedStyle.Render(note), m.contentWidth()))
+	}
+	lines = append(lines, "")
 	for i, choice := range m.recovery.choices() {
 		lines = append(lines, m.menuRow(i == m.recovery.cursor, choice, ""))
 	}

@@ -1,9 +1,14 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"io"
 	"os"
+	"strings"
 	"testing"
+
+	"github.com/kyle-cheung/fourseas/providence/internal/app"
 )
 
 // captureStdout returns everything print writes while fn runs.
@@ -78,6 +83,105 @@ func TestParseLinkOptionsRejectsBadInput(t *testing.T) {
 	} {
 		if _, err := parseLinkOptions(options); err == nil {
 			t.Errorf("parseLinkOptions(%q) error = nil, want an error", options)
+		}
+	}
+}
+
+// fakeLinker records what the link command asked of the façade.
+type fakeLinker struct {
+	linkCalls     int
+	linkItem      app.LinkedItem
+	linkErr       error
+	completeCalls int
+	completeItem  app.LinkedItem
+	completeErr   error
+}
+
+func (f *fakeLinker) Link(context.Context, int, app.Progress) (app.LinkedItem, error) {
+	f.linkCalls++
+	return f.linkItem, f.linkErr
+}
+
+func (f *fakeLinker) CompleteLinkSave(app.PendingSave) (app.LinkedItem, error) {
+	f.completeCalls++
+	return f.completeItem, f.completeErr
+}
+
+// tokenNotSaved is the failure of a link whose item Plaid has already created.
+func tokenNotSaved() error {
+	return &app.TokenNotSavedError{Err: errors.New("write tokens.json: permission denied")}
+}
+
+// A failed save is saved again. Plaid bills the item it has already created,
+// and a second link would create a second billed item.
+func TestLinkOnceSavesAgainInsteadOfLinkingAgain(t *testing.T) {
+	fake := &fakeLinker{
+		linkErr:      tokenNotSaved(),
+		completeItem: app.LinkedItem{ItemID: "item-new", Institution: "TD Canada Trust"},
+	}
+
+	linked, err := linkOnce(context.Background(), fake, 730, nil)
+	if err != nil {
+		t.Fatalf("linkOnce: %v", err)
+	}
+	if linked.ItemID != "item-new" {
+		t.Errorf("linked = %+v, want the item the completed save returned", linked)
+	}
+	if fake.linkCalls != 1 {
+		t.Errorf("Link ran %d times, want the one link Plaid already billed", fake.linkCalls)
+	}
+	if fake.completeCalls != 1 {
+		t.Errorf("CompleteLinkSave ran %d times, want once", fake.completeCalls)
+	}
+}
+
+// A save that fails twice ends the command with a failure the user can act on,
+// and with no second link.
+func TestLinkOnceReportsTheUnsavedTokenWithoutASecondLink(t *testing.T) {
+	fake := &fakeLinker{linkErr: tokenNotSaved(), completeErr: tokenNotSaved()}
+
+	_, err := linkOnce(context.Background(), fake, 730, nil)
+	if err == nil {
+		t.Fatal("error = nil, want the unsaved token to end the command")
+	}
+	if fake.linkCalls != 1 {
+		t.Errorf("Link ran %d times, want the one link Plaid already billed", fake.linkCalls)
+	}
+	if fake.completeCalls != 1 {
+		t.Errorf("CompleteLinkSave ran %d times, want the one retry", fake.completeCalls)
+	}
+	if !strings.Contains(err.Error(), "SECOND") {
+		t.Errorf("error = %q, want the warning about a second billed item", err)
+	}
+}
+
+// Every other link failure keeps its own error and starts no save.
+func TestLinkOnceLeavesAnOrdinaryFailureAlone(t *testing.T) {
+	fake := &fakeLinker{linkErr: errors.New("plaid is unavailable")}
+
+	if _, err := linkOnce(context.Background(), fake, 730, nil); err != fake.linkErr {
+		t.Errorf("error = %v, want the error Link returned", err)
+	}
+	if fake.completeCalls != 0 {
+		t.Errorf("CompleteLinkSave ran %d times, want none", fake.completeCalls)
+	}
+}
+
+// The message must name the item the user now pays for, and must not offer a
+// new link as the way out.
+func TestTokenNotSavedMessageNamesTheBilledItem(t *testing.T) {
+	err := tokenNotSavedMessage("TD Canada Trust", "item-new",
+		errors.New("write tokens.json: permission denied"))
+
+	for _, want := range []string{
+		"TD Canada Trust",
+		"item-new",
+		"write tokens.json: permission denied",
+		"SECOND",
+		"fourseas link",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("message does not hold %q:\n%s", want, err)
 		}
 	}
 }

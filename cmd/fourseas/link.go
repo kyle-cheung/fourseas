@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -38,7 +39,7 @@ func runLink(ctx context.Context, cfg settings, options []string) error {
 	// app.Link reads the token file before the browser opens, so an unreadable
 	// one fails before Plaid creates an item it would bill. Doing it here in
 	// the other order would drop the only handle to that item.
-	linked, err := app.New(cfg.appConfig()).Link(ctx, days, signInLine)
+	linked, err := linkOnce(ctx, app.New(cfg.appConfig()), days, signInLine)
 	if err != nil {
 		return err
 	}
@@ -56,6 +57,64 @@ func runLink(ctx context.Context, cfg settings, options []string) error {
 		name, cfg.tokensPath, len(saved.Items))
 	fmt.Println("Run `fourseas link` again for the next card, or `fourseas sync` to fetch transactions.")
 	return nil
+}
+
+// linkService is the part of the façade the link command uses. *app.App
+// satisfies it.
+type linkService interface {
+	Link(context.Context, int, app.Progress) (app.LinkedItem, error)
+	CompleteLinkSave(app.PendingSave) (app.LinkedItem, error)
+}
+
+// linkOnce links one card and makes sure its access token reaches the disk.
+//
+// Plaid bills the item it creates, and the access token is the only handle to
+// that item. A save that fails is therefore tried once more from the handle the
+// failure carries. The browser step never runs a second time: a new link
+// creates a second billed item at the same bank.
+func linkOnce(ctx context.Context, svc linkService, days int, report app.Progress) (app.LinkedItem, error) {
+	linked, err := svc.Link(ctx, days, report)
+	var notSaved *app.TokenNotSavedError
+	if !errors.As(err, &notSaved) {
+		return linked, err
+	}
+
+	fmt.Println("\nThe bank connected. The access token was not saved. Saving it again.")
+	saved, retryErr := svc.CompleteLinkSave(notSaved.Pending)
+	if retryErr == nil {
+		return saved, nil
+	}
+	var again *app.TokenNotSavedError
+	if errors.As(retryErr, &again) {
+		notSaved = again
+	}
+	return app.LinkedItem{}, tokenNotSavedMessage(
+		notSaved.Pending.Institution(), notSaved.Pending.ItemID(), notSaved.Err)
+}
+
+// tokenNotSavedMessage is what the user reads when the token of a billed item
+// stays unsaved. It names the item, because the Plaid dashboard is the only
+// place left to act on it, and it refuses the one recovery the user would try
+// first.
+func tokenNotSavedMessage(institution, itemID string, cause error) error {
+	name := institution
+	if name == "" {
+		name = itemID
+	}
+	return fmt.Errorf(`the access token of a billed item was not saved: %w
+
+  Institution: %s
+  Item id:     %s
+
+Plaid created this item and bills it each month. The access token is the only
+way to reach it, and fourseas did not write it to disk.
+
+Do NOT run `+"`fourseas link`"+` to recover this item. A new link creates a SECOND
+billed item at the same bank, and this item stays billed.
+
+Make the token file writable, then link again only if you accept a second item.
+To stop the charge for this item, remove it in the Plaid dashboard.`,
+		cause, name, itemID)
 }
 
 // signInLinePrefix is how app.Link starts the one progress line that names the

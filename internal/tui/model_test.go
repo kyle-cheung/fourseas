@@ -40,6 +40,15 @@ type fakeService struct {
 	// token before any sync runs.
 	links map[string]bool
 
+	// completeCalls holds the handle of every CompleteLinkSave call, in order.
+	// A failed save must be completed from the handle and never by linking
+	// again, so a test reads this list beside linkDays.
+	completeCalls []app.PendingSave
+	// completeItem is what a successful CompleteLinkSave returns, and
+	// completeErr replaces it.
+	completeItem app.LinkedItem
+	completeErr  error
+
 	// syncCalls holds the item id of every SyncItem call, in order.
 	syncCalls []string
 	// syncErrs is consumed one entry per SyncItem call. A nil entry, or an
@@ -97,6 +106,18 @@ func (f *fakeService) Link(_ context.Context, days int, _ app.Progress) (app.Lin
 	}
 	f.links[f.linkItem.ItemID] = true
 	return f.linkItem, nil
+}
+
+func (f *fakeService) CompleteLinkSave(pending app.PendingSave) (app.LinkedItem, error) {
+	f.completeCalls = append(f.completeCalls, pending)
+	if f.completeErr != nil {
+		return app.LinkedItem{}, f.completeErr
+	}
+	if f.links == nil {
+		f.links = map[string]bool{}
+	}
+	f.links[f.completeItem.ItemID] = true
+	return f.completeItem, nil
 }
 
 func (f *fakeService) SyncItem(_ context.Context, itemID string, _ app.Progress) ([]model.AccountView, error) {
@@ -1590,5 +1611,136 @@ func TestSyncAllFailureOffersRetryWithoutAutomaticRetry(t *testing.T) {
 	}
 	if body := content(m); strings.Contains(body, "Something went wrong") {
 		t.Errorf("main view = %q, want the failure left behind", body)
+	}
+}
+
+// tokenNotSaved is the failure of a link whose item Plaid has already created.
+func tokenNotSaved() error {
+	return &app.TokenNotSavedError{Err: errors.New("write tokens.json: permission denied")}
+}
+
+// Plaid bills the item it created, and the token is the only handle to it. The
+// retry must therefore save the token again. A retry that links again would
+// create a second billed item and leave the first one unreachable.
+func TestLinkSaveFailureRetriesTheSaveAndNotTheBank(t *testing.T) {
+	fake := &fakeService{
+		linkErr:      tokenNotSaved(),
+		completeItem: app.LinkedItem{ItemID: "item-new", Institution: "TD Canada Trust"},
+		syncAccounts: []model.AccountView{account("acc-1", "", "Everyday", "1234", "TD Canada Trust", 10)},
+	}
+	m := ready(t, fake)
+	openHistory(t, m)
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // the link, which fails at the save
+
+	if m.screen != recoveryScreen {
+		t.Fatalf("screen after the failed save = %v, want recoveryScreen", m.screen)
+	}
+	body := content(m)
+	for _, want := range []string{tokenNotSavedMessage, recoveryRetry, recoveryMain} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the recovery screen does not hold %q:\n%s", want, body)
+		}
+	}
+
+	cmd := press(t, m, codeKey(tea.KeyEnter)) // Retry
+	next := runOperation(t, m, cmd)
+	if len(fake.linkDays) != 1 {
+		t.Fatalf("Link ran %d times, want the one link Plaid already billed", len(fake.linkDays))
+	}
+	if len(fake.completeCalls) != 1 {
+		t.Fatalf("CompleteLinkSave ran %d times, want once", len(fake.completeCalls))
+	}
+	if m.linked.ItemID != "item-new" || m.linked.Institution != "TD Canada Trust" {
+		t.Errorf("linked = %+v, want the item the completed save returned", m.linked)
+	}
+	runOperation(t, m, next) // the first sync of the saved item
+	if len(fake.syncCalls) != 1 || fake.syncCalls[0] != "item-new" {
+		t.Errorf("sync calls = %v, want one sync of item-new", fake.syncCalls)
+	}
+	if m.screen != nicknameScreen {
+		t.Errorf("screen after the completed save and its sync = %v, want nicknameScreen", m.screen)
+	}
+}
+
+// A save that fails again keeps the token, so Retry stays a save.
+func TestASecondSaveFailureStillRetriesTheSave(t *testing.T) {
+	fake := &fakeService{linkErr: tokenNotSaved(), completeErr: tokenNotSaved()}
+	m := ready(t, fake)
+	openHistory(t, m)
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // the failed link
+
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // Retry, which fails again
+	if m.screen != recoveryScreen {
+		t.Fatalf("screen after the second failure = %v, want recoveryScreen", m.screen)
+	}
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // Retry again
+	if len(fake.completeCalls) != 2 {
+		t.Errorf("CompleteLinkSave ran %d times, want twice", len(fake.completeCalls))
+	}
+	if len(fake.linkDays) != 1 {
+		t.Errorf("Link ran %d times, want the one link Plaid already billed", len(fake.linkDays))
+	}
+}
+
+// Every other link failure keeps the behaviour it has today: Retry links again,
+// because Plaid created no item.
+func TestAnOrdinaryLinkFailureStillRetriesTheLink(t *testing.T) {
+	fake := &fakeService{linkErr: errors.New("plaid is unavailable")}
+	m := ready(t, fake)
+	openHistory(t, m)
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // Retry
+	if len(fake.linkDays) != 2 {
+		t.Errorf("Link ran %d times, want the retry to link again", len(fake.linkDays))
+	}
+	if len(fake.completeCalls) != 0 {
+		t.Errorf("CompleteLinkSave ran %d times, want none", len(fake.completeCalls))
+	}
+}
+
+// The wording must say that the bank part succeeded, so the user does not read
+// Retry as "try the bank again", and it must say what Main costs.
+func TestTokenNotSavedWording(t *testing.T) {
+	notes := tokenNotSavedNotes("TD Canada Trust", "item-new",
+		errors.New("write tokens.json: permission denied"))
+	joined := strings.Join(notes, "\n")
+
+	for _, want := range []string{
+		"TD Canada Trust is linked at Plaid. Plaid bills this item each month.",
+		"Item id: item-new",
+		"Reason: write tokens.json: permission denied",
+		"Retry saves the token again. It does not open the bank a second time.",
+		"Main leaves this item billed with no saved token.",
+		"Without the token you cannot sync this item or remove it.",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("the notes do not hold %q:\n%s", want, joined)
+		}
+	}
+	// Every line has to fit the narrowest screen the interface assumes.
+	for _, line := range append(notes, tokenNotSavedMessage) {
+		if width := lipgloss.Width(line) + lipgloss.Width(blankMark) + rightPad; width > defaultWidth {
+			t.Errorf("line %q is %d cells wide, want at most %d", line, width, defaultWidth)
+		}
+	}
+}
+
+// The failure screen carries the notes, and no note holds an access token: the
+// interface never receives one.
+func TestTokenNotSavedScreenShowsTheNotes(t *testing.T) {
+	fake := &fakeService{linkErr: tokenNotSaved()}
+	m := ready(t, fake)
+	openHistory(t, m)
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+
+	body := content(m)
+	for _, want := range []string{
+		"Retry saves the token again. It does not open the bank a second time.",
+		"Main leaves this item billed with no saved token.",
+	} {
+		if !hasLine(body, want) {
+			t.Errorf("the recovery screen does not hold the line %q:\n%s", want, body)
+		}
 	}
 }
