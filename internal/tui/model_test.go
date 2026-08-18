@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -312,6 +313,73 @@ func TestTextPromptAcceptsQAndEscCancels(t *testing.T) {
 	}
 	if got := m.prompt.input.Value(); got != "" {
 		t.Errorf("prompt value after esc = %q, want it cleared", got)
+	}
+}
+
+// promptLine is the line of the open prompt, as it is written and as plain
+// text.
+func promptLine(t *testing.T, m *Model) (string, string) {
+	t.Helper()
+	for _, line := range strings.Split(m.View().Content, "\n") {
+		if plain := ansi.Strip(line); strings.Contains(plain, m.prompt.input.Prompt) {
+			return line, plain
+		}
+	}
+	t.Fatal("no prompt line on the screen")
+	return "", ""
+}
+
+// caretPattern matches the caret of the text input: one cell of reverse video
+// with a character inside it. A cut that leaves the escape sequence but takes
+// the cell away leaves the user typing into a screen that does not change.
+var caretPattern = regexp.MustCompile("\x1b\\[7[0-9;]*m[^\x1b]")
+
+// A value longer than the terminal has to scroll under the caret. The input
+// renders its whole value while it has no width, so the line was cut and both
+// the newest characters and the caret went with the cut.
+func TestPromptKeepsTheCaretOnAValueLongerThanTheTerminal(t *testing.T) {
+	const narrow = 40
+	value := "Everyday Checking at the " + strings.Repeat("very ", 6) + "long Bank of Nowhere"
+	head, tail := value[:16], value[len(value)-16:]
+
+	for _, tc := range []struct {
+		name string
+		open func(*Model)
+	}{
+		{"typed while the terminal is narrow", func(m *Model) {
+			m.Update(tea.WindowSizeMsg{Width: narrow, Height: 24})
+			m.openPrompt(nicknameScreen, "name", "")
+			for _, r := range value {
+				m.Update(runeKey(r))
+			}
+		}},
+		{"the terminal narrows while the prompt is open", func(m *Model) {
+			m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+			m.openPrompt(nicknameScreen, "name", value)
+			m.Update(tea.WindowSizeMsg{Width: narrow, Height: 24})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(&fakeService{})
+			tc.open(m)
+
+			if got := m.prompt.input.Value(); got != value {
+				t.Fatalf("prompt value = %q, want the whole value", got)
+			}
+			raw, plain := promptLine(t, m)
+			if !strings.Contains(plain, tail) {
+				t.Errorf("prompt line = %q, want the newest characters %q", plain, tail)
+			}
+			if strings.Contains(plain, head) {
+				t.Errorf("prompt line = %q, want it scrolled past the start %q", plain, head)
+			}
+			if got := lipgloss.Width(plain); got > narrow {
+				t.Errorf("prompt line is %d columns wide, want at most %d", got, narrow)
+			}
+			if !caretPattern.MatchString(raw) {
+				t.Errorf("prompt line = %q, want the caret cell kept", raw)
+			}
+		})
 	}
 }
 

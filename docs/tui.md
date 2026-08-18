@@ -81,10 +81,12 @@ follows.
   and both a light and a dark background stay readable. Bubble Tea downsamples
   the colours at its renderer and honours `NO_COLOR`, so no code here detects
   the colour profile.
-- The styles are named for their role: `brandStyle`, `headingStyle`,
-  `itemStyle`, `selectedStyle`, `mutedStyle`, `healthyStyle`, and `warnStyle`.
-  Cyan is the one accent and marks the selection. Green is a state that is in
-  order, red is a state that needs the user, and everything secondary is dim.
+- The styles are named for their role: `brandStyle`, `brandMarkStyle`,
+  `headingStyle`, `itemStyle`, `selectedStyle`, `mutedStyle`, `tagStyle`,
+  `healthyStyle`, and `warnStyle`. Cyan is the one accent and marks the
+  selection. Green is a state that is in order, red is a state that needs the
+  user, and everything secondary is dim. The brand holds the accent on its `≋`
+  glyph only, so the wordmark never reads as a selected row.
 - `m.header(title)` writes the brand `fourseas ≋` and the name of the screen.
   `m.footer(keys)` writes the faint rule and the key help. Both return lines,
   so a screen builder appends them.
@@ -96,6 +98,11 @@ follows.
 - Every line is cut with `truncate`, which uses `MaxWidth`. Use
   `lipgloss.Width` and never `len` for layout, because a line holds escape
   sequences and wide characters.
+- `m.resizePrompt` gives the text input the width it may use. `openPrompt` and
+  the `tea.WindowSizeMsg` case both call it. Without a width the input renders
+  its whole value, so a value longer than the terminal loses its newest
+  characters and its caret to the cut. This is the only rendering value that
+  `internal/tui/model.go` holds.
 
 ## How to add a screen
 

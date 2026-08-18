@@ -247,6 +247,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		// An open prompt has to scroll inside the new width, or a long value
+		// runs past the cut with its caret.
+		m.resizePrompt()
 		return m, nil
 	case progressMsg:
 		m.status = string(msg)
@@ -644,6 +647,7 @@ func (m *Model) openPrompt(target screen, placeholder, value string) tea.Cmd {
 	input.Placeholder = placeholder
 	input.SetValue(value)
 	m.prompt = promptState{input: input}
+	m.resizePrompt()
 	m.screen = target
 	return m.prompt.input.Focus()
 }

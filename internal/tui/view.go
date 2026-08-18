@@ -145,7 +145,7 @@ func (m *Model) syncSummary() []string {
 	if len(m.syncResults) == 0 {
 		return nil
 	}
-	lines := []string{"", blankMark + headingStyle.Render("Last sync")}
+	lines := []string{"", truncate(blankMark+headingStyle.Render("Last sync"), m.contentWidth())}
 	for _, result := range m.syncResults {
 		label, note, tone := syncResultParts(result)
 		lines = append(lines, columns(blankMark+label, tone.Render(note), m.contentWidth()))
@@ -170,13 +170,14 @@ func syncResultParts(result app.SyncResult) (string, string, lipgloss.Style) {
 func (m *Model) accountLines() []string {
 	lines := m.header("Accounts")
 	if len(m.accounts.rows) == 0 {
-		lines = append(lines, blankMark+mutedStyle.Render("No accounts are linked yet."))
+		lines = append(lines, truncate(blankMark+mutedStyle.Render("No accounts are linked yet."),
+			m.contentWidth()))
 		return append(lines, m.footer("esc back · q quit")...)
 	}
 	for i, row := range m.accounts.rows {
 		selected := i == m.accounts.cursor
-		lines = append(lines, mark(selected)+accountRow(row, m.accounts.newItems[row.AccountID],
-			choiceStyle(selected), m.contentWidth()-lipgloss.Width(blankMark)))
+		lines = append(lines, truncate(mark(selected)+accountRow(row, m.accounts.newItems[row.AccountID],
+			choiceStyle(selected), m.contentWidth()-lipgloss.Width(blankMark)), m.contentWidth()))
 	}
 	return append(lines, m.footer("↑/↓ move · enter open · esc back · q quit")...)
 }
@@ -275,7 +276,7 @@ func promptTitle(s screen) string {
 func (m *Model) header(title string) []string {
 	width := m.contentWidth()
 	return []string{
-		truncate(blankMark+brandStyle.Render(brandName+" "+brandMark), width),
+		truncate(blankMark+brandStyle.Render(brandName)+" "+brandMarkStyle.Render(brandMark), width),
 		"",
 		truncate(blankMark+headingStyle.Render(title), width),
 		"",
@@ -287,9 +288,24 @@ func (m *Model) footer(keys string) []string {
 	width := m.contentWidth()
 	return []string{
 		"",
-		blankMark + mutedStyle.Render(strings.Repeat(dividerRune, max(width-2*rightPad, 0))),
+		truncate(blankMark+mutedStyle.Render(strings.Repeat(dividerRune, max(width-2*rightPad, 0))), width),
 		truncate(blankMark+mutedStyle.Render(keys), width),
 	}
+}
+
+// resizePrompt gives the text input the width it may use: the content width,
+// less the left gutter and the prompt of the input itself. Without a width the
+// input renders the whole value, and a value longer than the terminal loses
+// its caret and its newest characters to the cut. With a width the input
+// scrolls under the caret instead.
+func (m *Model) resizePrompt() {
+	room := m.contentWidth() - lipgloss.Width(blankMark) -
+		lipgloss.Width(m.prompt.input.Prompt) - caretCell
+	m.prompt.input.SetWidth(max(room, 1))
+	// SetWidth alone keeps the scroll offset of the width before, which can
+	// hold the caret outside the new window. Setting the cursor where it
+	// already is makes the input compute that offset again.
+	m.prompt.input.SetCursor(m.prompt.input.Position())
 }
 
 // columns writes one row as a label at the left and a note at the right. A
@@ -363,7 +379,7 @@ func newExtra(isNew bool) string {
 	if !isNew {
 		return ""
 	}
-	return healthyStyle.Render(newMark)
+	return tagStyle.Render(newMark)
 }
 
 // maskText is the last digits of the account number, marked as a partial

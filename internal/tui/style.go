@@ -17,15 +17,20 @@ var (
 )
 
 // Every style is named for the role it fills, never for its colour. Bold marks
-// hierarchy only: the brand, a heading, and the selected row.
+// hierarchy only: the brand, a heading, a tag, and the selected row.
+//
+// The accent belongs to the selection. The brand holds the accent on its glyph
+// only, so the wordmark reads as a logo and never as a selected row.
 var (
-	brandStyle    = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
-	headingStyle  = lipgloss.NewStyle().Bold(true).Foreground(mutedColor)
-	itemStyle     = lipgloss.NewStyle()
-	selectedStyle = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
-	mutedStyle    = lipgloss.NewStyle().Foreground(mutedColor)
-	healthyStyle  = lipgloss.NewStyle().Foreground(healthyColor)
-	warnStyle     = lipgloss.NewStyle().Foreground(warnColor)
+	brandStyle     = lipgloss.NewStyle().Bold(true)
+	brandMarkStyle = lipgloss.NewStyle().Foreground(accentColor)
+	headingStyle   = lipgloss.NewStyle().Bold(true).Foreground(mutedColor)
+	itemStyle      = lipgloss.NewStyle()
+	selectedStyle  = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
+	mutedStyle     = lipgloss.NewStyle().Foreground(mutedColor)
+	tagStyle       = lipgloss.NewStyle().Bold(true).Foreground(mutedColor)
+	healthyStyle   = lipgloss.NewStyle().Foreground(healthyColor)
+	warnStyle      = lipgloss.NewStyle().Foreground(warnColor)
 )
 
 // The brand of the application, which every screen carries.
@@ -47,8 +52,11 @@ const (
 	okMark     = "●"
 	failedMark = "✕"
 	noneMark   = "○"
-	newMark    = "NEW"
 )
+
+// newMark tags an account this session has just linked. Being new is not a
+// health state, so the tag takes no colour of its own.
+const newMark = "NEW"
 
 // dividerRune is the faint rule that separates the key help from the screen.
 const dividerRune = "─"
@@ -60,6 +68,10 @@ const (
 	rightPad = 2
 	minGap   = 2
 )
+
+// caretCell is the one cell the text input writes after its value, for the
+// caret. The width the input is given leaves room for it.
+const caretCell = 1
 
 // choiceStyle is how one row of a list is written.
 func choiceStyle(selected bool) lipgloss.Style {
