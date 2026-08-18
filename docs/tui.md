@@ -65,19 +65,23 @@ Bubble Tea methods use pointer receivers, so `Update` returns the same model.
   the result arrives.
 - A running operation shows a spinner with the newest progress line, or with
   the label of the operation from `runningLine` while it has reported no step.
-  Each frame schedules the frame after it, so the chain has to be stopped:
-  `advanceSpinner` returns no command when nothing is running. `start` sends
-  the first frame from the operation's own goroutine, the way `report` sends a
-  progress line. A `tea.Batch` would hide the `operationMsg` behind a
-  `tea.BatchMsg`, and every test reads the result of the returned command.
+  `start` returns `tea.Batch(m.spinner.Tick, …)`, which starts the animation
+  beside the operation. The program runs a `tea.BatchMsg` itself and delivers
+  each message on its own, so `Update` never sees the batch and the
+  `operationMsg` arrives as it would from a single command.
+- Each frame schedules the frame after it, so the chain has to be stopped:
+  `advanceSpinner` returns no command when nothing is running. One operation
+  may start the next one, so two chains can overlap for one frame.
+  `spinner.Model` rejects a frame that carries an older count of its own, which
+  is what keeps the speed right; give its frame message back unchanged.
 - `m.success` is the outcome of the last finished flow, written with `✓` in the
-  healthy colour above the rule of the footer. It has no timer: `start` clears
-  it, and `keyPress` clears it when a key moved the user to another screen. A
-  flow writes it **after** the call that starts its closing refresh, because
-  `start` clears it. `finishAdd` and a clean `finishSyncAll` are the two flows
-  that write one, and both return to the main menu. A clean sync drops the
-  per-item `Last sync` block, so one run reads as one outcome; a run with a
-  skipped or a failed item keeps that block.
+  healthy colour. It has no timer: `start` clears it, and `keyPress` clears it
+  when a key moved the user to another screen. A flow writes it **after** the
+  call that starts its closing refresh, because `start` clears it. `finishAdd`
+  and a clean `finishSyncAll` are the two flows that write one, and both return
+  to the main menu. A clean sync drops the per-item `Last sync` block, so one
+  run reads as one outcome; a run with a skipped or a failed item keeps that
+  block.
 - `start` writes `returnTo` with the screen the operation started from.
   `cancelled` and `recoverWith` return to that screen. The exception is a
   cancelled first sync of a new link: the model shows the account list, because
@@ -104,8 +108,14 @@ follows.
   user, and everything secondary is dim. The brand holds the accent on its `≋`
   glyph only, so the wordmark never reads as a selected row.
 - `m.header(title)` writes the brand `fourseas ≋` and the name of the screen.
-  `m.footer(keys)` writes the faint rule and the key help. Both return lines,
-  so a screen builder appends them.
+  `m.footer(keys)` writes `m.stateLines()`, then the faint rule and the key
+  help. Both return lines, so a screen builder appends them.
+- `m.stateLines()` is the one slot every screen keeps for what the interface is
+  doing now, or for what it has just done: the running line, then a leftover
+  progress line, then the outcome of the last flow. It sits above the rule,
+  because the rule closes the screen and the line that changes must not follow
+  the key help that never changes. The three cannot appear together, so the
+  slot holds one line that changes in place.
 - `columns(left, right, width)` writes one row as a label at the left and a
   note at the right. `m.menuRow` and `m.fieldRow` call it. A terminal too
   narrow for both keeps the whole label and cuts the note.
@@ -156,7 +166,11 @@ follows.
 - To read a screen, call the `content` helper. It returns `m.View().Content`
   with the escape sequences removed, so an assertion compares printable text.
   The `hasRow` helper checks that one line holds a label and its value in the
-  two columns.
+  two columns, and `hasLine` checks a whole line.
+- Starting an operation returns a batch: the operation and the first spinner
+  frame. `runCmd` runs one command and returns every message it produced, the
+  way the program does, and `operationResult` picks the one result out of them.
+  A test that needs the frame reads it with `firstTick`.
 - The tests of `internal/app` use a real temporary DuckDB file and real token
   files (`tempConfig` and `seedTokens` in `internal/app/app_test.go`). Only
   Plaid is injected, through `newWith` or `WithRemove`.

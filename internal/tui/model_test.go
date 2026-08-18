@@ -153,6 +153,18 @@ func hasRow(body, label, value string) bool {
 	return false
 }
 
+// hasLine says whether one whole line of a screen is the given text, with the
+// gutter and the column padding removed. It is exact about the line, so a
+// label that also appears inside another line does not match.
+func hasLine(body, want string) bool {
+	for _, line := range strings.Split(body, "\n") {
+		if strings.Join(strings.Fields(line), " ") == want {
+			return true
+		}
+	}
+	return false
+}
+
 // press sends one key to the model and checks the model identity stays the
 // same, because every Bubble Tea method uses a pointer receiver.
 func press(t *testing.T, m *Model, key tea.KeyPressMsg) tea.Cmd {
@@ -191,7 +203,7 @@ func ready(t *testing.T, fake *fakeService) *Model {
 	if cmd == nil {
 		t.Fatal("Init returned no command")
 	}
-	m.Update(cmd())
+	m.Update(operationResult(t, cmd))
 	if m.running {
 		t.Fatal("model is still running after the first refresh")
 	}
@@ -399,7 +411,7 @@ func TestRunningOperationIgnoresKeysAndCtrlCCancels(t *testing.T) {
 	if m.returnTo != accountsScreen {
 		t.Fatalf("returnTo = %v, want accountsScreen", m.returnTo)
 	}
-	cmd() // let the fake capture the context
+	runCmd(cmd) // let the fake capture the context
 
 	for _, key := range []tea.KeyPressMsg{runeKey('q'), codeKey(tea.KeyDown), codeKey(tea.KeyEnter), codeKey(tea.KeyEsc)} {
 		if got := press(t, m, key); got != nil {
@@ -459,10 +471,7 @@ func TestInitialRefreshRunsAsAnOperation(t *testing.T) {
 		t.Error("a key before the first refresh quit the program")
 	}
 
-	msg, ok := cmd().(operationMsg)
-	if !ok {
-		t.Fatalf("Init command returned %T, want operationMsg", msg)
-	}
+	msg := operationResult(t, cmd)
 	if msg.kind != accountsOperation {
 		t.Fatalf("operation kind = %v, want accountsOperation", msg.kind)
 	}
@@ -593,18 +602,67 @@ func TestSyncStatusNeverCallsFailureASuccess(t *testing.T) {
 
 func timePtr(t time.Time) *time.Time { return &t }
 
-// runOperation executes one operation command, applies its result, and returns
-// whatever command the result started next.
-func runOperation(t *testing.T, m *Model, cmd tea.Cmd) tea.Cmd {
+// runCmd runs one command and returns every message it produced. A command
+// that batches produces one message per batched command: the program runs a
+// tea.BatchMsg itself and delivers each message on its own, so Update never
+// sees the batch.
+func runCmd(cmd tea.Cmd) []tea.Msg {
+	if cmd == nil {
+		return nil
+	}
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		return []tea.Msg{msg}
+	}
+	var msgs []tea.Msg
+	for _, batched := range batch {
+		msgs = append(msgs, runCmd(batched)...)
+	}
+	return msgs
+}
+
+// operationResult runs one command and returns the single operation result it
+// produced. Starting an operation also starts the spinner, so the command
+// carries a frame message beside the result.
+func operationResult(t *testing.T, cmd tea.Cmd) operationMsg {
 	t.Helper()
 	if cmd == nil {
 		t.Fatal("expected an operation command, got none")
 	}
-	msg := cmd()
-	if _, ok := msg.(operationMsg); !ok {
-		t.Fatalf("command returned %T, want operationMsg", msg)
+	return operationOf(t, runCmd(cmd))
+}
+
+// operationOf is the one operation result among the messages of one command.
+func operationOf(t *testing.T, msgs []tea.Msg) operationMsg {
+	t.Helper()
+	var result *operationMsg
+	for _, msg := range msgs {
+		if got, ok := msg.(operationMsg); ok {
+			result = &got
+		}
 	}
-	_, next := m.Update(msg)
+	if result == nil {
+		t.Fatalf("command produced %v, want an operationMsg", msgs)
+	}
+	return *result
+}
+
+// firstTick is the first spinner frame among the messages of one command.
+func firstTick(msgs []tea.Msg) (spinner.TickMsg, bool) {
+	for _, msg := range msgs {
+		if tick, ok := msg.(spinner.TickMsg); ok {
+			return tick, true
+		}
+	}
+	return spinner.TickMsg{}, false
+}
+
+// runOperation executes one operation command, applies its result, and returns
+// whatever command the result started next.
+func runOperation(t *testing.T, m *Model, cmd tea.Cmd) tea.Cmd {
+	t.Helper()
+	_, next := m.Update(operationResult(t, cmd))
 	return next
 }
 
@@ -1373,14 +1431,30 @@ func TestRunningOperationShowsTheSpinnerAndStopsTickingWhenItEnds(t *testing.T) 
 	if !strings.Contains(body, ansi.Strip(frame)) {
 		t.Errorf("view while syncing = %q, want the spinner frame %q", body, ansi.Strip(frame))
 	}
+	if !aboveTheFooterRule(body, "Syncing") {
+		t.Errorf("view while syncing = %q, want the running line above the rule of the footer", body)
+	}
+
+	// The command that starts the operation also starts the animation. Without
+	// its first frame the glyph never moves, which is the frozen screen this
+	// indicator exists to replace.
+	msgs := runCmd(cmd)
+	frameMsg, ok := firstTick(msgs)
+	if !ok {
+		t.Fatalf("starting the sync produced %v, want a spinner frame beside the result", msgs)
+	}
 
 	// A frame advances the spinner and asks for the next one.
-	next := apply(m, spinnerTick(m))
+	next := apply(m, frameMsg)
 	if m.spinner.View() == frame {
-		t.Error("the spinner did not advance on a tick")
+		t.Error("the spinner did not advance on the first frame")
 	}
 	if next == nil {
-		t.Fatal("a tick while the operation runs asked for no next frame")
+		t.Fatal("a frame while the operation runs asked for no next frame")
+	}
+	frame = m.spinner.View()
+	if apply(m, spinnerTick(m)) == nil || m.spinner.View() == frame {
+		t.Error("the spinner did not advance on a later frame")
 	}
 
 	// A progress line replaces the label and keeps the spinner.
@@ -1390,8 +1464,13 @@ func TestRunningOperationShowsTheSpinnerAndStopsTickingWhenItEnds(t *testing.T) 
 		t.Errorf("view = %q, want the spinner beside the progress line", body)
 	}
 
-	cmd = runOperation(t, m, cmd) // SyncAll returns
-	runOperation(t, m, cmd)       // the closing account refresh
+	// The result of the run that already produced the frames above, so the
+	// fake syncs once.
+	_, next = m.Update(operationOf(t, msgs)) // SyncAll returns
+	runOperation(t, m, next)                 // the closing account refresh
+	if fake.syncAllCalls != 1 {
+		t.Fatalf("SyncAll calls = %d, want exactly one", fake.syncAllCalls)
+	}
 	if m.running {
 		t.Fatal("the model is still running after the sync returned")
 	}
@@ -1439,8 +1518,16 @@ func TestSyncAllSuccessNamesEveryInstitutionItSynced(t *testing.T) {
 	if !strings.Contains(body, successMark+" Synced American Express, Chase") {
 		t.Errorf("main view = %q, want the outcome naming both institutions", body)
 	}
-	if strings.Contains(body, "Last sync") {
+	// The Sync row of the main menu carries its own "Last sync: …" note, so
+	// the check is on the heading of the per-item summary, which is a line of
+	// its own.
+	if hasLine(body, "Last sync") {
 		t.Errorf("main view = %q, want one outcome and not a second summary of the same run", body)
+	}
+	for _, label := range []string{"American Express", "Chase"} {
+		if hasLine(body, label+" "+okMark+" 1 account") {
+			t.Errorf("main view = %q, want no summary row for %q", body, label)
+		}
 	}
 	if !aboveTheFooterRule(body, successMark+" Synced") {
 		t.Errorf("main view = %q, want the outcome above the rule of the footer", body)

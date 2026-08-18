@@ -164,19 +164,14 @@ func (m *Model) start(kind operation, run func(context.Context) (any, error)) te
 	m.recovery = recoveryState{}
 	// The outcome of the last flow describes a run that is now over.
 	m.success = ""
-	// The first frame of the spinner is sent from the operation's own
-	// goroutine, the same way a progress line is. Batching it into the
-	// returned command would hide the result of the operation behind a
-	// tea.BatchMsg. The method value copies the spinner here, so the goroutine
-	// never reads the field that Update writes.
-	firstFrame, send := m.spinner.Tick, m.send
-	return func() tea.Msg {
-		if send != nil {
-			send(firstFrame())
-		}
+	// The first frame of the spinner runs beside the operation. The program
+	// never gives a tea.BatchMsg to Update: it runs each command of the batch
+	// and delivers each message on its own, so the operation result arrives as
+	// it would from a single command.
+	return tea.Batch(m.spinner.Tick, func() tea.Msg {
 		value, err := run(ctx)
 		return operationMsg{kind: kind, value: value, err: err}
-	}
+	})
 }
 
 // report sends one progress line to the program. Tests drive Update directly
@@ -287,6 +282,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // next frame. Each frame schedules the one after it, so the chain has to end
 // where the operation ends: a frame that arrives with nothing running returns
 // no command, and the interface stops ticking.
+//
+// One operation may start the next one, as a sync starts the closing account
+// refresh, so a second chain can begin while a frame of the first is still in
+// flight. Two chains would run the spinner at twice its speed. spinner.Model
+// prevents that itself: it counts every frame it accepts and rejects a frame
+// that carries an older count. Keep the frame message it returns, and give it
+// back unchanged.
 func (m *Model) advanceSpinner(msg spinner.TickMsg) tea.Cmd {
 	if !m.running {
 		return nil

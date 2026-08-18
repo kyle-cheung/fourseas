@@ -91,7 +91,7 @@ func (m *Model) View() tea.View {
 	return view
 }
 
-// body is the text of the active screen, with the progress line last.
+// body is the text of the active screen.
 func (m *Model) body() string {
 	var lines []string
 	switch m.screen {
@@ -112,17 +112,29 @@ func (m *Model) body() string {
 	default:
 		lines = append(m.header("Accounts"), m.footer("esc back · ctrl+c quit")...)
 	}
-	// A progress line carries a whole provider error behind a padded label, so
-	// it is the longest string the interface ever shows. Left whole it wraps
-	// and pushes the footer out of the screen.
+	return strings.Join(lines, "\n")
+}
+
+// stateLines is the one slot every screen keeps for what the interface is
+// doing now, or for what it has just done. The three are exclusive: an
+// operation clears the outcome of the last flow when it starts, and clears the
+// progress line when it ends.
+//
+// A progress line carries a whole provider error behind a padded label, so it
+// is the longest string the interface ever shows. Left whole it wraps and
+// pushes the footer out of the screen.
+func (m *Model) stateLines() []string {
+	width := m.contentWidth()
 	switch {
 	case m.running:
-		lines = append(lines, "", truncate(blankMark+m.spinner.View()+" "+
-			mutedStyle.Render(m.runningLine()), m.contentWidth()))
+		return []string{"", truncate(blankMark+m.spinner.View()+" "+
+			mutedStyle.Render(m.runningLine()), width)}
 	case m.status != "":
-		lines = append(lines, "", truncate(blankMark+mutedStyle.Render(m.status), m.contentWidth()))
+		return []string{"", truncate(blankMark+mutedStyle.Render(m.status), width)}
+	case m.success != "":
+		return []string{"", truncate(blankMark+successStyle.Render(successMark+" "+m.success), width)}
 	}
-	return strings.Join(lines, "\n")
+	return nil
 }
 
 // runningLine says what the interface is waiting for: the newest step of the
@@ -147,17 +159,6 @@ func (m *Model) runningLine() string {
 	return "Loading"
 }
 
-// successLines is the outcome of the last finished flow. It sits above the
-// rule of the footer, so the confirmation is the last thing the user reads on
-// the screen the flow returned to.
-func (m *Model) successLines() []string {
-	if m.success == "" {
-		return nil
-	}
-	return []string{"", truncate(blankMark+successStyle.Render(successMark+" "+m.success),
-		m.contentWidth())}
-}
-
 // mainLines is the main menu, with the account count on the first choice and
 // the sync status on the third.
 func (m *Model) mainLines() []string {
@@ -172,7 +173,6 @@ func (m *Model) mainLines() []string {
 		lines = append(lines, m.menuRow(i == m.main.cursor, choice, notes[i]))
 	}
 	lines = append(lines, m.syncSummary()...)
-	lines = append(lines, m.successLines()...)
 	return append(lines, m.footer("↑/↓ move · enter select · q quit")...)
 }
 
@@ -321,14 +321,17 @@ func (m *Model) header(title string) []string {
 	}
 }
 
-// footer is the faint rule that closes the screen and the key help under it.
+// footer is what the interface is doing now, then the faint rule that closes
+// the screen and the key help under it. The rule closes the screen, so the one
+// line that changes while the user waits belongs above it and not after the
+// key help, which never changes.
 func (m *Model) footer(keys string) []string {
 	width := m.contentWidth()
-	return []string{
+	return append(m.stateLines(),
 		"",
 		truncate(blankMark+mutedStyle.Render(strings.Repeat(dividerRune, max(width-2*rightPad, 0))), width),
 		truncate(blankMark+mutedStyle.Render(keys), width),
-	}
+	)
 }
 
 // resizePrompt gives the text input the width it may use: the content width,
