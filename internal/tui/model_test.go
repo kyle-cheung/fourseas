@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -690,13 +691,19 @@ func TestAddFlowLinksSyncsNamesAndMarksNewAccounts(t *testing.T) {
 	if len(fake.nicknameCalls) != 1 || fake.nicknameCalls[0] != want[0] {
 		t.Fatalf("SetNickname calls = %v, want %v", fake.nicknameCalls, want)
 	}
-	if m.screen != accountsScreen {
-		t.Fatalf("screen after the last name = %v, want accountsScreen", m.screen)
+	if m.screen != mainScreen {
+		t.Fatalf("screen after the last name = %v, want mainScreen", m.screen)
 	}
 	for _, id := range []string{"acc-1", "acc-2"} {
 		if !m.accounts.newItems[id] {
 			t.Errorf("account %q is not marked as new", id)
 		}
+	}
+
+	press(t, m, codeKey(tea.KeyUp)) // back to the account list choice
+	press(t, m, codeKey(tea.KeyEnter))
+	if m.screen != accountsScreen {
+		t.Fatalf("screen after opening the account list = %v, want accountsScreen", m.screen)
 	}
 	if got := strings.Count(content(m), "NEW"); got != 2 {
 		t.Errorf("account list has %d NEW marks, want 2:\n%s", got, content(m))
@@ -758,8 +765,8 @@ func TestAddFlowEscSkipsNickname(t *testing.T) {
 	if len(fake.nicknameCalls) != 0 {
 		t.Errorf("SetNickname calls = %v, want none after esc", fake.nicknameCalls)
 	}
-	if m.screen != accountsScreen {
-		t.Fatalf("screen after skipping the only name = %v, want accountsScreen", m.screen)
+	if m.screen != mainScreen {
+		t.Fatalf("screen after skipping the only name = %v, want mainScreen", m.screen)
 	}
 	if !m.accounts.newItems["acc-1"] {
 		t.Error("a skipped account is not marked as new")
@@ -1276,6 +1283,182 @@ func TestSyncAllShowsEveryResultAndRefreshesStatus(t *testing.T) {
 	}
 	if !hasRow(body, "Accounts", "2 accounts") {
 		t.Errorf("main view = %q, want the refreshed account count", body)
+	}
+}
+
+// The add flow starts on the main menu, so it has to confirm its outcome
+// there. Landing on the account list left the user to work out whether the
+// link had worked.
+func TestAddFlowEndsOnTheMainMenuWithTheOutcome(t *testing.T) {
+	only := account("acc-1", "", "Blue Cash", "1234", "American Express", 10)
+	fake := &fakeService{
+		data:         app.AccountData{Accounts: []model.AccountView{only}},
+		linkItem:     app.LinkedItem{ItemID: "item-new", Institution: "American Express"},
+		syncAccounts: []model.AccountView{only},
+	}
+	m := ready(t, fake)
+	addUntilFirstNickname(t, m)
+
+	typeText(t, m, "Everyday card")
+	cmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // SetNickname
+	runOperation(t, m, cmd)                                       // the closing account refresh
+
+	if m.screen != mainScreen {
+		t.Fatalf("screen after the add flow = %v, want mainScreen", m.screen)
+	}
+	body := content(m)
+	if !strings.Contains(body, successMark+" Added American Express") {
+		t.Errorf("main view = %q, want the outcome of the add flow", body)
+	}
+	if !hasRow(body, "Accounts", "1 account") {
+		t.Errorf("main view = %q, want the refreshed account count", body)
+	}
+	if !aboveTheFooterRule(body, successMark+" Added American Express") {
+		t.Errorf("main view = %q, want the outcome above the rule of the footer", body)
+	}
+
+	// The outcome stays until the user leaves the screen.
+	press(t, m, codeKey(tea.KeyDown))
+	if !strings.Contains(content(m), successMark+" Added American Express") {
+		t.Error("the outcome was dropped by a cursor move on the same screen")
+	}
+	press(t, m, codeKey(tea.KeyUp))
+	press(t, m, codeKey(tea.KeyUp))
+	press(t, m, codeKey(tea.KeyEnter)) // open the account list
+	if m.screen != accountsScreen {
+		t.Fatalf("screen = %v, want accountsScreen", m.screen)
+	}
+	press(t, m, codeKey(tea.KeyEsc))
+	if body := content(m); strings.Contains(body, "Added American Express") {
+		t.Errorf("main view = %q, want the outcome dropped by the navigation", body)
+	}
+}
+
+// aboveTheFooterRule says whether one line is written before the faint rule
+// that closes the screen.
+func aboveTheFooterRule(body, want string) bool {
+	for _, line := range strings.Split(body, "\n") {
+		if strings.Contains(line, want) {
+			return true
+		}
+		if strings.Contains(line, strings.Repeat(dividerRune, 3)) {
+			return false
+		}
+	}
+	return false
+}
+
+// A running operation used to change nothing on the screen: the interface
+// looked frozen until the result arrived.
+func TestRunningOperationShowsTheSpinnerAndStopsTickingWhenItEnds(t *testing.T) {
+	first := account("acc-1", "", "Everyday Checking", "1234", "Chase", 10)
+	fake := &fakeService{
+		data:           app.AccountData{Accounts: []model.AccountView{first}},
+		syncAllResults: []app.SyncResult{{ItemID: "item-1", Label: "Chase", Accounts: []model.AccountView{first}}},
+	}
+	m := ready(t, fake)
+
+	press(t, m, codeKey(tea.KeyDown))
+	press(t, m, codeKey(tea.KeyDown))
+	cmd := press(t, m, codeKey(tea.KeyEnter)) // Sync, without running the operation yet
+	if !m.running {
+		t.Fatal("the sync did not mark the model as running")
+	}
+
+	frame := m.spinner.View()
+	body := content(m)
+	if !strings.Contains(body, "Syncing") {
+		t.Errorf("view while syncing = %q, want the label of the running operation", body)
+	}
+	if !strings.Contains(body, ansi.Strip(frame)) {
+		t.Errorf("view while syncing = %q, want the spinner frame %q", body, ansi.Strip(frame))
+	}
+
+	// A frame advances the spinner and asks for the next one.
+	next := apply(m, spinnerTick(m))
+	if m.spinner.View() == frame {
+		t.Error("the spinner did not advance on a tick")
+	}
+	if next == nil {
+		t.Fatal("a tick while the operation runs asked for no next frame")
+	}
+
+	// A progress line replaces the label and keeps the spinner.
+	m.Update(progressMsg("Fetching Chase"))
+	if body := content(m); !strings.Contains(body, "Fetching Chase") ||
+		!strings.Contains(body, ansi.Strip(m.spinner.View())) {
+		t.Errorf("view = %q, want the spinner beside the progress line", body)
+	}
+
+	cmd = runOperation(t, m, cmd) // SyncAll returns
+	runOperation(t, m, cmd)       // the closing account refresh
+	if m.running {
+		t.Fatal("the model is still running after the sync returned")
+	}
+	if got := apply(m, spinnerTick(m)); got != nil {
+		t.Error("a tick after the operation ended asked for another frame; the chain never stops")
+	}
+	if body := content(m); strings.Contains(body, "Syncing") {
+		t.Errorf("view after the sync = %q, want the running indicator gone", body)
+	}
+}
+
+// spinnerTick is one frame message for the spinner of this model, as the
+// command chain would send it. Tests drive Update directly, so no program
+// runs.
+func spinnerTick(m *Model) spinner.TickMsg {
+	return spinner.TickMsg{Time: time.Now(), ID: m.spinner.ID()}
+}
+
+// apply gives one message that is not a key press to the model and returns the
+// command it asked for.
+func apply(m *Model, msg tea.Msg) tea.Cmd {
+	_, cmd := m.Update(msg)
+	return cmd
+}
+
+// A run where every institution returned data is one outcome, not a table the
+// user has to read.
+func TestSyncAllSuccessNamesEveryInstitutionItSynced(t *testing.T) {
+	first := account("acc-1", "", "Blue Cash", "1234", "American Express", 10)
+	second := account("acc-2", "", "Everyday Checking", "9876", "Chase", 20)
+	fake := &fakeService{
+		data: app.AccountData{Accounts: []model.AccountView{first, second}},
+		syncAllResults: []app.SyncResult{
+			{ItemID: "item-1", Label: "American Express", Accounts: []model.AccountView{first}},
+			{ItemID: "item-2", Label: "Chase", Accounts: []model.AccountView{second}},
+		},
+	}
+	m := ready(t, fake)
+
+	runOperation(t, m, openSync(t, m)) // SyncAll, then the account refresh
+	if m.screen != mainScreen {
+		t.Fatalf("screen after a clean sync = %v, want mainScreen", m.screen)
+	}
+	body := content(m)
+	if !strings.Contains(body, successMark+" Synced American Express, Chase") {
+		t.Errorf("main view = %q, want the outcome naming both institutions", body)
+	}
+	if strings.Contains(body, "Last sync") {
+		t.Errorf("main view = %q, want one outcome and not a second summary of the same run", body)
+	}
+	if !aboveTheFooterRule(body, successMark+" Synced") {
+		t.Errorf("main view = %q, want the outcome above the rule of the footer", body)
+	}
+
+	// A run that fails reports the failure, not an outcome.
+	fake.syncAllResults = []app.SyncResult{
+		{ItemID: "item-1", Label: "American Express", Accounts: []model.AccountView{first}},
+		{ItemID: "item-2", Label: "Chase", Err: errors.New("plaid is unavailable")},
+	}
+	if cmd := openSync(t, m); cmd != nil {
+		t.Fatal("a failed sync started another command")
+	}
+	if m.screen != recoveryScreen {
+		t.Fatalf("screen after a failed sync = %v, want recoveryScreen", m.screen)
+	}
+	if body := content(m); strings.Contains(body, successMark+" Synced") {
+		t.Errorf("recovery view = %q, want no outcome of a run that failed", body)
 	}
 }
 

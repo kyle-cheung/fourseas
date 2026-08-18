@@ -115,10 +115,47 @@ func (m *Model) body() string {
 	// A progress line carries a whole provider error behind a padded label, so
 	// it is the longest string the interface ever shows. Left whole it wraps
 	// and pushes the footer out of the screen.
-	if m.status != "" {
+	switch {
+	case m.running:
+		lines = append(lines, "", truncate(blankMark+m.spinner.View()+" "+
+			mutedStyle.Render(m.runningLine()), m.contentWidth()))
+	case m.status != "":
 		lines = append(lines, "", truncate(blankMark+mutedStyle.Render(m.status), m.contentWidth()))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// runningLine says what the interface is waiting for: the newest step of the
+// operation, or the name of the operation while it has reported no step. Every
+// operation takes long enough to look frozen, so each one has a label.
+func (m *Model) runningLine() string {
+	if m.status != "" {
+		return m.status
+	}
+	switch m.runningKind {
+	case linkOperation:
+		return "Linking"
+	case syncItemOperation, syncAllOperation:
+		return "Syncing"
+	case nicknameOperation:
+		return "Saving"
+	case unlinkPreviewOperation:
+		return "Reading"
+	case unlinkOperation:
+		return "Removing"
+	}
+	return "Loading"
+}
+
+// successLines is the outcome of the last finished flow. It sits above the
+// rule of the footer, so the confirmation is the last thing the user reads on
+// the screen the flow returned to.
+func (m *Model) successLines() []string {
+	if m.success == "" {
+		return nil
+	}
+	return []string{"", truncate(blankMark+successStyle.Render(successMark+" "+m.success),
+		m.contentWidth())}
 }
 
 // mainLines is the main menu, with the account count on the first choice and
@@ -135,6 +172,7 @@ func (m *Model) mainLines() []string {
 		lines = append(lines, m.menuRow(i == m.main.cursor, choice, notes[i]))
 	}
 	lines = append(lines, m.syncSummary()...)
+	lines = append(lines, m.successLines()...)
 	return append(lines, m.footer("↑/↓ move · enter select · q quit")...)
 }
 

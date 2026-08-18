@@ -21,6 +21,11 @@ var (
 //
 // The accent belongs to the selection. The brand holds the accent on its glyph
 // only, so the wordmark reads as a logo and never as a selected row.
+//
+// successStyle writes the outcome of a finished flow, so it takes the healthy
+// colour. spinnerStyle writes the one moving glyph of a running operation: it
+// takes the accent, because the spinner is where the user looks while the
+// interface waits.
 var (
 	brandStyle     = lipgloss.NewStyle().Bold(true)
 	brandMarkStyle = lipgloss.NewStyle().Foreground(accentColor)
@@ -31,6 +36,8 @@ var (
 	tagStyle       = lipgloss.NewStyle().Bold(true).Foreground(mutedColor)
 	healthyStyle   = lipgloss.NewStyle().Foreground(healthyColor)
 	warnStyle      = lipgloss.NewStyle().Foreground(warnColor)
+	successStyle   = lipgloss.NewStyle().Foreground(healthyColor)
+	spinnerStyle   = lipgloss.NewStyle().Foreground(accentColor)
 )
 
 // The brand of the application, which every screen carries.
@@ -49,9 +56,10 @@ const (
 
 // The marks of a state. Each one is one printable cell.
 const (
-	okMark     = "●"
-	failedMark = "✕"
-	noneMark   = "○"
+	okMark      = "●"
+	failedMark  = "✕"
+	noneMark    = "○"
+	successMark = "✓"
 )
 
 // newMark tags an account this session has just linked. Being new is not a

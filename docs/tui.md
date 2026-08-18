@@ -60,8 +60,24 @@ Bubble Tea methods use pointer receivers, so `Update` returns the same model.
   `operationMsg`. A long operation sends `progressMsg` values through
   `m.report`.
 - The `running` gate is in `key`. While an operation runs, the model accepts
-  `tea.WindowSizeMsg`, `progressMsg`, `operationMsg`, and ctrl+c only. Ctrl+c
-  cancels the operation and keeps the interface alive until the result arrives.
+  `tea.WindowSizeMsg`, `progressMsg`, `operationMsg`, `spinner.TickMsg`, and
+  ctrl+c only. Ctrl+c cancels the operation and keeps the interface alive until
+  the result arrives.
+- A running operation shows a spinner with the newest progress line, or with
+  the label of the operation from `runningLine` while it has reported no step.
+  Each frame schedules the frame after it, so the chain has to be stopped:
+  `advanceSpinner` returns no command when nothing is running. `start` sends
+  the first frame from the operation's own goroutine, the way `report` sends a
+  progress line. A `tea.Batch` would hide the `operationMsg` behind a
+  `tea.BatchMsg`, and every test reads the result of the returned command.
+- `m.success` is the outcome of the last finished flow, written with `✓` in the
+  healthy colour above the rule of the footer. It has no timer: `start` clears
+  it, and `keyPress` clears it when a key moved the user to another screen. A
+  flow writes it **after** the call that starts its closing refresh, because
+  `start` clears it. `finishAdd` and a clean `finishSyncAll` are the two flows
+  that write one, and both return to the main menu. A clean sync drops the
+  per-item `Last sync` block, so one run reads as one outcome; a run with a
+  skipped or a failed item keeps that block.
 - `start` writes `returnTo` with the screen the operation started from.
   `cancelled` and `recoverWith` return to that screen. The exception is a
   cancelled first sync of a new link: the model shows the account list, because
@@ -83,8 +99,8 @@ follows.
   the colour profile.
 - The styles are named for their role: `brandStyle`, `brandMarkStyle`,
   `headingStyle`, `itemStyle`, `selectedStyle`, `mutedStyle`, `tagStyle`,
-  `healthyStyle`, and `warnStyle`. Cyan is the one accent and marks the
-  selection. Green is a state that is in order, red is a state that needs the
+  `healthyStyle`, `warnStyle`, `successStyle`, and `spinnerStyle`. Cyan is the
+  one accent and marks the selection and the spinner. Green is a state that is in order, red is a state that needs the
   user, and everything secondary is dim. The brand holds the accent on its `≋`
   glyph only, so the wordmark never reads as a selected row.
 - `m.header(title)` writes the brand `fourseas ≋` and the name of the screen.

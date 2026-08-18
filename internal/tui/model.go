@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 
@@ -80,9 +81,14 @@ type Model struct {
 	screen        screen
 	width, height int
 	running       bool
+	runningKind   operation
+	spinner       spinner.Model
 	cancel        context.CancelFunc
 	returnTo      screen
 	status        string
+	// success is the confirmed outcome of the last finished flow. It stays on
+	// the screen until the next navigation or the next operation.
+	success       string
 	main          menuState
 	history       menuState
 	syncStates    []app.SyncState
@@ -104,6 +110,7 @@ func New(client service) *Model {
 	return &Model{
 		app:      client,
 		accounts: accountsState{newItems: map[string]bool{}},
+		spinner:  spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(spinnerStyle)),
 		now:      time.Now,
 	}
 }
@@ -153,8 +160,20 @@ func (m *Model) start(kind operation, run func(context.Context) (any, error)) te
 	m.returnTo = m.screen
 	m.cancel = cancel
 	m.running = true
+	m.runningKind = kind
 	m.recovery = recoveryState{}
+	// The outcome of the last flow describes a run that is now over.
+	m.success = ""
+	// The first frame of the spinner is sent from the operation's own
+	// goroutine, the same way a progress line is. Batching it into the
+	// returned command would hide the result of the operation behind a
+	// tea.BatchMsg. The method value copies the spinner here, so the goroutine
+	// never reads the field that Update writes.
+	firstFrame, send := m.spinner.Tick, m.send
 	return func() tea.Msg {
+		if send != nil {
+			send(firstFrame())
+		}
 		value, err := run(ctx)
 		return operationMsg{kind: kind, value: value, err: err}
 	}
@@ -242,7 +261,7 @@ func (m *Model) startUnlink(itemID string) tea.Cmd {
 }
 
 // Update applies one message. While an operation runs, only progress, the
-// operation result, a resize, and ctrl+c are accepted.
+// operation result, a spinner frame, a resize, and ctrl+c are accepted.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -256,10 +275,37 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case operationMsg:
 		return m, m.finish(msg)
+	case spinner.TickMsg:
+		return m, m.advanceSpinner(msg)
 	case tea.KeyPressMsg:
-		return m, m.key(msg)
+		return m, m.keyPress(msg)
 	}
 	return m, nil
+}
+
+// advanceSpinner moves the running indicator on one frame and asks for the
+// next frame. Each frame schedules the one after it, so the chain has to end
+// where the operation ends: a frame that arrives with nothing running returns
+// no command, and the interface stops ticking.
+func (m *Model) advanceSpinner(msg spinner.TickMsg) tea.Cmd {
+	if !m.running {
+		return nil
+	}
+	var cmd tea.Cmd
+	m.spinner, cmd = m.spinner.Update(msg)
+	return cmd
+}
+
+// keyPress applies one key and drops the outcome of the last flow when the key
+// moved the user to another screen. The outcome describes the screen it was
+// written on, so it must not follow the user.
+func (m *Model) keyPress(msg tea.KeyPressMsg) tea.Cmd {
+	from := m.screen
+	cmd := m.key(msg)
+	if m.screen != from {
+		m.success = ""
+	}
+	return cmd
 }
 
 // finish applies one operation result.
@@ -349,6 +395,10 @@ func linkedName(linked app.LinkedItem) string {
 // finishSyncAll keeps the summary of every item and reports a failure once.
 // SyncAll carries on after one item fails, so a failed item arrives as a result
 // and not as the error of the operation.
+//
+// A run where every institution returned data is reported as one success line
+// instead. The per-item summary of such a run says the same thing a second
+// time, so it is dropped and the user reads one outcome.
 func (m *Model) finishSyncAll(results []app.SyncResult) tea.Cmd {
 	m.syncResults = results
 	for _, result := range results {
@@ -358,7 +408,31 @@ func (m *Model) finishSyncAll(results []app.SyncResult) tea.Cmd {
 			return m.showFailure(result.Err)
 		}
 	}
-	return m.refreshAccounts()
+	synced, clean := syncedLabels(results)
+	if clean {
+		m.syncResults = nil
+	}
+	// The refresh clears the outcome of the last flow, so this one is written
+	// after the call that starts it.
+	cmd := m.refreshAccounts()
+	if clean {
+		m.success = "Synced " + strings.Join(synced, ", ")
+	}
+	return cmd
+}
+
+// syncedLabels is the institution of every item that returned data, and
+// whether the run was clean: at least one item synced and no item was skipped.
+// A skipped item is not a success, so it keeps the per-item summary.
+func syncedLabels(results []app.SyncResult) ([]string, bool) {
+	labels := make([]string, 0, len(results))
+	for _, result := range results {
+		if result.Skipped {
+			return nil, false
+		}
+		labels = append(labels, result.Label)
+	}
+	return labels, len(labels) > 0
 }
 
 // finishRename closes the rename prompt and reads the stored account again, so
@@ -520,16 +594,32 @@ func (m *Model) nextNickname() tea.Cmd {
 }
 
 // finishAdd marks every account of the finished add flow as new for the rest
-// of this session, and shows the account list with the fresh data.
+// of this session, and returns to the main menu with the outcome of the flow.
+// The user started the flow there, so the confirmation belongs there, on a
+// screen whose account count and sync state the closing refresh makes current.
 func (m *Model) finishAdd() tea.Cmd {
 	m.prompt.input.Blur()
 	m.prompt = promptState{}
 	for _, view := range m.nicknameQueue {
 		m.accounts.newItems[view.AccountID] = true
 	}
+	added := len(m.nicknameQueue)
 	m.nicknameQueue, m.nicknameIndex = nil, 0
-	m.screen = accountsScreen
-	return m.refreshAccounts()
+	m.screen = mainScreen
+	// The refresh clears the outcome of the last flow, so this one is written
+	// after the call that starts it.
+	cmd := m.refreshAccounts()
+	m.success = "Added " + addedName(m.linked, added)
+	return cmd
+}
+
+// addedName is what the finished add flow names: the institution of the new
+// link, or the number of accounts it returned while no name is known.
+func addedName(linked app.LinkedItem, accounts int) string {
+	if name := linkedName(linked); name != "" {
+		return name
+	}
+	return plural(accounts, "account")
 }
 
 // menuKey moves the cursor of a list, opens the selection, and leaves.
