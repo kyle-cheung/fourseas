@@ -46,6 +46,16 @@ func blockedPath(t *testing.T) string {
 	return filepath.Join(file, "child", "name")
 }
 
+// skipAsRoot leaves out a test whose only lever is a file permission. Root
+// ignores the permission bits of a file it owns, so such a test would report a
+// pass it did not earn.
+func skipAsRoot(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file permissions, so this test cannot make the write fail")
+	}
+}
+
 // item is one linked institution of the given environment.
 func item(itemID, institution, env string) tokens.Item {
 	return tokens.Item{

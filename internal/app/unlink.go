@@ -4,12 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/kyle-cheung/fourseas/providence/internal/provider"
 	"github.com/kyle-cheung/fourseas/providence/internal/provider/plaid"
 	"github.com/kyle-cheung/fourseas/providence/internal/store"
 	"github.com/kyle-cheung/fourseas/providence/internal/tokens"
 )
+
+// localCleanupTimeout bounds the local half of a removal, which runs on a
+// context the user can no longer cancel. It is generous: the work is a few
+// deletes in one transaction on a local file. It is a variable so a test can
+// make it expire.
+var localCleanupTimeout = 30 * time.Second
 
 // UnlinkPreview reports what removing one item would delete. Nothing changes.
 //
@@ -59,8 +66,10 @@ func (a *App) UnlinkPreview(ctx context.Context, itemID string) (UnlinkData, err
 // way left to reach it. Plaid is therefore called first, the local rows go
 // next, and the token last, because a second attempt needs it.
 //
-// Everything after the Plaid call runs on an uncancellable context, so the
-// half that is already irreversible is never abandoned part way.
+// Everything after the Plaid call runs on a context the user cannot cancel, so
+// the half that is already irreversible is never abandoned part way. That
+// context still carries a deadline, so a call that never returns does not trap
+// the caller forever.
 func (a *App) Unlink(ctx context.Context, itemID string, report Progress) (UnlinkResult, error) {
 	// Validation comes before start, so unusable provider settings do not open
 	// DuckDB.
@@ -79,14 +88,22 @@ func (a *App) Unlink(ctx context.Context, itemID string, report Progress) (Unlin
 	progress(report, "Removing the item at Plaid")
 	removeErr := a.remove(ctx, a.cfg.Plaid, item.AccessToken)
 	if removeErr != nil && !errors.Is(removeErr, provider.ErrItemGone) {
-		return UnlinkResult{}, fmt.Errorf("plaid still has this item, so nothing local was deleted: %w", removeErr)
+		// "may still": a request that failed on the way back, or one stopped
+		// by the user, can still have been carried out at Plaid.
+		return UnlinkResult{}, fmt.Errorf("plaid may still have this item, so nothing local was deleted: %w", removeErr)
 	}
 	progress(report, "Deleting local data")
 	// Plaid has agreed, and that cannot be undone. The local half must finish
 	// even if the user cancels now: stopping here would leave the item removed
 	// and unbilled at Plaid with its rows and its token still here, and the
 	// next sync would fail with ITEM_NOT_FOUND.
-	local := context.WithoutCancel(ctx)
+	//
+	// The deadline goes with the cancellation, so the timeout is added back.
+	// Without it a database call that never returns cannot be escaped: the
+	// user's ctrl+c no longer reaches this context, and the interface holds
+	// every key while an operation runs.
+	local, stop := context.WithTimeout(context.WithoutCancel(ctx), localCleanupTimeout)
+	defer stop()
 	removed, err := db.Unlink(local, plaid.ProviderName, item.ItemID)
 	if err != nil {
 		return UnlinkResult{}, fmt.Errorf("the item is gone at Plaid but the local data is not: %w", err)

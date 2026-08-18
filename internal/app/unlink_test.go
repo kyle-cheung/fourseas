@@ -134,9 +134,48 @@ func TestUnlinkKeepsRowsAndTokenWhenPlaidFails(t *testing.T) {
 	}
 }
 
+// The rows and the token are deleted in that order, and the token is the only
+// way to try again. A database step that failed must therefore stop the
+// removal before the token goes, and it must say what state the user is in.
+func TestUnlinkKeepsTokenWhenTheDatabaseCleanupFails(t *testing.T) {
+	cfg := tempConfig(t, "sandbox")
+	amex := item("item-amex", "American Express", "sandbox")
+	seedTokens(t, cfg.TokensPath, amex)
+	seedStore(t, cfg.DBPath, amex)
+
+	// The local half runs under its own deadline. An expired one fails the
+	// delete for real, in every environment, without touching permissions.
+	restore := localCleanupTimeout
+	localCleanupTimeout = -1
+	t.Cleanup(func() { localCleanupTimeout = restore })
+
+	remove := func(context.Context, plaid.Config, string) error { return nil }
+
+	_, err := New(cfg, WithRemove(remove)).Unlink(context.Background(), "item-amex", nil)
+	if err == nil {
+		t.Fatal("error = nil, want the database cleanup failure")
+	}
+	if !strings.Contains(err.Error(), "the item is gone at Plaid but the local data is not") {
+		t.Errorf("error = %q, want it to say the item is gone at Plaid and the data is not", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error = %v, want it to keep the deadline it hit", err)
+	}
+	if got := itemCounts(t, cfg.DBPath, "item-amex"); got.Transactions != 1 {
+		t.Errorf("item-amex holds %+v, want the rows the failed delete left", got)
+	}
+	if _, found := loadTokens(t, cfg.TokensPath).Find("item-amex"); !found {
+		t.Error("the token is gone although the rows are still there, so a second run cannot reach the item")
+	}
+}
+
 // The token names the local rows. While a step of the local cleanup has not
 // finished, the token has to stay, because a second run needs it.
 func TestUnlinkKeepsTokenWhenLocalCleanupFails(t *testing.T) {
+	// The mechanism is a read-only file, which the owner of the process
+	// bypasses when that owner is root, as it is in most CI images.
+	skipAsRoot(t)
+
 	cfg := tempConfig(t, "sandbox")
 	amex := item("item-amex", "American Express", "sandbox")
 	seedTokens(t, cfg.TokensPath, amex)
