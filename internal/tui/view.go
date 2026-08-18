@@ -83,12 +83,6 @@ func (r recoveryState) choices() []string {
 // defaultWidth is the width used before the first resize message arrives.
 const defaultWidth = 80
 
-// cursorMark and blankMark keep every row of a list in the same column.
-const (
-	cursorMark = "> "
-	blankMark  = "  "
-)
-
 // View renders the active screen. The interface owns the whole terminal, so it
 // runs in the alternate screen buffer.
 func (m *Model) View() tea.View {
@@ -116,13 +110,13 @@ func (m *Model) body() string {
 	case recoveryScreen:
 		lines = m.recoveryLines()
 	default:
-		lines = []string{m.header("Accounts"), "", footer("esc back · ctrl+c quit")}
+		lines = append(m.header("Accounts"), m.footer("esc back · ctrl+c quit")...)
 	}
 	// A progress line carries a whole provider error behind a padded label, so
 	// it is the longest string the interface ever shows. Left whole it wraps
 	// and pushes the footer out of the screen.
 	if m.status != "" {
-		lines = append(lines, "", truncate(blankMark+m.status, m.contentWidth()))
+		lines = append(lines, "", truncate(blankMark+mutedStyle.Render(m.status), m.contentWidth()))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -130,21 +124,18 @@ func (m *Model) body() string {
 // mainLines is the main menu, with the account count on the first choice and
 // the sync status on the third.
 func (m *Model) mainLines() []string {
+	status, tone := syncStatus(m.syncStates, m.clock())
 	notes := map[int]string{
-		choiceAccounts: "(" + strconv.Itoa(len(m.accounts.rows)) + ")",
-		choiceSync:     syncStatus(m.syncStates, m.clock()),
+		choiceAccounts: mutedStyle.Render(plural(len(m.accounts.rows), "account")),
+		choiceSync:     tone.Render(status),
 	}
 
-	lines := []string{m.header("Main menu"), ""}
+	lines := m.header("Main menu")
 	for i, choice := range mainChoices {
-		row := mark(i == m.main.cursor) + choice
-		if note := notes[i]; note != "" {
-			row += "  " + note
-		}
-		lines = append(lines, truncate(row, m.contentWidth()))
+		lines = append(lines, m.menuRow(i == m.main.cursor, choice, notes[i]))
 	}
 	lines = append(lines, m.syncSummary()...)
-	return append(lines, "", footer("↑/↓ move · enter select · q quit"))
+	return append(lines, m.footer("↑/↓ move · enter select · q quit")...)
 }
 
 // syncSummary is one line for every institution of the last sync, including
@@ -154,43 +145,46 @@ func (m *Model) syncSummary() []string {
 	if len(m.syncResults) == 0 {
 		return nil
 	}
-	lines := []string{"", blankMark + "Last sync:"}
+	lines := []string{"", blankMark + headingStyle.Render("Last sync")}
 	for _, result := range m.syncResults {
-		lines = append(lines, truncate(blankMark+syncResultLine(result), m.contentWidth()))
+		label, note, tone := syncResultParts(result)
+		lines = append(lines, columns(blankMark+label, tone.Render(note), m.contentWidth()))
 	}
 	return lines
 }
 
-// syncResultLine is how one institution's sync ended. The label is the stored
-// institution name, or the item id while no name is known.
-func syncResultLine(result app.SyncResult) string {
+// syncResultParts is how one institution's sync ended: the label at the left,
+// the marked result at the right, and the style of that result. The label is
+// the stored institution name, or the item id while no name is known.
+func syncResultParts(result app.SyncResult) (string, string, lipgloss.Style) {
 	switch {
 	case result.Skipped:
-		return result.Label + ": skipped"
+		return result.Label, noneMark + " skipped", mutedStyle
 	case result.Err != nil:
-		return result.Label + ": failed — " + displayError(result.Err)
+		return result.Label, failedMark + " failed — " + displayError(result.Err), warnStyle
 	}
-	return result.Label + ": " + plural(len(result.Accounts), "account")
+	return result.Label, okMark + " " + plural(len(result.Accounts), "account"), healthyStyle
 }
 
 // accountLines is every stored account, one row each.
 func (m *Model) accountLines() []string {
-	lines := []string{m.header("Accounts"), ""}
+	lines := m.header("Accounts")
 	if len(m.accounts.rows) == 0 {
-		lines = append(lines, blankMark+"No accounts are linked yet.")
-		return append(lines, "", footer("esc back · q quit"))
+		lines = append(lines, blankMark+mutedStyle.Render("No accounts are linked yet."))
+		return append(lines, m.footer("esc back · q quit")...)
 	}
 	for i, row := range m.accounts.rows {
-		lines = append(lines, mark(i == m.accounts.cursor)+
-			accountRow(row, m.accounts.newItems[row.AccountID], m.contentWidth()-lipgloss.Width(blankMark)))
+		selected := i == m.accounts.cursor
+		lines = append(lines, mark(selected)+accountRow(row, m.accounts.newItems[row.AccountID],
+			choiceStyle(selected), m.contentWidth()-lipgloss.Width(blankMark)))
 	}
-	return append(lines, "", footer("↑/↓ move · enter open · esc back · q quit"))
+	return append(lines, m.footer("↑/↓ move · enter open · esc back · q quit")...)
 }
 
 // detailLines is everything stored about one account.
 func (m *Model) detailLines() []string {
 	account := m.detail.account
-	lines := []string{m.header(accountName(account)), ""}
+	lines := m.header(accountName(account))
 	for _, field := range [][2]string{
 		{"Institution", account.InstitutionName},
 		{"Account", account.Name},
@@ -202,23 +196,24 @@ func (m *Model) detailLines() []string {
 		if field[1] == "" {
 			continue
 		}
-		lines = append(lines, truncate(blankMark+field[0]+": "+field[1], m.contentWidth()))
+		lines = append(lines, m.fieldRow(field[0], field[1]))
 	}
 	lines = append(lines, "")
 	for i, choice := range detailActions {
-		lines = append(lines, mark(i == m.detail.cursor)+choice)
+		lines = append(lines, m.menuRow(i == m.detail.cursor, choice, ""))
 	}
-	return append(lines, "", footer("↑/↓ move · enter select · esc back · q quit"))
+	return append(lines, m.footer("↑/↓ move · enter select · esc back · q quit")...)
 }
 
 // unlinkLines is everything one removal would delete, and the two ways out of
 // the confirmation.
 func (m *Model) unlinkLines() []string {
 	preview := m.unlink.preview
-	lines := []string{m.header("Unlink " + preview.Institution), "",
-		blankMark + "This deletes every stored row of this institution:"}
+	lines := append(m.header("Unlink "+preview.Institution),
+		truncate(blankMark+warnStyle.Render("This deletes every stored row of this institution:"),
+			m.contentWidth()), "")
 	for _, view := range preview.Accounts {
-		lines = append(lines, truncate(blankMark+"Account: "+accountName(view), m.contentWidth()))
+		lines = append(lines, m.fieldRow("Account", accountName(view)))
 	}
 	for _, row := range [][2]string{
 		{"Transactions", strconv.FormatInt(preview.Rows.Transactions, 10)},
@@ -226,42 +221,44 @@ func (m *Model) unlinkLines() []string {
 		{"Sync state", strconv.FormatInt(preview.Rows.SyncState, 10)},
 		{"Institutions", strconv.FormatInt(preview.Rows.Institutions, 10)},
 	} {
-		lines = append(lines, truncate(blankMark+row[0]+": "+row[1], m.contentWidth()))
+		lines = append(lines, m.fieldRow(row[0], row[1]))
 	}
 	lines = append(lines, "")
 	for i, choice := range unlinkActions {
-		lines = append(lines, mark(i == m.unlink.cursor)+choice)
+		lines = append(lines, m.menuRow(i == m.unlink.cursor, choice, ""))
 	}
-	return append(lines, "", footer("↑/↓ move · enter select · esc cancel"))
+	return append(lines, m.footer("↑/↓ move · enter select · esc cancel")...)
 }
 
 // promptLines is one text prompt with its own error, if it has one.
 func (m *Model) promptLines() []string {
-	lines := []string{m.header(promptTitle(m.screen)), "", blankMark + m.prompt.input.View()}
+	lines := append(m.header(promptTitle(m.screen)),
+		truncate(blankMark+m.prompt.input.View(), m.contentWidth()))
 	if m.prompt.err != nil {
-		lines = append(lines, "", blankMark+displayError(m.prompt.err))
+		lines = append(lines, "", truncate(blankMark+
+			warnStyle.Render(failedMark+" "+displayError(m.prompt.err)), m.contentWidth()))
 	}
-	return append(lines, "", footer("enter accept · esc cancel"))
+	return append(lines, m.footer("enter accept · esc cancel")...)
 }
 
 // historyLines is how much history a new link may ask for.
 func (m *Model) historyLines() []string {
-	lines := []string{m.header(promptTitle(historyScreen)), ""}
+	lines := m.header(promptTitle(historyScreen))
 	for i, choice := range historyChoices {
-		lines = append(lines, mark(i == m.history.cursor)+choice)
+		lines = append(lines, m.menuRow(i == m.history.cursor, choice, ""))
 	}
-	return append(lines, "", footer("↑/↓ move · enter select · esc back"))
+	return append(lines, m.footer("↑/↓ move · enter select · esc back")...)
 }
 
 // recoveryLines shows what failed and what the user can do about it.
 func (m *Model) recoveryLines() []string {
-	lines := []string{m.header("Something went wrong"), "",
-		truncate(blankMark+m.recovery.message, m.contentWidth()), ""}
+	lines := append(m.header("Something went wrong"),
+		truncate(blankMark+warnStyle.Render(failedMark+" "+m.recovery.message), m.contentWidth()), "")
 	for i, choice := range m.recovery.choices() {
-		lines = append(lines, mark(i == m.recovery.cursor)+choice)
+		lines = append(lines, m.menuRow(i == m.recovery.cursor, choice, ""))
 	}
 	lines = append(lines, m.syncSummary()...)
-	return append(lines, "", footer("↑/↓ move · enter select · esc back · ctrl+c quit"))
+	return append(lines, m.footer("↑/↓ move · enter select · esc back · ctrl+c quit")...)
 }
 
 // promptTitle names the prompt of one screen.
@@ -272,14 +269,52 @@ func promptTitle(s screen) string {
 	return "How many days of history"
 }
 
-// header is the title line of one screen. A nickname or an institution name
-// has no length limit, so the title is cut like every other line.
-func (m *Model) header(title string) string {
-	return truncate(blankMark+"fourseas — "+title, m.contentWidth())
+// header is the brand of the application and the name of one screen, with a
+// blank line around the name. A nickname or an institution name has no length
+// limit, so the name is cut like every other line.
+func (m *Model) header(title string) []string {
+	width := m.contentWidth()
+	return []string{
+		truncate(blankMark+brandStyle.Render(brandName+" "+brandMark), width),
+		"",
+		truncate(blankMark+headingStyle.Render(title), width),
+		"",
+	}
 }
 
-// footer is the key help line of one screen.
-func footer(keys string) string { return blankMark + keys }
+// footer is the faint rule that closes the screen and the key help under it.
+func (m *Model) footer(keys string) []string {
+	width := m.contentWidth()
+	return []string{
+		"",
+		blankMark + mutedStyle.Render(strings.Repeat(dividerRune, max(width-2*rightPad, 0))),
+		truncate(blankMark+mutedStyle.Render(keys), width),
+	}
+}
+
+// columns writes one row as a label at the left and a note at the right. A
+// terminal too narrow for both keeps the whole label and cuts the note, so a
+// label is never wrapped and never pushed off the screen.
+func columns(left, right string, width int) string {
+	if right == "" {
+		return truncate(left, width)
+	}
+	gap := width - rightPad - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < minGap {
+		return truncate(left+strings.Repeat(" ", minGap)+right, width)
+	}
+	return truncate(left+strings.Repeat(" ", gap)+right, width)
+}
+
+// menuRow is one choice of a list, with its note at the right.
+func (m *Model) menuRow(selected bool, label, note string) string {
+	return columns(mark(selected)+choiceStyle(selected).Render(label), note, m.contentWidth())
+}
+
+// fieldRow is one stored value, with the name of the field at the left.
+func (m *Model) fieldRow(name, value string) string {
+	return columns(blankMark+mutedStyle.Render(name), value, m.contentWidth())
+}
 
 // accountName is the nickname, then the provider's name, then the raw account
 // id when neither is known yet.
@@ -293,25 +328,42 @@ func accountName(view model.AccountView) string {
 	return view.AccountID
 }
 
-// accountRow is one line of the account list. The name comes first and is
-// never dropped: every other detail is added only while the width allows it.
-func accountRow(view model.AccountView, isNew bool, width int) string {
-	row := accountName(view)
-	extras := []string{maskText(view), view.InstitutionName, view.Currency, balanceText(view)}
-	if isNew {
-		extras = append(extras, "NEW")
+// accountRow is one line of the account list, written in the two columns of
+// every other screen. The name is the left column and is never dropped: every
+// other detail joins the right column only while the width allows it. label is
+// how the name is written, which says whether the cursor is on this row.
+func accountRow(view model.AccountView, isNew bool, label lipgloss.Style, width int) string {
+	name := label.Render(accountName(view))
+	extras := []string{}
+	for _, extra := range []string{maskText(view), view.InstitutionName, view.Currency, balanceText(view)} {
+		if extra != "" {
+			extras = append(extras, mutedStyle.Render(extra))
+		}
 	}
-	for _, extra := range extras {
+
+	right := ""
+	for _, extra := range append(extras, newExtra(isNew)) {
 		if extra == "" {
 			continue
 		}
-		candidate := row + "  " + extra
-		if lipgloss.Width(candidate) > width {
+		candidate := extra
+		if right != "" {
+			candidate = right + "  " + extra
+		}
+		if lipgloss.Width(name)+minGap+lipgloss.Width(candidate)+rightPad > width {
 			break
 		}
-		row = candidate
+		right = candidate
 	}
-	return truncate(row, width)
+	return columns(name, right, width)
+}
+
+// newExtra marks an account that this session has just linked.
+func newExtra(isNew bool) string {
+	if !isNew {
+		return ""
+	}
+	return healthyStyle.Render(newMark)
 }
 
 // maskText is the last digits of the account number, marked as a partial
@@ -331,10 +383,11 @@ func balanceText(view model.AccountView) string {
 	return view.BalanceCurrent.Decimal.StringFixed(2)
 }
 
-// syncStatus is one line about the last sync of every linked institution. A
-// failure of any institution is reported even when a later sync succeeded,
-// because the failed institution still holds stale data.
-func syncStatus(states []app.SyncState, now time.Time) string {
+// syncStatus is the marked state of the last sync of every linked
+// institution, and the style that state is written in. A failure of any
+// institution is reported even when a later sync succeeded, because the failed
+// institution still holds stale data.
+func syncStatus(states []app.SyncState, now time.Time) (string, lipgloss.Style) {
 	var failed, ok *app.SyncState
 	for i := range states {
 		state := &states[i]
@@ -351,13 +404,14 @@ func syncStatus(states []app.SyncState, now time.Time) string {
 
 	switch {
 	case failed != nil && failed.LastSyncedAt != nil:
-		return "Sync failed: " + failed.Institution + " (" + since(*failed.LastSyncedAt, now) + ")"
+		return failedMark + " Sync failed: " + failed.Institution +
+			" (" + since(*failed.LastSyncedAt, now) + ")", warnStyle
 	case failed != nil:
-		return "Sync failed: " + failed.Institution
+		return failedMark + " Sync failed: " + failed.Institution, warnStyle
 	case ok != nil:
-		return "Last synced " + since(*ok.LastSyncedAt, now)
+		return okMark + " Last sync: " + since(*ok.LastSyncedAt, now), healthyStyle
 	}
-	return "Never synced"
+	return noneMark + " Not synced", mutedStyle
 }
 
 // newer says whether a is after b. A missing time is the oldest.
@@ -399,14 +453,6 @@ func displayError(err error) string {
 		return "The bank is still preparing the data"
 	}
 	return err.Error()
-}
-
-// mark is the cursor column of one list row.
-func mark(selected bool) string {
-	if selected {
-		return cursorMark
-	}
-	return blankMark
 }
 
 // truncate cuts one line to the width of the terminal without splitting a

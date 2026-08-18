@@ -11,6 +11,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/shopspring/decimal"
 
 	"github.com/kyle-cheung/fourseas/providence/internal/app"
@@ -133,6 +134,23 @@ func (f *fakeService) Unlink(_ context.Context, itemID string, _ app.Progress) (
 	return f.unlinkResult, nil
 }
 
+// content is the active screen as plain text. The interface writes styled
+// lines, so a test reads the printable text with the escape sequences removed.
+func content(m *Model) string { return ansi.Strip(m.View().Content) }
+
+// hasRow says whether one line of a screen holds the label at the left and the
+// value at the right. The cursor mark and the column padding are removed, so
+// the check stays exact about the pair while the width of the columns changes.
+func hasRow(body, label, value string) bool {
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimPrefix(strings.TrimSpace(line), strings.TrimSpace(cursorMark))
+		if strings.Join(strings.Fields(line), " ") == label+" "+value {
+			return true
+		}
+	}
+	return false
+}
+
 // press sends one key to the model and checks the model identity stays the
 // same, because every Bubble Tea method uses a pointer receiver.
 func press(t *testing.T, m *Model, key tea.KeyPressMsg) tea.Cmd {
@@ -207,14 +225,14 @@ func TestMainNavigationAndQuit(t *testing.T) {
 	if m.screen != mainScreen {
 		t.Fatalf("screen = %v, want mainScreen", m.screen)
 	}
-	body := m.View().Content
+	body := content(m)
 	for _, want := range []string{"Accounts", "Add account", "Sync"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("main view = %q, want it to contain %q", body, want)
 		}
 	}
-	if !strings.Contains(body, "2") {
-		t.Errorf("main view = %q, want the account count", body)
+	if !hasRow(body, "Accounts", "2 accounts") {
+		t.Errorf("main view = %q, want the account count in the right column", body)
 	}
 
 	press(t, m, codeKey(tea.KeyDown))
@@ -237,7 +255,7 @@ func TestMainNavigationAndQuit(t *testing.T) {
 	if m.screen != accountsScreen {
 		t.Fatalf("screen after enter = %v, want accountsScreen", m.screen)
 	}
-	list := m.View().Content
+	list := content(m)
 	if !strings.Contains(list, "Travel card") {
 		t.Errorf("account list = %q, want the nickname of the second account", list)
 	}
@@ -340,7 +358,7 @@ func TestRunningOperationIgnoresKeysAndCtrlCCancels(t *testing.T) {
 	if m.screen != accountsScreen {
 		t.Errorf("screen after cancellation = %v, want returnTo (accountsScreen)", m.screen)
 	}
-	if body := m.View().Content; strings.Contains(strings.ToLower(body), "context canceled") {
+	if body := content(m); strings.Contains(strings.ToLower(body), "context canceled") {
 		t.Errorf("view = %q, want cancellation not shown as a failure", body)
 	}
 
@@ -414,7 +432,7 @@ func TestProgressCallbackIsSafeWithoutProgramSend(t *testing.T) {
 	if m.status != "Link completed" {
 		t.Errorf("status = %q, want the progress line", m.status)
 	}
-	if body := m.View().Content; !strings.Contains(body, "Link completed") {
+	if body := content(m); !strings.Contains(body, "Link completed") {
 		t.Errorf("view = %q, want the progress line", body)
 	}
 }
@@ -422,7 +440,7 @@ func TestProgressCallbackIsSafeWithoutProgramSend(t *testing.T) {
 func TestAccountRowKeepsNameAtNarrowWidths(t *testing.T) {
 	view := account("acc-1", "Café Ünicode", "Everyday Checking", "1234", "Chase", 1234.56)
 
-	wide := accountRow(view, true, 80)
+	wide := accountRow(view, true, itemStyle, 80)
 	for _, want := range []string{"Café Ünicode", "••1234", "Chase", "USD", "1234.56", "NEW"} {
 		if !strings.Contains(wide, want) {
 			t.Errorf("wide row = %q, want it to contain %q", wide, want)
@@ -430,7 +448,7 @@ func TestAccountRowKeepsNameAtNarrowWidths(t *testing.T) {
 	}
 
 	for _, width := range []int{12, 16, 20, 30} {
-		narrow := accountRow(view, true, width)
+		narrow := accountRow(view, true, itemStyle, width)
 		if got := lipgloss.Width(narrow); got > width {
 			t.Errorf("row at width %d measured %d cells", width, got)
 		}
@@ -439,7 +457,7 @@ func TestAccountRowKeepsNameAtNarrowWidths(t *testing.T) {
 		}
 	}
 
-	if got := accountRow(view, false, 80); strings.Contains(got, "NEW") {
+	if got := accountRow(view, false, itemStyle, 80); strings.Contains(got, "NEW") {
 		t.Errorf("row = %q, want no NEW mark on an old account", got)
 	}
 
@@ -458,15 +476,15 @@ func TestSyncStatusNeverCallsFailureASuccess(t *testing.T) {
 	recent := now.Add(-5 * time.Minute)
 	older := now.Add(-3 * time.Hour)
 
-	if got := syncStatus(nil, now); got != "Never synced" {
-		t.Errorf("syncStatus of no states = %q, want %q", got, "Never synced")
+	if got, _ := syncStatus(nil, now); got != noneMark+" Not synced" {
+		t.Errorf("syncStatus of no states = %q, want %q", got, noneMark+" Not synced")
 	}
 
 	allOK := []app.SyncState{
 		{ItemID: "item-1", Institution: "Chase", LastStatus: "ok", LastSyncedAt: &older},
 		{ItemID: "item-2", Institution: "Amex", LastStatus: "ok", LastSyncedAt: &recent},
 	}
-	success := syncStatus(allOK, now)
+	success, _ := syncStatus(allOK, now)
 	if strings.Contains(strings.ToLower(success), "fail") {
 		t.Errorf("syncStatus of all-ok states = %q, want no failure", success)
 	}
@@ -480,7 +498,7 @@ func TestSyncStatusNeverCallsFailureASuccess(t *testing.T) {
 		{ItemID: "item-1", Institution: "Chase", LastStatus: "ITEM_LOGIN_REQUIRED", LastSyncedAt: &older},
 		{ItemID: "item-2", Institution: "Amex", LastStatus: "ok", LastSyncedAt: &recent},
 	}
-	failed := syncStatus(mixed, now)
+	failed, _ := syncStatus(mixed, now)
 	if !strings.Contains(failed, "Chase") {
 		t.Errorf("syncStatus of a mixed set = %q, want the failed institution", failed)
 	}
@@ -492,8 +510,8 @@ func TestSyncStatusNeverCallsFailureASuccess(t *testing.T) {
 	}
 
 	neverRan := []app.SyncState{{ItemID: "item-1", Institution: "Chase", LastStatus: "ok"}}
-	if got := syncStatus(neverRan, now); got != "Never synced" {
-		t.Errorf("syncStatus of a state with no time = %q, want %q", got, "Never synced")
+	if got, _ := syncStatus(neverRan, now); got != noneMark+" Not synced" {
+		t.Errorf("syncStatus of a state with no time = %q, want %q", got, noneMark+" Not synced")
 	}
 
 	if got := displayError(app.ErrProductNotReady); got != "The bank is still preparing the data" {
@@ -562,7 +580,7 @@ func TestAddFlowLinksSyncsNamesAndMarksNewAccounts(t *testing.T) {
 	m := ready(t, fake)
 
 	openHistory(t, m)
-	choices := m.View().Content
+	choices := content(m)
 	for _, want := range []string{"730 days", "365 days", "90 days", "Custom"} {
 		if !strings.Contains(choices, want) {
 			t.Errorf("history view = %q, want it to contain %q", choices, want)
@@ -612,8 +630,8 @@ func TestAddFlowLinksSyncsNamesAndMarksNewAccounts(t *testing.T) {
 			t.Errorf("account %q is not marked as new", id)
 		}
 	}
-	if got := strings.Count(m.View().Content, "NEW"); got != 2 {
-		t.Errorf("account list has %d NEW marks, want 2:\n%s", got, m.View().Content)
+	if got := strings.Count(content(m), "NEW"); got != 2 {
+		t.Errorf("account list has %d NEW marks, want 2:\n%s", got, content(m))
 	}
 }
 
@@ -641,7 +659,7 @@ func TestCustomHistoryKeepsAnUnusableValueOnThePrompt(t *testing.T) {
 		if m.prompt.err == nil {
 			t.Fatalf("value %q left no reason on the prompt", value)
 		}
-		if body := m.View().Content; !strings.Contains(body, errHistoryRange.Error()) {
+		if body := content(m); !strings.Contains(body, errHistoryRange.Error()) {
 			t.Errorf("prompt view = %q, want %q", body, errHistoryRange.Error())
 		}
 	}
@@ -700,7 +718,7 @@ func TestAddFlowSyncFailureKeepsLinkedItemForRetry(t *testing.T) {
 		t.Fatalf("screen after a failed sync = %v, want recoveryScreen", m.screen)
 	}
 
-	body := m.View().Content
+	body := content(m)
 	for _, want := range []string{"Retry", "Main", "The bank is still preparing the data"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("recovery view = %q, want it to contain %q", body, want)
@@ -742,7 +760,7 @@ func TestRetryLeavesTheRecoveryScreenBehind(t *testing.T) {
 	if m.screen != historyScreen {
 		t.Fatalf("screen while the retry runs = %v, want historyScreen", m.screen)
 	}
-	if body := m.View().Content; strings.Contains(body, "Something went wrong") {
+	if body := content(m); strings.Contains(body, "Something went wrong") {
 		t.Errorf("view while the retry runs = %q, want the retried screen, not the cleared failure", body)
 	}
 
@@ -760,7 +778,7 @@ func TestRetryLeavesTheRecoveryScreenBehind(t *testing.T) {
 	if m.linked != (app.LinkedItem{}) {
 		t.Errorf("linked item = %+v, want it cleared", m.linked)
 	}
-	if body := m.View().Content; strings.Contains(body, "Something went wrong") {
+	if body := content(m); strings.Contains(body, "Something went wrong") {
 		t.Errorf("view after a cancelled retry = %q, want the history choice", body)
 	}
 	if len(fake.linkDays) != 2 {
@@ -786,7 +804,7 @@ func TestLinkCancellationReturnsToHistoryChoice(t *testing.T) {
 	if m.linked != (app.LinkedItem{}) {
 		t.Errorf("linked item = %+v, want it cleared", m.linked)
 	}
-	if body := m.View().Content; strings.Contains(strings.ToLower(body), "went wrong") {
+	if body := content(m); strings.Contains(strings.ToLower(body), "went wrong") {
 		t.Errorf("view = %q, want cancellation not shown as a failure", body)
 	}
 }
@@ -817,7 +835,7 @@ func TestNicknameFailureKeepsPromptOpen(t *testing.T) {
 	if !m.prompt.input.Focused() {
 		t.Error("the prompt lost focus after a failed name")
 	}
-	if body := m.View().Content; !strings.Contains(body, "the account is unknown") {
+	if body := content(m); !strings.Contains(body, "the account is unknown") {
 		t.Errorf("view = %q, want the failure under the prompt", body)
 	}
 
@@ -872,7 +890,7 @@ func TestDetailRenameSetsAndClearsNickname(t *testing.T) {
 	m := ready(t, fake)
 	openDetail(t, m, 0)
 
-	body := m.View().Content
+	body := content(m)
 	for _, want := range []string{"Rename", "Unlink institution"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("detail view = %q, want it to contain %q", body, want)
@@ -909,7 +927,7 @@ func TestDetailRenameSetsAndClearsNickname(t *testing.T) {
 	if m.detail.account.AccountID != "acc-1" || m.detail.account.Nickname != "Weekend card" {
 		t.Fatalf("detail account = %+v, want the refreshed row of acc-1", m.detail.account)
 	}
-	if got := m.View().Content; !strings.Contains(got, "Weekend card") {
+	if got := content(m); !strings.Contains(got, "Weekend card") {
 		t.Errorf("detail view = %q, want the new nickname", got)
 	}
 
@@ -964,14 +982,17 @@ func TestUnlinkPreviewListsEveryAffectedAccountAndRowCount(t *testing.T) {
 	if len(fake.previewCalls) != 1 || fake.previewCalls[0] != "item-1" {
 		t.Fatalf("UnlinkPreview calls = %v, want one call for item-1", fake.previewCalls)
 	}
-	body := m.View().Content
-	for _, want := range []string{
-		"Chase", "Everyday Checking", "Sapphire",
-		"Transactions: 412", "Accounts: 3", "Sync state: 7", "Institutions: 5",
-		"Cancel", "Unlink",
-	} {
+	body := content(m)
+	for _, want := range []string{"Chase", "Everyday Checking", "Sapphire", "Cancel", "Unlink"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("unlink view = %q, want it to contain %q", body, want)
+		}
+	}
+	for _, want := range [][2]string{
+		{"Transactions", "412"}, {"Accounts", "3"}, {"Sync state", "7"}, {"Institutions", "5"},
+	} {
+		if !hasRow(body, want[0], want[1]) {
+			t.Errorf("unlink view = %q, want the row %q %q", body, want[0], want[1])
 		}
 	}
 	if m.unlink.cursor != 0 {
@@ -1041,7 +1062,7 @@ func TestUnlinkSuccessRefreshesAccounts(t *testing.T) {
 	if len(m.accounts.rows) != 1 || m.accounts.rows[0].AccountID != "acc-3" {
 		t.Fatalf("stored rows = %+v, want only the remaining account", m.accounts.rows)
 	}
-	if body := m.View().Content; strings.Contains(body, "Everyday Checking") {
+	if body := content(m); strings.Contains(body, "Everyday Checking") {
 		t.Errorf("account list = %q, want the removed accounts gone", body)
 	}
 }
@@ -1062,7 +1083,7 @@ func TestSyncAllCancellationShowsNoFailure(t *testing.T) {
 	if m.screen != mainScreen {
 		t.Fatalf("screen after a cancelled sync = %v, want the main menu it started from", m.screen)
 	}
-	body := m.View().Content
+	body := content(m)
 	for _, unwanted := range []string{"Something went wrong", "context canceled"} {
 		if strings.Contains(body, unwanted) {
 			t.Errorf("view = %q, want it not to contain %q", body, unwanted)
@@ -1087,7 +1108,7 @@ func TestUnlinkErrorIsShownEvenWhenCancelled(t *testing.T) {
 	if m.screen != recoveryScreen {
 		t.Fatalf("screen after a cancelled removal = %v, want recoveryScreen", m.screen)
 	}
-	if body := m.View().Content; !strings.Contains(body, "the item is gone at Plaid") {
+	if body := content(m); !strings.Contains(body, "the item is gone at Plaid") {
 		t.Errorf("view = %q, want the removal failure shown", body)
 	}
 }
@@ -1115,7 +1136,7 @@ func TestCancelledFirstSyncLandsOnTheAccountsScreen(t *testing.T) {
 	if m.screen != accountsScreen {
 		t.Fatalf("screen after a cancelled first sync = %v, want accountsScreen", m.screen)
 	}
-	body := m.View().Content
+	body := content(m)
 	if !strings.Contains(body, "Bank of Nowhere") {
 		t.Errorf("view = %q, want it to name the institution that was linked", body)
 	}
@@ -1144,7 +1165,7 @@ func TestNarrowWidthCutsTheStatusLineAndTheTitle(t *testing.T) {
 	openDetail(t, m, 0) // the title is the long nickname
 	m.status = strings.Repeat("x", 28) + " failed: " + long
 
-	for _, line := range strings.Split(m.View().Content, "\n") {
+	for _, line := range strings.Split(content(m), "\n") {
 		if got := lipgloss.Width(line); got > narrow {
 			t.Errorf("line %q is %d columns wide, want at most %d", line, got, narrow)
 		}
@@ -1179,11 +1200,14 @@ func TestSyncAllShowsEveryResultAndRefreshesStatus(t *testing.T) {
 	if m.screen != mainScreen {
 		t.Fatalf("screen after a sync = %v, want mainScreen", m.screen)
 	}
-	body := m.View().Content
-	for _, want := range []string{"Chase", "item-2", "skipped", "Last synced 5 minutes ago", "(2)"} {
+	body := content(m)
+	for _, want := range []string{"Chase", "item-2", "skipped", okMark + " Last sync: 5 minutes ago"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("main view = %q, want it to contain %q", body, want)
 		}
+	}
+	if !hasRow(body, "Accounts", "2 accounts") {
+		t.Errorf("main view = %q, want the refreshed account count", body)
 	}
 }
 
@@ -1207,7 +1231,7 @@ func TestSyncAllFailureOffersRetryWithoutAutomaticRetry(t *testing.T) {
 	if m.screen != recoveryScreen {
 		t.Fatalf("screen after a failed sync = %v, want recoveryScreen", m.screen)
 	}
-	body := m.View().Content
+	body := content(m)
 	for _, want := range []string{"Retry", "Main", "Chase", "Amex", "The bank is still preparing the data"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("recovery view = %q, want it to contain %q", body, want)
@@ -1226,7 +1250,7 @@ func TestSyncAllFailureOffersRetryWithoutAutomaticRetry(t *testing.T) {
 	if m.screen != mainScreen {
 		t.Fatalf("screen after a successful retry = %v, want mainScreen", m.screen)
 	}
-	if body := m.View().Content; strings.Contains(body, "Something went wrong") {
+	if body := content(m); strings.Contains(body, "Something went wrong") {
 		t.Errorf("main view = %q, want the failure left behind", body)
 	}
 }
