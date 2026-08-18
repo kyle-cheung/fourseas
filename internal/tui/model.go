@@ -108,6 +108,16 @@ func New(client service) *Model {
 	}
 }
 
+// Run opens the account management interface over one application façade and
+// blocks until the user quits.
+func Run(client service) error {
+	m := New(client)
+	program := tea.NewProgram(m)
+	m.send = program.Send
+	_, err := program.Run()
+	return err
+}
+
 // operation says which call returned, so one message type carries every
 // result.
 type operation uint8
