@@ -19,6 +19,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/kyle-cheung/fourseas/providence/internal/app"
+	"github.com/kyle-cheung/fourseas/providence/internal/tui"
 )
 
 const usage = `fourseas - Plaid to DuckDB transactions
@@ -55,15 +58,13 @@ func main() {
 }
 
 func run() error {
+	cfg := loadSettings()
 	if len(os.Args) < 2 {
-		fmt.Print(usage)
-		return fmt.Errorf("no command given")
+		return tui.Run(app.New(cfg.appConfig()))
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	cfg := loadSettings()
 
 	switch os.Args[1] {
 	case "link":

@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"github.com/joho/godotenv"
+	"github.com/kyle-cheung/fourseas/providence/internal/app"
 	plaidprovider "github.com/kyle-cheung/fourseas/providence/internal/provider/plaid"
 )
 
@@ -20,6 +21,11 @@ type settings struct {
 	plaid      plaidprovider.Config
 	dbPath     string
 	tokensPath string
+}
+
+// appConfig is what the shared operations need from the settings.
+func (s settings) appConfig() app.Config {
+	return app.Config{Plaid: s.plaid, DBPath: s.dbPath, TokensPath: s.tokensPath}
 }
 
 // loadSettings reads .env, then the process environment, and applies defaults.

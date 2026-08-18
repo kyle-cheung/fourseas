@@ -54,8 +54,18 @@ func seedUnlink(t *testing.T) settings {
 		t.Fatalf("upsert: %v", err)
 	}
 	for _, item := range linked().Items {
-		if err := recordInstitution(ctx, db, item, "sandbox"); err != nil {
-			t.Fatalf("record institution: %v", err)
+		env := item.Env
+		if env == "" {
+			env = cfg.plaid.Env
+		}
+		if err := db.UpsertInstitution(ctx, model.Institution{
+			Provider:        plaidprovider.ProviderName,
+			ItemID:          item.ItemID,
+			InstitutionName: item.Institution,
+			Env:             env,
+			LinkedAt:        item.LinkedAt,
+		}); err != nil {
+			t.Fatalf("upsert institution: %v", err)
 		}
 	}
 	if err := db.Close(); err != nil {
@@ -224,29 +234,8 @@ func TestUnlinkListShowsTheItemIds(t *testing.T) {
 	}
 }
 
-// An access token only works in the environment that issued it. Removing an
-// item needs Plaid, so a mismatch is refused here and says what to change,
-// instead of failing at Plaid with the item still live and billed.
-func TestPlanUnlinkRejectsAnItemFromAnotherEnvironment(t *testing.T) {
-	_, err := planUnlink(linked(), "production", []string{"item-amex"})
-	if err == nil {
-		t.Fatal("error = nil, want the environment mismatch")
-	}
-	for _, want := range []string{"sandbox", "production", "PLAID_ENV"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error = %q, want it to contain %q", err, want)
-		}
-	}
-}
-
-// An item linked before the environment was recorded has to be removable, and
-// trying is the only way to know where it works.
-func TestPlanUnlinkAcceptsAnItemWithNoRecordedEnvironment(t *testing.T) {
-	if _, err := planUnlink(linked(), "production", []string{"item-scotia"}); err != nil {
-		t.Errorf("planUnlink: %v", err)
-	}
-}
-
+// The environment of an item is checked by app.UnlinkPreview. See
+// internal/app/unlink_test.go.
 func TestPlanUnlinkRejectsBadInput(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -260,7 +249,7 @@ func TestPlanUnlinkRejectsBadInput(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := planUnlink(linked(), "sandbox", tt.options); err == nil {
+			if _, err := planUnlink(linked(), tt.options); err == nil {
 				t.Errorf("planUnlink(%q) error = nil, want an error", tt.options)
 			}
 		})
