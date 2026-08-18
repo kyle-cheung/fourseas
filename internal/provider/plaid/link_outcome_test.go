@@ -9,12 +9,17 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	plaidsdk "github.com/plaid/plaid-go/v40/plaid"
 )
 
 // fakeServer stands in for *http.Server. Shutdown runs onShutdown, which lets a
 // test model a handler that is still running when the server stops.
 type fakeServer struct {
-	mu         sync.Mutex
+	mu sync.Mutex
+	// err is what Shutdown reports. A deadline error models a grace that
+	// expired with a handler still running.
+	err        error
 	calls      int
 	onShutdown func()
 }
@@ -23,11 +28,12 @@ func (f *fakeServer) Shutdown(ctx context.Context) error {
 	f.mu.Lock()
 	f.calls++
 	run := f.onShutdown
+	err := f.err
 	f.mu.Unlock()
 	if run != nil {
 		run()
 	}
-	return nil
+	return err
 }
 
 func (f *fakeServer) shutdownCalls() int {
@@ -186,11 +192,10 @@ func TestExitHandlerDropsADuplicatePost(t *testing.T) {
 	}
 }
 
-// The same for /exchange. Its send path is driven through the failure branch,
-// which needs no Plaid client.
-func TestExchangeHandlerDropsADuplicateFailure(t *testing.T) {
+func TestReportDropsASecondFailure(t *testing.T) {
 	failures := make(chan error, 1)
-	failures <- errors.New("an earlier failure")
+	first := errors.New("an earlier failure")
+	failures <- first
 
 	done := make(chan struct{})
 	go func() {
@@ -202,6 +207,166 @@ func TestExchangeHandlerDropsADuplicateFailure(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("a second failure wedged the sender")
+	}
+
+	if got := <-failures; !errors.Is(got, first) {
+		t.Errorf("failure = %v, want the first failure to be kept", got)
+	}
+}
+
+// The real exchange handler, against a Plaid backend that refuses the
+// exchange. A repeated post must report once and never wedge.
+func TestExchangeHandlerReportsAndDropsADuplicate(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		w.Write([]byte(`{"error_code":"INVALID_PUBLIC_TOKEN","error_type":"INVALID_INPUT","error_message":"bad token"}`))
+	}))
+	defer backend.Close()
+
+	cfg := plaidsdk.NewConfiguration()
+	cfg.Servers = plaidsdk.ServerConfigurations{{URL: backend.URL}}
+	client := plaidsdk.NewAPIClient(cfg)
+
+	results := make(chan LinkResult, 1)
+	failures := make(chan error, 1)
+	handler := exchangeHandler(client, results, failures)
+
+	post := func() *httptest.ResponseRecorder {
+		body := strings.NewReader(`{"public_token":"public-sandbox-1"}`)
+		req := httptest.NewRequest(http.MethodPost, "/exchange", body)
+		rec := httptest.NewRecorder()
+		handler(rec, req)
+		return rec
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		post()
+		post()
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("a duplicate post to /exchange wedged the handler")
+	}
+
+	select {
+	case err := <-failures:
+		if !strings.Contains(err.Error(), "exchange public token") {
+			t.Errorf("failure = %q, want it to name the failed exchange", err)
+		}
+	default:
+		t.Error("the first post recorded no failure")
+	}
+	drained(t, results)
+}
+
+// The grace expired with a handler still open, so the token gets one more
+// bounded wait. Without it the token is lost to the exit error.
+func TestWaitForOutcomeWaitsForATokenAfterAnUncleanStop(t *testing.T) {
+	results := make(chan LinkResult, 1)
+	failures := make(chan error, 1)
+	server := &fakeServer{
+		err: context.DeadlineExceeded,
+		onShutdown: func() {
+			go func() {
+				time.Sleep(20 * time.Millisecond)
+				results <- LinkResult{AccessToken: "token-g", ItemID: "item-g"}
+			}()
+		},
+	}
+	failures <- errors.New("link was closed before the bank sign-in finished")
+
+	got, err := waitForOutcome(context.Background(), server, results, failures)
+	if err != nil {
+		t.Fatalf("waitForOutcome returned an error, want the token: %v", err)
+	}
+	if got.ItemID != "item-g" {
+		t.Errorf("item = %q, want item-g", got.ItemID)
+	}
+	drained(t, results)
+}
+
+// An unclean stop with no token still reports the failure, and does not wait
+// beyond tokenGrace.
+func TestWaitForOutcomeGivesUpAfterTheTokenGrace(t *testing.T) {
+	results := make(chan LinkResult, 1)
+	failures := make(chan error, 1)
+	want := errors.New("link was closed before the bank sign-in finished")
+	failures <- want
+	server := &fakeServer{err: context.DeadlineExceeded}
+
+	start := time.Now()
+	_, err := waitForOutcome(context.Background(), server, results, failures)
+	waited := time.Since(start)
+
+	if !errors.Is(err, want) {
+		t.Fatalf("error = %v, want %v", err, want)
+	}
+	if waited > 2*tokenGrace {
+		t.Errorf("waited %s, want no more than the token grace of %s", waited, tokenGrace)
+	}
+	drained(t, results)
+}
+
+// The institution lookup is cosmetic and must not gate the token. Its backend
+// never answers, so only the bound lets the handler finish.
+func TestExchangeHandlerDoesNotLetASlowLookupHoldTheToken(t *testing.T) {
+	release := make(chan struct{})
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "public_token/exchange") {
+			w.Write([]byte(`{"access_token":"access-sandbox-1","item_id":"item-h","request_id":"r1"}`))
+			return
+		}
+		// Every enrichment call hangs until the test ends.
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	// The hanging handler is released before the backend stops, because
+	// httptest.Server.Close waits for its handlers.
+	defer backend.Close()
+	defer close(release)
+
+	cfg := plaidsdk.NewConfiguration()
+	cfg.Servers = plaidsdk.ServerConfigurations{{URL: backend.URL}}
+	client := plaidsdk.NewAPIClient(cfg)
+
+	results := make(chan LinkResult, 1)
+	failures := make(chan error, 1)
+	handler := exchangeHandler(client, results, failures)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		body := strings.NewReader(`{"public_token":"public-sandbox-1"}`)
+		handler(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/exchange", body))
+	}()
+
+	// The handler must deliver well inside the shutdown grace, which is what
+	// the caller allows it after an exit.
+	select {
+	case <-done:
+	case <-time.After(shutdownGrace):
+		t.Fatal("a slow institution lookup held the token past the shutdown grace")
+	}
+
+	select {
+	case got := <-results:
+		if got.ItemID != "item-h" {
+			t.Errorf("item = %q, want item-h", got.ItemID)
+		}
+		if got.Institution != "" {
+			t.Errorf("institution = %q, want it empty when the lookup times out", got.Institution)
+		}
+	default:
+		t.Error("the handler delivered no token")
 	}
 }
 

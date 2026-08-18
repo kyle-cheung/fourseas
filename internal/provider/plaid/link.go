@@ -96,6 +96,15 @@ func Link(ctx context.Context, cfg Config, days int) (LinkResult, error) {
 // that are still running finish.
 const shutdownGrace = 5 * time.Second
 
+// tokenGrace is the extra time a token gets when the server did not stop
+// inside shutdownGrace, because then a handler may still be about to deliver
+// one.
+const tokenGrace = 2 * time.Second
+
+// enrichmentGrace bounds the cosmetic institution lookup that runs after an
+// exchange, so it cannot delay the token past shutdownGrace.
+const enrichmentGrace = 2 * time.Second
+
 // shutdowner is the part of *http.Server that waitForOutcome needs.
 type shutdowner interface {
 	Shutdown(ctx context.Context) error
@@ -113,32 +122,41 @@ func waitForOutcome(ctx context.Context, server shutdowner, results <-chan LinkR
 		// after the other tab signed in. Stop the server first, which lets
 		// that exchange finish, then look for its token. A token always wins,
 		// because it is the only handle on an item that Plaid now bills.
-		stopServer(server)
-
-		select {
-		case result := <-results:
+		if result, ok := lastToken(server, results); ok {
 			return result, nil
-		default:
-			return LinkResult{}, err
 		}
+		return LinkResult{}, err
 	case <-ctx.Done():
-		stopServer(server)
-
-		select {
-		case result := <-results:
+		if result, ok := lastToken(server, results); ok {
 			return result, nil
-		default:
-			return LinkResult{}, fmt.Errorf("link was not completed: %w", ctx.Err())
 		}
+		return LinkResult{}, fmt.Errorf("link was not completed: %w", ctx.Err())
 	}
 }
 
-// stopServer stops the server and waits, for a bounded time, for the handlers
-// that are still running.
-func stopServer(server shutdowner) {
+// lastToken stops the server and reports a token from a handler that was still
+// running. A Shutdown error means the grace expired with a handler still open,
+// so a token may be moments away: that case, and only that case, gets one more
+// bounded wait before the token is given up for lost.
+func lastToken(server shutdowner, results <-chan LinkResult) (LinkResult, bool) {
 	shutdownCtx, stopShutdown := context.WithTimeout(context.Background(), shutdownGrace)
-	defer stopShutdown()
-	_ = server.Shutdown(shutdownCtx)
+	stopped := server.Shutdown(shutdownCtx)
+	stopShutdown()
+
+	if stopped != nil {
+		select {
+		case result := <-results:
+			return result, true
+		case <-time.After(tokenGrace):
+		}
+	}
+
+	select {
+	case result := <-results:
+		return result, true
+	default:
+		return LinkResult{}, false
+	}
 }
 
 // LinkURL is the local address the Link widget serves on. Both the CLI and
@@ -202,10 +220,19 @@ func exchangeHandler(client *plaidsdk.APIClient, results chan<- LinkResult, fail
 			return
 		}
 
+		// The access token exists now, and it is the only handle on an item
+		// that Plaid bills from here on. The institution name is cosmetic and
+		// costs two more calls, so it gets a short bound of its own: a slow
+		// lookup must never keep the token from reaching the reader before the
+		// server stops. institutionName already returns "" on any error.
+		nameCtx, stopName := context.WithTimeout(r.Context(), enrichmentGrace)
+		institution := institutionName(nameCtx, client, resp.AccessToken)
+		stopName()
+
 		result := LinkResult{
 			AccessToken: resp.AccessToken,
 			ItemID:      resp.ItemId,
-			Institution: institutionName(r.Context(), client, resp.AccessToken),
+			Institution: institution,
 		}
 		w.Write([]byte("ok"))
 		deliver(results, result)
