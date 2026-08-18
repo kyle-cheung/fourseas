@@ -49,6 +49,23 @@ type fakeService struct {
 	nicknameCalls [][2]string
 	// nicknameErrs is consumed one entry per SetNickname call.
 	nicknameErrs []error
+
+	// syncAllCalls counts every SyncAll call, so a test can see that the
+	// interface never syncs twice on its own.
+	syncAllCalls   int
+	syncAllResults []app.SyncResult
+	syncAllErr     error
+
+	// preview is what UnlinkPreview returns, and previewErr replaces it.
+	preview    app.UnlinkData
+	previewErr error
+	// previewCalls holds the item id of every UnlinkPreview call, in order.
+	previewCalls []string
+
+	// unlinkCalls holds the item id of every Unlink call, in order.
+	unlinkCalls  []string
+	unlinkResult app.UnlinkResult
+	unlinkErr    error
 }
 
 // takeError takes the first prepared error off a queue.
@@ -88,7 +105,11 @@ func (f *fakeService) SyncItem(_ context.Context, itemID string, _ app.Progress)
 }
 
 func (f *fakeService) SyncAll(context.Context, app.Progress) ([]app.SyncResult, error) {
-	return nil, nil
+	f.syncAllCalls++
+	if f.syncAllErr != nil {
+		return nil, f.syncAllErr
+	}
+	return f.syncAllResults, nil
 }
 
 func (f *fakeService) SetNickname(_ context.Context, accountID, nickname string) error {
@@ -96,12 +117,20 @@ func (f *fakeService) SetNickname(_ context.Context, accountID, nickname string)
 	return takeError(&f.nicknameErrs)
 }
 
-func (f *fakeService) UnlinkPreview(context.Context, string) (app.UnlinkData, error) {
-	return app.UnlinkData{}, nil
+func (f *fakeService) UnlinkPreview(_ context.Context, itemID string) (app.UnlinkData, error) {
+	f.previewCalls = append(f.previewCalls, itemID)
+	if f.previewErr != nil {
+		return app.UnlinkData{}, f.previewErr
+	}
+	return f.preview, nil
 }
 
-func (f *fakeService) Unlink(context.Context, string, app.Progress) (app.UnlinkResult, error) {
-	return app.UnlinkResult{}, nil
+func (f *fakeService) Unlink(_ context.Context, itemID string, _ app.Progress) (app.UnlinkResult, error) {
+	f.unlinkCalls = append(f.unlinkCalls, itemID)
+	if f.unlinkErr != nil {
+		return app.UnlinkResult{}, f.unlinkErr
+	}
+	return f.unlinkResult, nil
 }
 
 // press sends one key to the model and checks the model identity stays the
@@ -797,5 +826,302 @@ func TestNicknameFailureKeepsPromptOpen(t *testing.T) {
 	want := [][2]string{{"acc-1", "Travel card"}, {"acc-1", "Travel card"}}
 	if len(fake.nicknameCalls) != 2 || fake.nicknameCalls[1] != want[1] {
 		t.Fatalf("SetNickname calls = %v, want %v", fake.nicknameCalls, want)
+	}
+}
+
+// openDetail walks the main menu to the detail screen of one account row.
+func openDetail(t *testing.T, m *Model, row int) {
+	t.Helper()
+	press(t, m, codeKey(tea.KeyEnter)) // Accounts
+	for i := 0; i < row; i++ {
+		press(t, m, codeKey(tea.KeyDown))
+	}
+	press(t, m, codeKey(tea.KeyEnter))
+	if m.screen != detailScreen {
+		t.Fatalf("screen after opening a row = %v, want detailScreen", m.screen)
+	}
+}
+
+// openUnlink walks from the main menu to the unlink confirmation of the first
+// account.
+func openUnlink(t *testing.T, m *Model) {
+	t.Helper()
+	openDetail(t, m, 0)
+	press(t, m, codeKey(tea.KeyDown)) // Unlink institution
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+	if m.screen != unlinkScreen {
+		t.Fatalf("screen after the preview = %v, want unlinkScreen", m.screen)
+	}
+}
+
+// openSync walks the main menu to the sync action and runs it.
+func openSync(t *testing.T, m *Model) tea.Cmd {
+	t.Helper()
+	press(t, m, codeKey(tea.KeyDown))
+	press(t, m, codeKey(tea.KeyDown))
+	if m.main.cursor != choiceSync {
+		t.Fatalf("main cursor = %d, want the sync choice", m.main.cursor)
+	}
+	return runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+}
+
+func TestDetailRenameSetsAndClearsNickname(t *testing.T) {
+	fake := &fakeService{data: app.AccountData{
+		Accounts: []model.AccountView{account("acc-1", "Travel card", "Sapphire", "9876", "Chase", 20)},
+	}}
+	m := ready(t, fake)
+	openDetail(t, m, 0)
+
+	body := m.View().Content
+	for _, want := range []string{"Rename", "Unlink institution"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("detail view = %q, want it to contain %q", body, want)
+		}
+	}
+
+	press(t, m, codeKey(tea.KeyEnter)) // Rename
+	if m.screen != nicknameScreen {
+		t.Fatalf("screen after choosing Rename = %v, want nicknameScreen", m.screen)
+	}
+	if got := m.prompt.input.Value(); got != "Travel card" {
+		t.Errorf("prompt value = %q, want the current nickname", got)
+	}
+
+	// A refused name keeps the prompt open with the typed text.
+	m.prompt.input.SetValue("Weekend card")
+	fake.nicknameErrs = []error{errors.New("the account is unknown")}
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+	if m.screen != nicknameScreen {
+		t.Fatalf("screen after a refused rename = %v, want the prompt to stay open", m.screen)
+	}
+	if got := m.prompt.input.Value(); got != "Weekend card" {
+		t.Errorf("prompt value after a refused rename = %q, want the typed text kept", got)
+	}
+
+	fake.data = app.AccountData{
+		Accounts: []model.AccountView{account("acc-1", "Weekend card", "Sapphire", "9876", "Chase", 20)},
+	}
+	cmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // SetNickname
+	runOperation(t, m, cmd)                                       // the account refresh
+	if m.screen != detailScreen {
+		t.Fatalf("screen after a saved rename = %v, want detailScreen", m.screen)
+	}
+	if m.detail.account.AccountID != "acc-1" || m.detail.account.Nickname != "Weekend card" {
+		t.Fatalf("detail account = %+v, want the refreshed row of acc-1", m.detail.account)
+	}
+	if got := m.View().Content; !strings.Contains(got, "Weekend card") {
+		t.Errorf("detail view = %q, want the new nickname", got)
+	}
+
+	// A blank value clears the nickname.
+	press(t, m, codeKey(tea.KeyEnter)) // Rename again
+	if got := m.prompt.input.Value(); got != "Weekend card" {
+		t.Errorf("prompt value = %q, want the nickname it starts from", got)
+	}
+	m.prompt.input.SetValue("")
+	fake.data = app.AccountData{
+		Accounts: []model.AccountView{account("acc-1", "", "Sapphire", "9876", "Chase", 20)},
+	}
+	cmd = runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+	runOperation(t, m, cmd)
+
+	want := [][2]string{{"acc-1", "Weekend card"}, {"acc-1", "Weekend card"}, {"acc-1", ""}}
+	if len(fake.nicknameCalls) != len(want) {
+		t.Fatalf("SetNickname calls = %v, want %v", fake.nicknameCalls, want)
+	}
+	for i, call := range want {
+		if fake.nicknameCalls[i] != call {
+			t.Fatalf("SetNickname calls = %v, want %v", fake.nicknameCalls, want)
+		}
+	}
+	if m.screen != detailScreen || m.detail.account.Nickname != "" {
+		t.Fatalf("screen = %v, detail account = %+v, want the cleared name on the detail screen",
+			m.screen, m.detail.account)
+	}
+}
+
+// unlinkFake builds a service whose item-1 preview holds two accounts and a
+// nonzero count of every kind of row.
+func unlinkFake() *fakeService {
+	first := account("acc-1", "", "Everyday Checking", "1234", "Chase", 10)
+	second := account("acc-2", "", "Sapphire", "9876", "Chase", 20)
+	return &fakeService{
+		data: app.AccountData{Accounts: []model.AccountView{first, second}},
+		preview: app.UnlinkData{
+			ItemID:      "item-1",
+			Institution: "Chase",
+			Accounts:    []model.AccountView{first, second},
+			Rows:        app.RowCounts{Transactions: 412, Accounts: 3, SyncState: 7, Institutions: 5},
+		},
+	}
+}
+
+func TestUnlinkPreviewListsEveryAffectedAccountAndRowCount(t *testing.T) {
+	fake := unlinkFake()
+	m := ready(t, fake)
+	openUnlink(t, m)
+
+	if len(fake.previewCalls) != 1 || fake.previewCalls[0] != "item-1" {
+		t.Fatalf("UnlinkPreview calls = %v, want one call for item-1", fake.previewCalls)
+	}
+	body := m.View().Content
+	for _, want := range []string{
+		"Chase", "Everyday Checking", "Sapphire",
+		"Transactions: 412", "Accounts: 3", "Sync state: 7", "Institutions: 5",
+		"Cancel", "Unlink",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("unlink view = %q, want it to contain %q", body, want)
+		}
+	}
+	if m.unlink.cursor != 0 {
+		t.Errorf("unlink cursor = %d, want Cancel as the default", m.unlink.cursor)
+	}
+	if len(fake.unlinkCalls) != 0 {
+		t.Errorf("Unlink calls = %v, want none before the user confirms", fake.unlinkCalls)
+	}
+}
+
+func TestUnlinkEscCancelsWithoutChanges(t *testing.T) {
+	fake := unlinkFake()
+	m := ready(t, fake)
+
+	openUnlink(t, m)
+	press(t, m, codeKey(tea.KeyEsc))
+	if m.screen != accountsScreen {
+		t.Fatalf("screen after esc = %v, want accountsScreen", m.screen)
+	}
+
+	press(t, m, codeKey(tea.KeyEsc)) // back to the main menu
+	openUnlink(t, m)
+	if cmd := press(t, m, codeKey(tea.KeyEnter)); cmd != nil { // Cancel
+		t.Fatal("Cancel started an operation")
+	}
+	if m.screen != accountsScreen {
+		t.Fatalf("screen after Cancel = %v, want accountsScreen", m.screen)
+	}
+
+	if len(fake.unlinkCalls) != 0 {
+		t.Errorf("Unlink calls = %v, want none after a cancellation", fake.unlinkCalls)
+	}
+	if len(m.accounts.rows) != 2 {
+		t.Errorf("stored rows = %d, want both accounts kept", len(m.accounts.rows))
+	}
+}
+
+func TestUnlinkSuccessRefreshesAccounts(t *testing.T) {
+	fake := unlinkFake()
+	fake.unlinkResult = app.UnlinkResult{Rows: app.RowCounts{Transactions: 412, Accounts: 3}}
+	m := ready(t, fake)
+	m.accounts.newItems["acc-1"] = true
+	m.accounts.newItems["acc-2"] = true
+
+	openUnlink(t, m)
+	press(t, m, codeKey(tea.KeyDown)) // Unlink
+	if m.unlink.cursor != 1 {
+		t.Fatalf("unlink cursor = %d, want the Unlink action", m.unlink.cursor)
+	}
+
+	remaining := account("acc-3", "", "Gold card", "4321", "Amex", 30)
+	fake.data = app.AccountData{Accounts: []model.AccountView{remaining}}
+	cmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // Unlink
+	if len(fake.unlinkCalls) != 1 || fake.unlinkCalls[0] != "item-1" {
+		t.Fatalf("Unlink calls = %v, want one call for item-1", fake.unlinkCalls)
+	}
+	runOperation(t, m, cmd) // the account refresh
+
+	if m.screen != accountsScreen {
+		t.Fatalf("screen after a removal = %v, want accountsScreen", m.screen)
+	}
+	for _, id := range []string{"acc-1", "acc-2"} {
+		if m.accounts.newItems[id] {
+			t.Errorf("account %q is still marked as new after its item was removed", id)
+		}
+	}
+	if len(m.accounts.rows) != 1 || m.accounts.rows[0].AccountID != "acc-3" {
+		t.Fatalf("stored rows = %+v, want only the remaining account", m.accounts.rows)
+	}
+	if body := m.View().Content; strings.Contains(body, "Everyday Checking") {
+		t.Errorf("account list = %q, want the removed accounts gone", body)
+	}
+}
+
+func TestSyncAllShowsEveryResultAndRefreshesStatus(t *testing.T) {
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	synced := now.Add(-5 * time.Minute)
+	first := account("acc-1", "", "Everyday Checking", "1234", "Chase", 10)
+	fake := &fakeService{
+		data: app.AccountData{Accounts: []model.AccountView{first}},
+		syncAllResults: []app.SyncResult{
+			{ItemID: "item-1", Label: "Chase", Accounts: []model.AccountView{first}},
+			{ItemID: "item-2", Label: "item-2", Skipped: true},
+		},
+	}
+	m := ready(t, fake)
+	m.now = func() time.Time { return now }
+
+	fake.data = app.AccountData{
+		Accounts: []model.AccountView{first, account("acc-2", "", "Sapphire", "9876", "Chase", 20)},
+		States: []app.SyncState{
+			{ItemID: "item-1", Institution: "Chase", LastStatus: "ok", LastSyncedAt: &synced},
+		},
+	}
+	runOperation(t, m, openSync(t, m)) // SyncAll, then the account refresh
+
+	if fake.syncAllCalls != 1 {
+		t.Fatalf("SyncAll calls = %d, want exactly one", fake.syncAllCalls)
+	}
+	if m.screen != mainScreen {
+		t.Fatalf("screen after a sync = %v, want mainScreen", m.screen)
+	}
+	body := m.View().Content
+	for _, want := range []string{"Chase", "item-2", "skipped", "Last synced 5 minutes ago", "(2)"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("main view = %q, want it to contain %q", body, want)
+		}
+	}
+}
+
+func TestSyncAllFailureOffersRetryWithoutAutomaticRetry(t *testing.T) {
+	first := account("acc-1", "", "Everyday Checking", "1234", "Chase", 10)
+	fake := &fakeService{
+		data: app.AccountData{Accounts: []model.AccountView{first}},
+		syncAllResults: []app.SyncResult{
+			{ItemID: "item-1", Label: "Chase", Accounts: []model.AccountView{first}},
+			{ItemID: "item-2", Label: "Amex", Err: fmt.Errorf("plaid: %w", app.ErrProductNotReady)},
+		},
+	}
+	m := ready(t, fake)
+
+	if cmd := openSync(t, m); cmd != nil {
+		t.Fatal("a failed sync started another command; the interface must not retry on its own")
+	}
+	if fake.syncAllCalls != 1 {
+		t.Fatalf("SyncAll calls = %d, want no automatic retry", fake.syncAllCalls)
+	}
+	if m.screen != recoveryScreen {
+		t.Fatalf("screen after a failed sync = %v, want recoveryScreen", m.screen)
+	}
+	body := m.View().Content
+	for _, want := range []string{"Retry", "Main", "Chase", "Amex", "The bank is still preparing the data"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("recovery view = %q, want it to contain %q", body, want)
+		}
+	}
+
+	fake.syncAllResults = []app.SyncResult{
+		{ItemID: "item-1", Label: "Chase", Accounts: []model.AccountView{first}},
+		{ItemID: "item-2", Label: "Amex", Accounts: []model.AccountView{first}},
+	}
+	cmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // Retry
+	if fake.syncAllCalls != 2 {
+		t.Fatalf("SyncAll calls = %d, want the first call and the retry", fake.syncAllCalls)
+	}
+	runOperation(t, m, cmd) // the account refresh
+	if m.screen != mainScreen {
+		t.Fatalf("screen after a successful retry = %v, want mainScreen", m.screen)
+	}
+	if body := m.View().Content; strings.Contains(body, "Something went wrong") {
+		t.Errorf("main view = %q, want the failure left behind", body)
 	}
 }

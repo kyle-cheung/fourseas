@@ -86,6 +86,7 @@ type Model struct {
 	main          menuState
 	history       menuState
 	syncStates    []app.SyncState
+	syncResults   []app.SyncResult
 	accounts      accountsState
 	detail        detailState
 	prompt        promptState
@@ -115,7 +116,10 @@ const (
 	accountsOperation operation = iota
 	linkOperation
 	syncItemOperation
+	syncAllOperation
 	nicknameOperation
+	unlinkPreviewOperation
+	unlinkOperation
 )
 
 // progressMsg is one step of a long operation, sent from the operation's own
@@ -194,6 +198,39 @@ func (m *Model) startNickname(accountID, nickname string) tea.Cmd {
 	})
 }
 
+// startSyncAll fetches new data for every linked institution in one call. The
+// summary of the previous run is dropped here, so a result line always belongs
+// to the run the user just asked for.
+func (m *Model) startSyncAll() tea.Cmd {
+	m.syncResults = nil
+	cmd := m.start(syncAllOperation, func(ctx context.Context) (any, error) {
+		return m.app.SyncAll(ctx, m.report)
+	})
+	m.recovery.retry = func() tea.Cmd { return m.startSyncAll() }
+	return cmd
+}
+
+// startUnlinkPreview reads what a removal would delete. Nothing is changed yet,
+// so a failure can be run again with the same item.
+func (m *Model) startUnlinkPreview(itemID string) tea.Cmd {
+	cmd := m.start(unlinkPreviewOperation, func(ctx context.Context) (any, error) {
+		return m.app.UnlinkPreview(ctx, itemID)
+	})
+	m.recovery.retry = func() tea.Cmd { return m.startUnlinkPreview(itemID) }
+	return cmd
+}
+
+// startUnlink removes one institution and everything stored for it. App.Unlink
+// stops at the first step that fails and leaves the rest in place, so a failure
+// can be run again with the same item.
+func (m *Model) startUnlink(itemID string) tea.Cmd {
+	cmd := m.start(unlinkOperation, func(ctx context.Context) (any, error) {
+		return m.app.Unlink(ctx, itemID, m.report)
+	})
+	m.recovery.retry = func() tea.Cmd { return m.startUnlink(itemID) }
+	return cmd
+}
+
 // Update applies one message. While an operation runs, only progress, the
 // operation result, a resize, and ctrl+c are accepted.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -236,6 +273,7 @@ func (m *Model) finish(msg operationMsg) tea.Cmd {
 		m.accounts.rows = data.Accounts
 		m.accounts.cursor = clampCursor(m.accounts.cursor, len(data.Accounts))
 		m.syncStates = data.States
+		m.refreshDetail()
 	case linkOperation:
 		// Only the non-secret metadata of the new item is kept.
 		item, _ := msg.value.(app.LinkedItem)
@@ -244,10 +282,72 @@ func (m *Model) finish(msg operationMsg) tea.Cmd {
 	case syncItemOperation:
 		accounts, _ := msg.value.([]model.AccountView)
 		return m.askNicknames(accounts)
+	case syncAllOperation:
+		results, _ := msg.value.([]app.SyncResult)
+		return m.finishSyncAll(results)
 	case nicknameOperation:
-		return m.nextNickname()
+		if m.naming() {
+			return m.nextNickname()
+		}
+		return m.finishRename()
+	case unlinkPreviewOperation:
+		preview, _ := msg.value.(app.UnlinkData)
+		m.unlink = unlinkState{preview: preview}
+		m.screen = unlinkScreen
+	case unlinkOperation:
+		return m.finishUnlink()
 	}
 	return nil
+}
+
+// finishSyncAll keeps the summary of every item and reports a failure once.
+// SyncAll carries on after one item fails, so a failed item arrives as a result
+// and not as the error of the operation.
+func (m *Model) finishSyncAll(results []app.SyncResult) tea.Cmd {
+	m.syncResults = results
+	for _, result := range results {
+		if result.Err != nil {
+			// The retry the operation left is still the whole sync, which is
+			// what Retry must run.
+			return m.showFailure(result.Err)
+		}
+	}
+	return m.refreshAccounts()
+}
+
+// finishRename closes the rename prompt and reads the stored account again, so
+// the detail screen shows the saved name and not the typed one.
+func (m *Model) finishRename() tea.Cmd {
+	m.prompt.input.Blur()
+	m.prompt = promptState{}
+	m.screen = detailScreen
+	return m.refreshAccounts()
+}
+
+// finishUnlink drops every trace of the removed institution from this session
+// and shows the account list with the fresh data.
+func (m *Model) finishUnlink() tea.Cmd {
+	for _, view := range m.unlink.preview.Accounts {
+		delete(m.accounts.newItems, view.AccountID)
+	}
+	m.unlink = unlinkState{}
+	m.detail = detailState{}
+	m.screen = accountsScreen
+	return m.refreshAccounts()
+}
+
+// refreshDetail points the detail screen at the row the last refresh returned,
+// so a saved change is shown instead of the copy the screen was opened with.
+func (m *Model) refreshDetail() {
+	if m.detail.account.AccountID == "" {
+		return
+	}
+	for _, row := range m.accounts.rows {
+		if row.AccountID == m.detail.account.AccountID {
+			m.detail.account = row
+			return
+		}
+	}
 }
 
 // failed shows one failure. A name the store refused stays on its own prompt,
@@ -259,7 +359,15 @@ func (m *Model) failed(msg operationMsg) tea.Cmd {
 		m.screen = nicknameScreen
 		return m.prompt.input.Focus()
 	}
-	m.recovery.message = displayError(msg.err)
+	// The summary of an older sync does not describe this failure.
+	m.syncResults = nil
+	return m.showFailure(msg.err)
+}
+
+// showFailure opens the recovery screen for one error, with the ways out the
+// failed operation left.
+func (m *Model) showFailure(err error) tea.Cmd {
+	m.recovery.message = displayError(err)
 	m.recovery.cursor = 0
 	m.screen = recoveryScreen
 	return nil
@@ -317,6 +425,8 @@ func (m *Model) submitPrompt() tea.Cmd {
 		if m.naming() {
 			return m.startNickname(m.nicknameQueue[m.nicknameIndex].AccountID, m.prompt.input.Value())
 		}
+		// An empty queue means the prompt was opened to rename one account.
+		return m.startNickname(m.detail.account.AccountID, m.prompt.input.Value())
 	}
 	return nil
 }
@@ -386,6 +496,11 @@ func (m *Model) menuKey(msg tea.KeyPressMsg) tea.Cmd {
 	case tea.KeyEnter:
 		return m.activate()
 	case tea.KeyEsc:
+		if m.screen == unlinkScreen {
+			// Leaving the confirmation is a cancellation, so the preview of a
+			// removal that never ran is dropped.
+			m.unlink = unlinkState{}
+		}
 		m.screen = parent(m.screen)
 	default:
 		if msg.String() == "q" && quittable(m.screen) {
@@ -402,6 +517,10 @@ func (m *Model) moveCursor(delta int) {
 		m.main.cursor = clampCursor(m.main.cursor+delta, len(mainChoices))
 	case accountsScreen:
 		m.accounts.cursor = clampCursor(m.accounts.cursor+delta, len(m.accounts.rows))
+	case detailScreen:
+		m.detail.cursor = clampCursor(m.detail.cursor+delta, len(detailActions))
+	case unlinkScreen:
+		m.unlink.cursor = clampCursor(m.unlink.cursor+delta, len(unlinkActions))
 	case historyScreen:
 		m.history.cursor = clampCursor(m.history.cursor+delta, len(historyChoices))
 	case recoveryScreen:
@@ -422,12 +541,22 @@ func (m *Model) activate() tea.Cmd {
 			// amount when the item is created.
 			m.history = menuState{}
 			m.screen = historyScreen
+		case choiceSync:
+			return m.startSyncAll()
 		}
 	case accountsScreen:
 		if m.accounts.cursor < len(m.accounts.rows) {
 			m.detail = detailState{account: m.accounts.rows[m.accounts.cursor]}
 			m.screen = detailScreen
 		}
+	case detailScreen:
+		return m.activateDetail()
+	case unlinkScreen:
+		if m.unlink.cursor == unlinkConfirm {
+			return m.startUnlink(m.unlink.preview.ItemID)
+		}
+		m.unlink = unlinkState{}
+		m.screen = parent(unlinkScreen)
 	case historyScreen:
 		if m.history.cursor >= len(historyDays) {
 			return m.openPrompt(customDaysScreen, "days", "")
@@ -437,6 +566,17 @@ func (m *Model) activate() tea.Cmd {
 		return m.recoverWith(m.recovery.choices()[m.recovery.cursor])
 	}
 	return nil
+}
+
+// activateDetail runs the action the user chose for one account. The rename
+// prompt starts from the name the account holds now, and an empty value clears
+// that name.
+func (m *Model) activateDetail() tea.Cmd {
+	account := m.detail.account
+	if m.detail.cursor == detailUnlink {
+		return m.startUnlinkPreview(account.ItemID)
+	}
+	return m.openPrompt(nicknameScreen, accountName(account), account.Nickname)
 }
 
 // recoverWith runs the way out of a failure the user chose. Main always leaves

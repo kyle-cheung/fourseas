@@ -23,6 +23,25 @@ const (
 	choiceSync
 )
 
+// detailActions is the fixed order of the account detail screen.
+var detailActions = []string{"Rename", "Unlink institution"}
+
+// Positions inside detailActions.
+const (
+	detailRename = iota
+	detailUnlink
+)
+
+// unlinkActions is the fixed order of the removal confirmation. Cancel is
+// first, so the cursor never starts on the action that deletes data.
+var unlinkActions = []string{"Cancel", "Unlink"}
+
+// Positions inside unlinkActions.
+const (
+	unlinkCancel = iota
+	unlinkConfirm
+)
+
 // historyDays is how much history each fixed choice of the history screen asks
 // for. The first is the most a link may ask for, and is the default.
 var historyDays = []int{app.MaxLinkDays, 365, 90}
@@ -92,6 +111,8 @@ func (m *Model) body() string {
 		lines = m.historyLines()
 	case customDaysScreen, nicknameScreen:
 		lines = m.promptLines()
+	case unlinkScreen:
+		lines = m.unlinkLines()
 	case recoveryScreen:
 		lines = m.recoveryLines()
 	default:
@@ -119,7 +140,34 @@ func (m *Model) mainLines() []string {
 		}
 		lines = append(lines, truncate(row, m.contentWidth()))
 	}
+	lines = append(lines, m.syncSummary()...)
 	return append(lines, "", footer("↑/↓ move · enter select · q quit"))
+}
+
+// syncSummary is one line for every institution of the last sync, including
+// the ones that were skipped and the ones that failed. It is empty until a
+// sync has run.
+func (m *Model) syncSummary() []string {
+	if len(m.syncResults) == 0 {
+		return nil
+	}
+	lines := []string{"", blankMark + "Last sync:"}
+	for _, result := range m.syncResults {
+		lines = append(lines, truncate(blankMark+syncResultLine(result), m.contentWidth()))
+	}
+	return lines
+}
+
+// syncResultLine is how one institution's sync ended. The label is the stored
+// institution name, or the item id while no name is known.
+func syncResultLine(result app.SyncResult) string {
+	switch {
+	case result.Skipped:
+		return result.Label + ": skipped"
+	case result.Err != nil:
+		return result.Label + ": failed — " + displayError(result.Err)
+	}
+	return result.Label + ": " + plural(len(result.Accounts), "account")
 }
 
 // accountLines is every stored account, one row each.
@@ -153,7 +201,35 @@ func (m *Model) detailLines() []string {
 		}
 		lines = append(lines, truncate(blankMark+field[0]+": "+field[1], m.contentWidth()))
 	}
-	return append(lines, "", footer("esc back · q quit"))
+	lines = append(lines, "")
+	for i, choice := range detailActions {
+		lines = append(lines, mark(i == m.detail.cursor)+choice)
+	}
+	return append(lines, "", footer("↑/↓ move · enter select · esc back · q quit"))
+}
+
+// unlinkLines is everything one removal would delete, and the two ways out of
+// the confirmation.
+func (m *Model) unlinkLines() []string {
+	preview := m.unlink.preview
+	lines := []string{header("Unlink " + preview.Institution), "",
+		blankMark + "This deletes every stored row of this institution:"}
+	for _, view := range preview.Accounts {
+		lines = append(lines, truncate(blankMark+"Account: "+accountName(view), m.contentWidth()))
+	}
+	for _, row := range [][2]string{
+		{"Transactions", strconv.FormatInt(preview.Rows.Transactions, 10)},
+		{"Accounts", strconv.FormatInt(preview.Rows.Accounts, 10)},
+		{"Sync state", strconv.FormatInt(preview.Rows.SyncState, 10)},
+		{"Institutions", strconv.FormatInt(preview.Rows.Institutions, 10)},
+	} {
+		lines = append(lines, truncate(blankMark+row[0]+": "+row[1], m.contentWidth()))
+	}
+	lines = append(lines, "")
+	for i, choice := range unlinkActions {
+		lines = append(lines, mark(i == m.unlink.cursor)+choice)
+	}
+	return append(lines, "", footer("↑/↓ move · enter select · esc cancel"))
 }
 
 // promptLines is one text prompt with its own error, if it has one.
@@ -181,6 +257,7 @@ func (m *Model) recoveryLines() []string {
 	for i, choice := range m.recovery.choices() {
 		lines = append(lines, mark(i == m.recovery.cursor)+choice)
 	}
+	lines = append(lines, m.syncSummary()...)
 	return append(lines, "", footer("↑/↓ move · enter select · esc back · ctrl+c quit"))
 }
 
@@ -300,11 +377,14 @@ func since(then, now time.Time) string {
 }
 
 // count is a whole number of units, written as a time in the past.
-func count(n int, unit string) string {
+func count(n int, unit string) string { return plural(n, unit) + " ago" }
+
+// plural is a whole number of units, with the unit written for that number.
+func plural(n int, unit string) string {
 	if n == 1 {
-		return "1 " + unit + " ago"
+		return "1 " + unit
 	}
-	return strconv.Itoa(n) + " " + unit + "s ago"
+	return strconv.Itoa(n) + " " + unit + "s"
 }
 
 // displayError is the only place a stored error becomes user wording.
