@@ -51,6 +51,19 @@ func (s *Source) Sync(ctx context.Context, cursor string) (provider.Batch, error
 	if err != nil {
 		return provider.Batch{}, apiError(fmt.Sprintf("sync item %s", s.itemID), err, httpResp)
 	}
+	accounts := resp.Accounts
+	if resp.GetTransactionsUpdateStatus() == plaidsdk.TRANSACTIONSUPDATESTATUS_NOT_READY && len(accounts) == 0 {
+		req := plaidsdk.NewAccountsGetRequest(s.accessToken)
+		accountResp, httpResp, err := s.client.PlaidApi.AccountsGet(ctx).
+			AccountsGetRequest(*req).Execute()
+		if err != nil {
+			return provider.Batch{}, apiError(fmt.Sprintf("get accounts for item %s", s.itemID), err, httpResp)
+		}
+		accounts = accountResp.Accounts
+		if len(accounts) == 0 {
+			return provider.Batch{}, fmt.Errorf("sync item %s: %w", s.itemID, provider.ErrProductNotReady)
+		}
+	}
 
 	added, err := toModels(resp.Added, s.itemID)
 	if err != nil {
@@ -70,9 +83,9 @@ func (s *Source) Sync(ctx context.Context, cursor string) (provider.Batch, error
 		Added:      added,
 		Modified:   modified,
 		RemovedIDs: removed,
-		// Plaid returns the whole account list with every page, so balances
-		// arrive without a second call.
-		Accounts:   toAccounts(resp.Accounts, s.itemID, time.Now().UTC()),
+		// A ready sync carries the accounts. The fallback above supplies them
+		// while the transaction data is still pending.
+		Accounts:   toAccounts(accounts, s.itemID, time.Now().UTC()),
 		NextCursor: resp.NextCursor,
 		HasMore:    resp.HasMore,
 	}, nil
