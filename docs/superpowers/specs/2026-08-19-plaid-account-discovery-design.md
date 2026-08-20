@@ -3,8 +3,8 @@
 ## Problem
 
 Plaid can return `transactions_update_status: NOT_READY` from the first
-`/transactions/sync` call. That response has no transactions, no cursor, and no
-accounts. Fourseas treats it as a successful empty sync. The TUI then skips the
+`/transactions/sync` call. That response can have no transactions or accounts.
+Fourseas treats it as a successful empty sync. The TUI then skips the
 nickname prompts and returns to the main menu even though the access token was
 saved.
 
@@ -15,25 +15,20 @@ which makes all duplicate Items visible.
 ## Design
 
 `plaid.Source.Sync` will inspect `transactions_update_status`. When the status
-is `NOT_READY`, it will call `/accounts/get` with the same access token.
-`/accounts/get` does not wait for Transactions, and it returns the active
-accounts of a linked Item from Plaid's cache.
+is `NOT_READY` and the response has no accounts, it will call `/accounts/get`
+with the same access token. If `/transactions/sync` returned accounts, the
+source will use them without making the extra call. `/accounts/get` does not
+wait for Transactions, and it returns the active accounts of a linked Item from
+Plaid's cache.
 
 The source will convert those accounts with the existing `toAccounts` function
-and return them in the same `provider.Batch`. The batch will have no transaction
-changes and an empty cursor. The existing page transaction will store the
-accounts and the empty cursor together. `App.SyncItem` will then return the new
-account views, and the existing TUI flow will open one nickname prompt for each
-account.
+and return them in the same `provider.Batch`. The batch will keep
+`resp.NextCursor`, as it does for every other successful response. The existing
+page transaction will store the accounts and cursor together. `App.SyncItem`
+will then return the new account views, and the existing TUI flow will open one
+nickname prompt for each account.
 
-The batch will also carry a boolean that says the transaction data is pending.
-The application layer will use it for the progress line:
-
-```text
-Accounts ready; transactions are still being prepared
-```
-
-The add flow will not wait. A later Sync call will use the empty cursor and
+The add flow will not wait. A later Sync call will use the saved cursor and
 fetch the transactions when Plaid has prepared them.
 
 If `/accounts/get` fails, the source will return that API error. If Plaid reports
@@ -44,9 +39,9 @@ recovery screen. Retry runs `SyncItem`; it never starts Link again.
 ## Accepted limitation
 
 The fallback page records a successful sync with zero transactions. The account
-list does not show a persistent warning. The progress line states that the
-transactions are pending, and the next Sync call fills them. This change does
-not add polling, a timer, or a new TUI state.
+list does not show a persistent warning. The existing progress line reports
+zero added, modified, and removed transactions. The next Sync call fills them.
+This change does not add polling, a timer, or a new TUI state.
 
 ## Duplicate Items
 
@@ -58,9 +53,7 @@ duplicate prevention is a separate change. It must compare Plaid Link
 
 - A Plaid source test will return `NOT_READY` from `/transactions/sync` and
   accounts from `/accounts/get`. It will verify the fallback request, mapped
-  accounts, empty transaction changes, empty cursor, and pending flag.
-- An application sync test will verify that a pending batch stores and returns
-  the accounts and emits the pending progress line.
+  accounts, empty transaction changes, and unchanged `next_cursor`.
 - Existing TUI tests already verify that returned accounts open the nickname
   flow and that `ErrProductNotReady` retries `SyncItem` instead of Link.
 
