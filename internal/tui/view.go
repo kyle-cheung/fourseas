@@ -24,13 +24,14 @@ const (
 	choiceSync
 )
 
-// detailActions is the fixed order of the account detail screen.
-var detailActions = []string{"Rename", "Unlink institution"}
+// addSetupChoices is the fixed order of the new-account setup screen.
+var addSetupChoices = []string{"Transaction history", "Enable Liabilities API?", "Continue"}
 
-// Positions inside detailActions.
+// Positions inside addSetupChoices.
 const (
-	detailRename = iota
-	detailUnlink
+	addHistory = iota
+	addLiabilities
+	addContinue
 )
 
 // unlinkActions is the fixed order of the removal confirmation. Cancel is
@@ -102,6 +103,8 @@ func (m *Model) body() string {
 		lines = m.accountLines()
 	case detailScreen:
 		lines = m.detailLines()
+	case addSetupScreen:
+		lines = m.addSetupLines()
 	case historyScreen:
 		lines = m.historyLines()
 	case customDaysScreen, nicknameScreen:
@@ -158,6 +161,10 @@ func (m *Model) runningLine() string {
 		return "Reading"
 	case unlinkOperation:
 		return "Removing"
+	case enableLiabilitiesOperation:
+		return "Enabling statement data"
+	case postEnableRefreshOperation:
+		return "Refreshing accounts"
 	}
 	return "Loading"
 }
@@ -241,10 +248,61 @@ func (m *Model) detailLines() []string {
 		lines = append(lines, m.fieldRow(field[0], field[1]))
 	}
 	lines = append(lines, "")
-	for i, choice := range detailActions {
-		lines = append(lines, m.menuRow(i == m.detail.cursor, choice, ""))
+	for i, action := range m.detailActions() {
+		lines = append(lines, m.menuRow(i == m.detail.cursor, detailActionLabel(action), ""))
+		if action == detailEnableLiabilities {
+			lines = append(lines, m.choiceNoteLines(
+				"This enables statement data for the whole institution.")...)
+		}
 	}
 	return append(lines, m.footer("↑/↓ move · enter select · esc back · q quit")...)
+}
+
+func detailActionLabel(action detailAction) string {
+	switch action {
+	case detailRename:
+		return "Rename"
+	case detailEnableLiabilities:
+		return "Enable statement data"
+	case detailUnlink:
+		return "Unlink institution"
+	}
+	return ""
+}
+
+// addSetupLines shows the settings that apply when the new item is created.
+func (m *Model) addSetupLines() []string {
+	liabilities := "No"
+	if m.add.liabilities {
+		liabilities = "Yes"
+	}
+	notes := map[int]string{
+		addHistory:     strconv.Itoa(m.add.days) + " days",
+		addLiabilities: liabilities,
+	}
+	lines := m.header("Add account")
+	for i, choice := range addSetupChoices {
+		lines = append(lines, m.menuRow(i == m.add.cursor, choice, notes[i]))
+		if i == addLiabilities {
+			lines = append(lines, m.choiceNoteLines(
+				"Fetch credit card statement, payment, and interest details.")...)
+		}
+	}
+	return append(lines, m.footer("↑/↓ move · enter select · esc back")...)
+}
+
+// choiceNoteLines keeps the explanation under a menu choice complete at every
+// terminal width. Repeating the indent makes wrapped lines part of the same
+// choice.
+func (m *Model) choiceNoteLines(note string) []string {
+	prefix := blankMark + "  "
+	width := max(m.contentWidth()-lipgloss.Width(prefix)-rightPad, 1)
+	wrapped := wrapText(note, width)
+	lines := make([]string, 0, len(wrapped))
+	for _, line := range wrapped {
+		lines = append(lines, truncate(prefix+mutedStyle.Render(line), m.contentWidth()))
+	}
+	return lines
 }
 
 // unlinkLines is everything one removal would delete, and the two ways out of
