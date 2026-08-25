@@ -65,12 +65,14 @@ liability data uses `—`. The latest-payment cell needs both its date and amoun
 if Plaid omits either value, the cell uses `—`.
 
 The table uses `charm.land/lipgloss/v2/table`. It has no outer border and uses
-the current heading and muted styles. Its width is the TUI content width. Cells
-do not wrap, so one account always uses one terminal line. Lipgloss reduces and
-clips columns when the terminal is narrow.
+the current heading and muted styles. Its width is the TUI content width less
+the existing `blankMark` gutter. The rendered block gets that gutter on every
+line, so it aligns with the rest of the screen. Cells do not wrap, so one
+account always uses one terminal line. Lipgloss reduces and clips columns when
+the terminal is narrow.
 
-When there are no accounts, the table area says `No accounts are linked yet.`
-The menu stays usable.
+When there are no accounts, the main screen reuses the existing account-list
+empty state: `No accounts are linked yet.` The menu stays usable.
 
 ## New link setup
 
@@ -144,6 +146,11 @@ records the enabled setting, and fetches the first liability snapshot.
 `fourseas accounts` adds due date and latest payment columns. `fourseas sync`
 refreshes enabled liability data without a new flag.
 
+The CLI keeps its existing `tabwriter`, and the TUI uses Lipgloss Table. Both
+presenters call the same terminal-neutral helpers for money-with-currency, dates,
+and latest-payment text. This keeps values identical without coupling either
+presenter to the other's renderer.
+
 ## Local configuration
 
 Each saved token Item gains a Boolean `liabilities` field.
@@ -163,15 +170,18 @@ ID, payment due date, last payment date, last payment amount, and fetch time.
 Money uses `decimal.NullDecimal`.
 
 Plaid mapping reads `next_payment_due_date`, `last_payment_date`, and
-`last_payment_amount`. It validates provider dates and converts the one API
-floating-point amount to a decimal at the provider boundary. Plaid models
-`account_id` as nullable. A liability with a null or empty account ID is skipped
-instead of being written with an empty primary-key value.
+`last_payment_amount`. Both dates are nullable `YYYY-MM-DD` strings. A null,
+empty, or malformed date maps to an absent value and does not fail sync. The one
+API floating-point amount becomes a decimal at the provider boundary. Plaid
+models `account_id` as nullable. A liability with a null or empty account ID is
+skipped instead of being written with an empty primary-key value.
 
 Liability retrieval stays separate from `Provider.Sync`, which paginates
-transactions. A small liability-capable provider interface adds one
-`Liabilities(context.Context)` operation. The application calls it at most once
-for each enabled Item in one sync, after transaction pagination completes.
+transactions. The Plaid package exposes
+`plaid.Liabilities(context.Context, Config, accessToken)` as a package function,
+in the same style as `plaid.Remove`. The application calls it at most once for
+each enabled Item in one sync, after transaction pagination completes. A new
+provider interface is deferred until a second provider needs this operation.
 
 ## Storage
 
@@ -226,8 +236,8 @@ Result rules:
   prepares Liabilities.
 - `ADDITIONAL_CONSENT_REQUIRED` shows `—`, stays in
   `sync_state.last_status`, and makes the enable action available.
-- A temporary Plaid or mapping error keeps stored liability data and marks the
-  institution sync as failed.
+- A temporary Plaid error keeps stored liability data and marks the institution
+  sync as failed.
 - Context cancellation follows the existing behavior and records no new status.
 
 The current balance still comes from the account data returned by Transactions.
@@ -257,14 +267,14 @@ Tests protect the policy boundaries with a small number of broad cases:
 - One Link request test covers the default-on setting and explicit opt-out.
 - One TUI setup test covers the default, toggle, and value passed to Link.
 - One Plaid mapping test covers values, nulls, a nullable account ID, decimal
-  conversion, and dates.
+  conversion, and malformed dates.
 - One store test covers replace-all upserts, including null fields.
 - One application test proves that pagination causes one liability call per Item
   and covers unsupported, not-ready, missing-consent, and temporary errors.
 - One update-mode test proves that the request omits `products`, keeps the access
   token, and skips token exchange.
-- Focused CLI and TUI assertions cover commands, main-menu placement, normal
-  width, and narrow width.
+- Focused CLI and TUI assertions cover commands, shared formatting, main-menu
+  placement, the table gutter, normal width, and narrow width.
 - One store startup test proves that a version 2 database gains the additive
   table without a reset.
 
