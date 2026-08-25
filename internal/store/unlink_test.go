@@ -3,12 +3,13 @@ package store
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/kyle-cheung/fourseas/providence/internal/model"
 )
 
-// seedTwoItems stores one transaction, one account, one institution, and one
-// cursor for each of two items.
+// seedTwoItems stores one transaction, one account, one liability, one
+// institution, and one cursor for each of two items.
 func seedTwoItems(t *testing.T, s *Store) {
 	t.Helper()
 	ctx := context.Background()
@@ -24,6 +25,9 @@ func seedTwoItems(t *testing.T, s *Store) {
 	if err := s.UpsertAccounts(ctx, []model.Account{firstAccount, secondAccount}); err != nil {
 		t.Fatalf("upsert accounts: %v", err)
 	}
+	fetchedAt := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
+	insertRawLiability(t, s, "plaid", "item-1", firstAccount.AccountID, fetchedAt)
+	insertRawLiability(t, s, "plaid", "item-2", secondAccount.AccountID, fetchedAt)
 
 	firstInstitution, secondInstitution := sampleInstitution(), sampleInstitution()
 	secondInstitution.ItemID, secondInstitution.InstitutionName = "item-2", "Scotiabank"
@@ -55,7 +59,7 @@ func countRows(t *testing.T, s *Store, table, itemID string) int {
 // assertItemRows checks how many rows each table holds for one item.
 func assertItemRows(t *testing.T, s *Store, itemID string, want int) {
 	t.Helper()
-	for _, table := range []string{"transactions", "accounts", "institutions", "sync_state"} {
+	for _, table := range []string{"transactions", "accounts", "account_liabilities", "institutions", "sync_state"} {
 		if got := countRows(t, s, table, itemID); got != want {
 			t.Errorf("%s of %s = %d rows, want %d", table, itemID, got, want)
 		}

@@ -18,10 +18,13 @@ const accountColumns = `
 // behind. The join is a LEFT JOIN so that an account whose institution row is
 // missing is still listed.
 const accountViewSQL = `
-SELECT ` + accountColumns + `, i.institution_name
+SELECT ` + accountColumns + `, i.institution_name,
+	l.item_id, l.payment_due_date, l.last_payment_date, l.last_payment_amount, l.fetched_at
 FROM accounts a
 LEFT JOIN institutions i
-	ON i.provider = a.provider AND i.item_id = a.item_id`
+	ON i.provider = a.provider AND i.item_id = a.item_id
+LEFT JOIN account_liabilities l
+	ON l.provider = a.provider AND l.item_id = a.item_id AND l.account_id = a.account_id`
 
 // upsertAccountSQL keeps what the user owns and takes what the provider owns.
 // A sync knows nothing about nicknames or tracking, so it must not erase them.
@@ -127,8 +130,11 @@ func scanAccountView(rows *sql.Rows) (model.AccountView, error) {
 		view                                      model.AccountView
 		itemID, name, mask, kind, subtype         sql.NullString
 		currency, nickname, institutionName       sql.NullString
-		current, available, limit                 any
+		liabilityItemID                           sql.NullString
+		current, available, limit, paymentAmount  any
 		balanceUpdatedAt, firstSeenAt, lastSeenAt sql.NullTime
+		paymentDueDate, lastPaymentDate           sql.NullTime
+		liabilityFetchedAt                        sql.NullTime
 	)
 	a := &view.Account
 	err := rows.Scan(
@@ -137,6 +143,7 @@ func scanAccountView(rows *sql.Rows) (model.AccountView, error) {
 		&current, &available, &limit, &balanceUpdatedAt,
 		&firstSeenAt, &lastSeenAt,
 		&institutionName,
+		&liabilityItemID, &paymentDueDate, &lastPaymentDate, &paymentAmount, &liabilityFetchedAt,
 	)
 	if err != nil {
 		return model.AccountView{}, fmt.Errorf("scan account: %w", err)
@@ -167,6 +174,21 @@ func scanAccountView(rows *sql.Rows) (model.AccountView, error) {
 		a.LastSeenAt = *when
 	}
 	view.InstitutionName = text(institutionName)
+	if liabilityFetchedAt.Valid {
+		amount, err := toNullDecimal(paymentAmount)
+		if err != nil {
+			return model.AccountView{}, fmt.Errorf("last_payment_amount: %w", err)
+		}
+		view.Liability = &model.CreditLiability{
+			Provider:          a.Provider,
+			ItemID:            text(liabilityItemID),
+			AccountID:         a.AccountID,
+			PaymentDueDate:    timePtr(paymentDueDate),
+			LastPaymentDate:   timePtr(lastPaymentDate),
+			LastPaymentAmount: amount,
+			FetchedAt:         liabilityFetchedAt.Time,
+		}
+	}
 	return view, nil
 }
 
