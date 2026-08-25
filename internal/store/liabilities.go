@@ -10,8 +10,9 @@ import (
 const insertLiabilitySQL = `
 INSERT INTO account_liabilities (
 	provider, item_id, account_id,
-	payment_due_date, last_payment_date, last_payment_amount, fetched_at
-) VALUES (?, ?, ?, ?, ?, ?, ?)`
+	payment_due_date, last_payment_date, last_payment_amount,
+	last_statement_balance, fetched_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 
 // ReplaceLiabilities replaces the complete liability snapshot for one item.
 func (s *Store) ReplaceLiabilities(
@@ -51,7 +52,7 @@ func (s *Store) ReplaceLiabilities(
 			_, err := stmt.ExecContext(ctx,
 				provider, itemID, row.AccountID,
 				timeArg(row.PaymentDueDate), timeArg(row.LastPaymentDate),
-				nullDecimalArg(row.LastPaymentAmount), row.FetchedAt)
+				nullDecimalArg(row.LastPaymentAmount), nullDecimalArg(row.LastStatementBalance), row.FetchedAt)
 			if err != nil {
 				return fmt.Errorf("insert liability %s/%s: %w", provider, row.AccountID, err)
 			}

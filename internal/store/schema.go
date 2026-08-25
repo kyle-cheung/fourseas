@@ -100,8 +100,9 @@ CREATE TABLE IF NOT EXISTS account_liabilities (
 	account_id          VARCHAR NOT NULL,
 	payment_due_date    DATE,
 	last_payment_date   DATE,
-	last_payment_amount DECIMAL(18,4),
-	fetched_at          TIMESTAMP NOT NULL,
+	last_payment_amount     DECIMAL(18,4),
+	last_statement_balance DECIMAL(18,4),
+	fetched_at              TIMESTAMP NOT NULL,
 	PRIMARY KEY (provider, account_id)
 );
 

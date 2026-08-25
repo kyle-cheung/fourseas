@@ -96,6 +96,9 @@ func TestLiabilitiesMapsCreditRowsAndSkipsInvalidAccountIDs(t *testing.T) {
 	if !full.LastPaymentAmount.Valid || full.LastPaymentAmount.Decimal.String() != "123.45" {
 		t.Errorf("last payment amount = %v, want exact decimal 123.45", full.LastPaymentAmount)
 	}
+	if !full.LastStatementBalance.Valid || full.LastStatementBalance.Decimal.String() != "456.78" {
+		t.Errorf("last statement balance = %v, want exact decimal 456.78", full.LastStatementBalance)
+	}
 	wantDueDate := time.Date(2026, time.September, 15, 0, 0, 0, 0, time.UTC)
 	wantLastPaymentDate := time.Date(2026, time.August, 10, 0, 0, 0, 0, time.UTC)
 	if full.PaymentDueDate == nil || !full.PaymentDueDate.Equal(wantDueDate) {
@@ -112,8 +115,9 @@ func TestLiabilitiesMapsCreditRowsAndSkipsInvalidAccountIDs(t *testing.T) {
 	if nullFields.AccountID != "credit-null" {
 		t.Errorf("second account ID = %q, want credit-null", nullFields.AccountID)
 	}
-	if nullFields.PaymentDueDate != nil || nullFields.LastPaymentDate != nil || nullFields.LastPaymentAmount.Valid {
-		t.Errorf("null fields = %+v, want absent dates and amount", nullFields)
+	if nullFields.PaymentDueDate != nil || nullFields.LastPaymentDate != nil ||
+		nullFields.LastPaymentAmount.Valid || nullFields.LastStatementBalance.Valid {
+		t.Errorf("null fields = %+v, want absent dates and amounts", nullFields)
 	}
 
 	malformedDates := got[2]

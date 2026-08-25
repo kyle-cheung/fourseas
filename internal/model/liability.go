@@ -12,8 +12,9 @@ type CreditLiability struct {
 	ItemID    string
 	AccountID string
 
-	PaymentDueDate    *time.Time
-	LastPaymentDate   *time.Time
-	LastPaymentAmount decimal.NullDecimal
-	FetchedAt         time.Time
+	PaymentDueDate       *time.Time
+	LastPaymentDate      *time.Time
+	LastPaymentAmount    decimal.NullDecimal
+	LastStatementBalance decimal.NullDecimal
+	FetchedAt            time.Time
 }

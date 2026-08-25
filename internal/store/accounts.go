@@ -19,7 +19,8 @@ const accountColumns = `
 // missing is still listed.
 const accountViewSQL = `
 SELECT ` + accountColumns + `, i.institution_name,
-	l.item_id, l.payment_due_date, l.last_payment_date, l.last_payment_amount, l.fetched_at
+	l.item_id, l.payment_due_date, l.last_payment_date, l.last_payment_amount,
+	l.last_statement_balance, l.fetched_at
 FROM accounts a
 LEFT JOIN institutions i
 	ON i.provider = a.provider AND i.item_id = a.item_id
@@ -132,6 +133,7 @@ func scanAccountView(rows *sql.Rows) (model.AccountView, error) {
 		currency, nickname, institutionName       sql.NullString
 		liabilityItemID                           sql.NullString
 		current, available, limit, paymentAmount  any
+		statementBalance                          any
 		balanceUpdatedAt, firstSeenAt, lastSeenAt sql.NullTime
 		paymentDueDate, lastPaymentDate           sql.NullTime
 		liabilityFetchedAt                        sql.NullTime
@@ -143,7 +145,8 @@ func scanAccountView(rows *sql.Rows) (model.AccountView, error) {
 		&current, &available, &limit, &balanceUpdatedAt,
 		&firstSeenAt, &lastSeenAt,
 		&institutionName,
-		&liabilityItemID, &paymentDueDate, &lastPaymentDate, &paymentAmount, &liabilityFetchedAt,
+		&liabilityItemID, &paymentDueDate, &lastPaymentDate, &paymentAmount,
+		&statementBalance, &liabilityFetchedAt,
 	)
 	if err != nil {
 		return model.AccountView{}, fmt.Errorf("scan account: %w", err)
@@ -179,14 +182,19 @@ func scanAccountView(rows *sql.Rows) (model.AccountView, error) {
 		if err != nil {
 			return model.AccountView{}, fmt.Errorf("last_payment_amount: %w", err)
 		}
+		statement, err := toNullDecimal(statementBalance)
+		if err != nil {
+			return model.AccountView{}, fmt.Errorf("last_statement_balance: %w", err)
+		}
 		view.Liability = &model.CreditLiability{
-			Provider:          a.Provider,
-			ItemID:            text(liabilityItemID),
-			AccountID:         a.AccountID,
-			PaymentDueDate:    timePtr(paymentDueDate),
-			LastPaymentDate:   timePtr(lastPaymentDate),
-			LastPaymentAmount: amount,
-			FetchedAt:         liabilityFetchedAt.Time,
+			Provider:             a.Provider,
+			ItemID:               text(liabilityItemID),
+			AccountID:            a.AccountID,
+			PaymentDueDate:       timePtr(paymentDueDate),
+			LastPaymentDate:      timePtr(lastPaymentDate),
+			LastPaymentAmount:    amount,
+			LastStatementBalance: statement,
+			FetchedAt:            liabilityFetchedAt.Time,
 		}
 	}
 	return view, nil

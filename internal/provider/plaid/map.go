@@ -163,13 +163,14 @@ func toCreditLiabilities(rows []plaidsdk.CreditCardLiability, itemID string, fet
 		}
 
 		out = append(out, model.CreditLiability{
-			Provider:          ProviderName,
-			ItemID:            itemID,
-			AccountID:         accountID,
-			PaymentDueDate:    nullableLiabilityDate(row.GetNextPaymentDueDateOk()),
-			LastPaymentDate:   nullableLiabilityDate(row.GetLastPaymentDateOk()),
-			LastPaymentAmount: optionalAmount(row.GetLastPaymentAmountOk()),
-			FetchedAt:         fetchedAt,
+			Provider:             ProviderName,
+			ItemID:               itemID,
+			AccountID:            accountID,
+			PaymentDueDate:       nullableLiabilityDate(row.GetNextPaymentDueDateOk()),
+			LastPaymentDate:      nullableLiabilityDate(row.GetLastPaymentDateOk()),
+			LastPaymentAmount:    optionalAmount(row.GetLastPaymentAmountOk()),
+			LastStatementBalance: optionalAmount(row.GetLastStatementBalanceOk()),
+			FetchedAt:            fetchedAt,
 		})
 	}
 	return out

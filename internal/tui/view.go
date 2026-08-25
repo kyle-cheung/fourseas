@@ -211,7 +211,7 @@ func (m *Model) accountSummaryLines(now time.Time) []string {
 	}
 
 	t := table.New().
-		Headers("Account", "Balance", "Due", "Last payment").
+		Headers("Account", "Cur. balance", "Stmt balance", "Due", "Last payment").
 		Wrap(false).
 		BorderTop(false).
 		BorderBottom(false).
@@ -225,17 +225,16 @@ func (m *Model) accountSummaryLines(now time.Time) []string {
 			if row == table.HeaderRow {
 				style = headingStyle
 			}
-			if col < 3 {
+			if col < 4 {
 				style = style.PaddingRight(2)
 			}
 			return style
 		})
 
 	for _, account := range m.accounts.rows {
-		var due, payment string
-		if account.Liability == nil {
-			due, payment = "—", "—"
-		} else {
+		statement, due, payment := "—", "—", "—"
+		if account.Liability != nil {
+			statement = accountformat.Money(account.Liability.LastStatementBalance, account.Currency)
 			due = accountformat.Date(account.Liability.PaymentDueDate, now)
 			payment = accountformat.LatestPayment(
 				account.Liability.LastPaymentDate,
@@ -244,7 +243,7 @@ func (m *Model) accountSummaryLines(now time.Time) []string {
 				now,
 			)
 		}
-		t.Row(accountName(account), accountformat.Money(account.BalanceCurrent, account.Currency), due, payment)
+		t.Row(accountName(account), accountformat.Money(account.BalanceCurrent, account.Currency), statement, due, payment)
 	}
 
 	lines := strings.Split(t.String(), "\n")

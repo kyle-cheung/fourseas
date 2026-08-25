@@ -29,6 +29,20 @@ func TestSchemaIsCreatedFromNothingAndStamped(t *testing.T) {
 			t.Errorf("table %s is missing: %v", table, err)
 		}
 	}
+
+	var column string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT column_name
+		FROM information_schema.columns
+		WHERE table_schema = 'main'
+		  AND table_name = 'account_liabilities'
+		  AND column_name = 'last_statement_balance'`).Scan(&column)
+	if err != nil {
+		t.Fatalf("read statement-balance column: %v", err)
+	}
+	if column != "last_statement_balance" {
+		t.Errorf("liability column = %q, want last_statement_balance", column)
+	}
 }
 
 func TestTransactionsTableDoesNotPersistConversionFields(t *testing.T) {

@@ -61,8 +61,9 @@ func TestReplaceLiabilitiesReplacesTheWholeItemAndClearsNulls(t *testing.T) {
 		t.Errorf("liability identity = %s/%s/%s, want plaid/item-1/%s",
 			got.Provider, got.ItemID, got.AccountID, kept.AccountID)
 	}
-	if got.PaymentDueDate != nil || got.LastPaymentDate != nil || got.LastPaymentAmount.Valid {
-		t.Errorf("nullable payment fields = %+v, want all fields null", got)
+	if got.PaymentDueDate != nil || got.LastPaymentDate != nil ||
+		got.LastPaymentAmount.Valid || got.LastStatementBalance.Valid {
+		t.Errorf("nullable liability fields = %+v, want all fields null", got)
 	}
 	if !got.FetchedAt.Equal(newFetchedAt) {
 		t.Errorf("FetchedAt = %v, want %v", got.FetchedAt, newFetchedAt)
@@ -128,6 +129,10 @@ func TestReplaceLiabilitiesRollsBackWhenALaterInsertFails(t *testing.T) {
 	wantAmount := decimal.RequireFromString("50.2500")
 	if !got.LastPaymentAmount.Valid || !got.LastPaymentAmount.Decimal.Equal(wantAmount) {
 		t.Errorf("LastPaymentAmount = %+v, want 50.2500", got.LastPaymentAmount)
+	}
+	wantStatement := decimal.RequireFromString("50.2500")
+	if !got.LastStatementBalance.Valid || !got.LastStatementBalance.Decimal.Equal(wantStatement) {
+		t.Errorf("LastStatementBalance = %+v, want 50.2500", got.LastStatementBalance)
 	}
 }
 
@@ -209,11 +214,13 @@ func insertRawLiability(t *testing.T, s *Store, provider, itemID, accountID stri
 	_, err := s.db.ExecContext(context.Background(), `
 		INSERT INTO account_liabilities (
 			provider, item_id, account_id,
-			payment_due_date, last_payment_date, last_payment_amount, fetched_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			payment_due_date, last_payment_date, last_payment_amount,
+			last_statement_balance, fetched_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		provider, itemID, accountID,
 		time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC),
+		decimal.RequireFromString("50.2500").String(),
 		decimal.RequireFromString("50.2500").String(), fetchedAt)
 	if err != nil {
 		t.Fatalf("insert raw liability %s/%s: %v", itemID, accountID, err)

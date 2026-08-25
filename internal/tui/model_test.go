@@ -413,9 +413,10 @@ func TestMainAccountSummaryTable(t *testing.T) {
 	}
 	accounts[0].Currency = "usd"
 	accounts[0].Liability = &model.CreditLiability{
-		PaymentDueDate:    &due,
-		LastPaymentDate:   &paid,
-		LastPaymentAmount: decimal.NewNullDecimal(decimal.NewFromInt(500)),
+		PaymentDueDate:       &due,
+		LastPaymentDate:      &paid,
+		LastPaymentAmount:    decimal.NewNullDecimal(decimal.NewFromInt(500)),
+		LastStatementBalance: decimal.NewNullDecimal(decimal.NewFromInt(1000)),
 	}
 	accounts[1].Currency = "cad"
 	accounts[1].Liability = &model.CreditLiability{
@@ -433,8 +434,8 @@ func TestMainAccountSummaryTable(t *testing.T) {
 	body := content(m)
 
 	for _, want := range []string{
-		"Account", "Balance", "Due", "Last payment",
-		"Amex Daily", "1,284.21 USD", "Sep 12", "Aug 20 · 500.00 USD",
+		"Account", "Cur. balance", "Stmt balance", "Due", "Last payment",
+		"Amex Daily", "1,284.21 USD", "1,000.00 USD", "Sep 12", "Aug 20 · 500.00 USD",
 		"Scotia Visa", "320.10 CAD", "Dec 05, 2025",
 		"acc-3", "2,400.00 JPY", "Cash reserve", "-810.00 CAD",
 	} {
@@ -442,8 +443,8 @@ func TestMainAccountSummaryTable(t *testing.T) {
 			t.Errorf("main view = %q, want it to contain %q", body, want)
 		}
 	}
-	if got := strings.Count(body, "—"); got != 5 {
-		t.Errorf("main view has %d missing values, want 5 for partial and absent liability data: %q", got, body)
+	if got := strings.Count(body, "—"); got != 8 {
+		t.Errorf("main view has %d missing values, want 8 for absent liability data: %q", got, body)
 	}
 
 	wordmark := strings.Index(body, brandName+" "+brandMark)
@@ -550,9 +551,10 @@ func TestMainAccountSummaryTableAtNarrowWidth(t *testing.T) {
 		account("acc-4", "Cash reserve", "Cash", "4004", "Wealthsimple", -810),
 	}
 	accounts[0].Liability = &model.CreditLiability{
-		PaymentDueDate:    &due,
-		LastPaymentDate:   &paid,
-		LastPaymentAmount: decimal.NewNullDecimal(decimal.NewFromInt(500)),
+		PaymentDueDate:       &due,
+		LastPaymentDate:      &paid,
+		LastPaymentAmount:    decimal.NewNullDecimal(decimal.NewFromInt(500)),
+		LastStatementBalance: decimal.NewNullDecimal(decimal.NewFromInt(1000)),
 	}
 
 	m := ready(t, &fakeService{data: app.AccountData{Accounts: accounts}})
