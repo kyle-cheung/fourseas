@@ -28,6 +28,7 @@ type service interface {
 	Link(context.Context, int, bool, app.Progress) (app.LinkedItem, error)
 	CompleteLinkSave(app.PendingSave) (app.LinkedItem, error)
 	EnableLiabilities(context.Context, string, app.Progress) error
+	RefreshLiabilities(context.Context, string) error
 	SyncItem(context.Context, string, app.Progress) ([]model.AccountView, error)
 	SyncAll(context.Context, app.Progress) ([]app.SyncResult, error)
 	SetNickname(context.Context, string, string) error
@@ -164,6 +165,7 @@ const (
 	unlinkPreviewOperation
 	unlinkOperation
 	enableLiabilitiesOperation
+	liabilitiesRefreshOperation
 	postEnableRefreshOperation
 )
 
@@ -306,6 +308,16 @@ func (m *Model) startEnableLiabilities(accountID string) tea.Cmd {
 	return cmd
 }
 
+// startLiabilitiesRefresh retries only the first statement snapshot. A retry
+// never opens update consent or starts transaction sync.
+func (m *Model) startLiabilitiesRefresh(accountID string) tea.Cmd {
+	cmd := m.start(liabilitiesRefreshOperation, func(ctx context.Context) (any, error) {
+		return accountID, m.app.RefreshLiabilities(ctx, accountID)
+	})
+	m.recovery.retry = func() tea.Cmd { return m.startLiabilitiesRefresh(accountID) }
+	return cmd
+}
+
 // startPostEnableRefresh reads the account state after consent succeeded. Its
 // retry repeats only this read. It must never request consent a second time.
 func (m *Model) startPostEnableRefresh() tea.Cmd {
@@ -420,9 +432,11 @@ func (m *Model) finish(msg operationMsg) tea.Cmd {
 		return m.finishUnlink()
 	case enableLiabilitiesOperation:
 		itemID, _ := msg.value.(string)
-		if itemID != "" {
-			m.liabilitiesEnabled[itemID] = true
-		}
+		m.markLiabilitiesEnabled(itemID)
+		m.screen = detailScreen
+		return m.startPostEnableRefresh()
+	case liabilitiesRefreshOperation:
+		m.markLiabilitiesEnabled(m.detail.account.ItemID)
 		m.screen = detailScreen
 		return m.startPostEnableRefresh()
 	}
@@ -433,7 +447,7 @@ func (m *Model) finish(msg operationMsg) tea.Cmd {
 // an operation cannot be treated as if nothing happened.
 func destructive(kind operation) bool {
 	return kind == unlinkOperation || kind == enableLiabilitiesOperation ||
-		kind == postEnableRefreshOperation
+		kind == liabilitiesRefreshOperation || kind == postEnableRefreshOperation
 }
 
 // cancelled leaves one cancelled operation behind.
@@ -577,11 +591,85 @@ func (m *Model) failed(msg operationMsg) tea.Cmd {
 	if msg.kind == postEnableRefreshOperation {
 		return m.showPostEnableRefreshFailure(msg.err)
 	}
+	if msg.kind == enableLiabilitiesOperation {
+		var enabledErr *app.LiabilitiesEnabledError
+		if errors.As(msg.err, &enabledErr) {
+			itemID, _ := msg.value.(string)
+			return m.showLiabilitiesEnabledFailure(itemID, m.detail.account.AccountID, enabledErr)
+		}
+	}
+	if msg.kind == liabilitiesRefreshOperation {
+		accountID, _ := msg.value.(string)
+		return m.showLiabilitiesRefreshFailure(accountID, msg.err)
+	}
 	var notSaved *app.TokenNotSavedError
 	if errors.As(msg.err, &notSaved) {
 		return m.showTokenNotSaved(notSaved)
 	}
 	return m.showFailure(msg.err)
+}
+
+// showLiabilitiesEnabledFailure reports that consent was saved before the
+// first refresh failed. Retry requests only the statement snapshot.
+func (m *Model) showLiabilitiesEnabledFailure(
+	itemID string,
+	accountID string,
+	err *app.LiabilitiesEnabledError,
+) tea.Cmd {
+	if errors.Is(err, app.ErrAdditionalConsentRequired) {
+		return m.showLiabilitiesConsentRequired(itemID, accountID, err.Cause())
+	}
+	m.markLiabilitiesEnabled(itemID)
+	m.showFailure(err)
+	if err.StatusCleanupFailed() {
+		if err.SnapshotStored() {
+			m.recovery.message = "Statement data is enabled for the whole institution, and the first snapshot was stored, but its consent status could not be updated."
+		} else {
+			m.recovery.message = "Statement data is enabled for the whole institution, but the first snapshot is not ready, and its consent status could not be updated."
+		}
+	} else if errors.Is(err, context.Canceled) {
+		m.recovery.message = "Statement data is enabled for the whole institution, but the first refresh was canceled."
+	} else {
+		m.recovery.message = "Statement data is enabled for the whole institution, but the first refresh failed."
+	}
+	m.recovery.notes = []string{
+		"Reason: " + displayError(err.Cause()),
+		"Retry requests the statement snapshot. It does not request consent again.",
+	}
+	m.recovery.retry = func() tea.Cmd { return m.startLiabilitiesRefresh(accountID) }
+	return nil
+}
+
+func (m *Model) showLiabilitiesRefreshFailure(accountID string, err error) tea.Cmd {
+	itemID := m.detail.account.ItemID
+	if errors.Is(err, app.ErrAdditionalConsentRequired) {
+		return m.showLiabilitiesConsentRequired(itemID, accountID, err)
+	}
+	m.markLiabilitiesEnabled(itemID)
+	m.showFailure(err)
+	if errors.Is(err, context.Canceled) {
+		m.recovery.message = "Statement data is enabled for the whole institution, but the refresh was canceled."
+	} else {
+		m.recovery.message = "Statement data is enabled for the whole institution, but the refresh failed."
+	}
+	m.recovery.notes = []string{
+		"Reason: " + displayError(err),
+		"Retry requests the statement snapshot. It does not request consent again.",
+	}
+	m.recovery.retry = func() tea.Cmd { return m.startLiabilitiesRefresh(accountID) }
+	return nil
+}
+
+func (m *Model) showLiabilitiesConsentRequired(itemID, accountID string, cause error) tea.Cmd {
+	m.markLiabilitiesConsentRequired(itemID)
+	m.showFailure(cause)
+	m.recovery.message = "The statement data request was saved, but Plaid still requires consent."
+	m.recovery.notes = []string{
+		"Reason: " + displayError(cause),
+		"Retry requests consent again.",
+	}
+	m.recovery.retry = func() tea.Cmd { return m.startEnableLiabilities(accountID) }
+	return nil
 }
 
 // showPostEnableRefreshFailure says what succeeded before the read failed.
@@ -884,6 +972,42 @@ func (m *Model) liabilitiesConsentRequired(itemID string) bool {
 		}
 	}
 	return false
+}
+
+// markLiabilitiesEnabled applies the saved institution state before an
+// account refresh confirms it. A successful update makes an older consent
+// warning stale.
+func (m *Model) markLiabilitiesEnabled(itemID string) {
+	if itemID == "" {
+		return
+	}
+	m.liabilitiesEnabled[itemID] = true
+	for i := range m.syncStates {
+		if m.syncStates[i].ItemID == itemID {
+			m.syncStates[i].LiabilitiesConsentRequired = false
+		}
+	}
+	m.detail.cursor = clampCursor(m.detail.cursor, len(m.detailActions()))
+}
+
+func (m *Model) markLiabilitiesConsentRequired(itemID string) {
+	if itemID == "" {
+		return
+	}
+	m.liabilitiesEnabled[itemID] = true
+	for i := range m.syncStates {
+		if m.syncStates[i].ItemID == itemID {
+			m.syncStates[i].LiabilitiesConsentRequired = true
+			m.detail.cursor = clampCursor(m.detail.cursor, len(m.detailActions()))
+			return
+		}
+	}
+	m.syncStates = append(m.syncStates, app.SyncState{
+		ItemID:                     itemID,
+		Institution:                m.detail.account.InstitutionName,
+		LiabilitiesConsentRequired: true,
+	})
+	m.detail.cursor = clampCursor(m.detail.cursor, len(m.detailActions()))
 }
 
 // recoverWith runs the way out of a failure the user chose. Main always leaves

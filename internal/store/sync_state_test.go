@@ -78,6 +78,72 @@ func TestSetStatusKeepsTheCursor(t *testing.T) {
 	}
 }
 
+func TestSetStatusOnlyPreservesCursorAndLastSyncTime(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	if err := s.SetCursor(ctx, "plaid", "item-1", "cursor-abc"); err != nil {
+		t.Fatalf("set cursor: %v", err)
+	}
+	before, err := s.SyncStates(ctx)
+	if err != nil {
+		t.Fatalf("sync states before status-only write: %v", err)
+	}
+	if len(before) != 1 || before[0].LastSyncedAt == nil {
+		t.Fatalf("state before status-only write = %+v, want one timestamped row", before)
+	}
+
+	if err := s.SetStatusOnly(ctx, "plaid", "item-1", "consent is required"); err != nil {
+		t.Fatalf("set status only: %v", err)
+	}
+	afterSet, err := s.SyncStates(ctx)
+	if err != nil {
+		t.Fatalf("sync states after status-only write: %v", err)
+	}
+	if afterSet[0].Cursor != before[0].Cursor {
+		t.Errorf("cursor = %q, want %q", afterSet[0].Cursor, before[0].Cursor)
+	}
+	if !afterSet[0].LastSyncedAt.Equal(*before[0].LastSyncedAt) {
+		t.Errorf("last sync = %v, want %v", afterSet[0].LastSyncedAt, before[0].LastSyncedAt)
+	}
+	if afterSet[0].LastStatus != "consent is required" {
+		t.Errorf("status = %q, want consent is required", afterSet[0].LastStatus)
+	}
+
+	if err := s.SetStatusOnly(ctx, "plaid", "item-1", ""); err != nil {
+		t.Fatalf("clear status only: %v", err)
+	}
+	afterClear, err := s.SyncStates(ctx)
+	if err != nil {
+		t.Fatalf("sync states after status-only clear: %v", err)
+	}
+	if afterClear[0].Cursor != before[0].Cursor || afterClear[0].LastStatus != "" {
+		t.Errorf("state after clear = %+v, want the cursor and an empty status", afterClear[0])
+	}
+	if !afterClear[0].LastSyncedAt.Equal(*before[0].LastSyncedAt) {
+		t.Errorf("last sync after clear = %v, want %v", afterClear[0].LastSyncedAt, before[0].LastSyncedAt)
+	}
+}
+
+func TestSetStatusOnlyCreatesAnUntimestampedState(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	if err := s.SetStatusOnly(ctx, "plaid", "item-new", "consent is required"); err != nil {
+		t.Fatalf("set status only: %v", err)
+	}
+	states, err := s.SyncStates(ctx)
+	if err != nil {
+		t.Fatalf("sync states: %v", err)
+	}
+	if len(states) != 1 || states[0].LastStatus != "consent is required" {
+		t.Fatalf("states = %+v, want one consent state", states)
+	}
+	if states[0].Cursor != "" || states[0].LastSyncedAt != nil {
+		t.Errorf("new status-only state = %+v, want no cursor or sync time", states[0])
+	}
+}
+
 func TestClearCursorKeepsTheLastSyncOutcome(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)

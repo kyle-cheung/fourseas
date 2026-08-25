@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -153,6 +155,100 @@ func TestRunAccountLiabilitiesEnablesTheWholeInstitutionAndRequestsASnapshot(t *
 		if !strings.Contains(output, want) {
 			t.Errorf("output = %q, want it to contain %q", output, want)
 		}
+	}
+}
+
+type safeTestError struct {
+	text string
+	err  error
+}
+
+func (e *safeTestError) Error() string { return e.text }
+
+func (e *safeTestError) Unwrap() error { return e.err }
+
+func TestRunAccountLiabilitiesReportsPartialEnableWithoutFullSuccess(t *testing.T) {
+	const accessToken = "test-cli-partial-access-token"
+	failureIdentity := errors.New("snapshot failure identity")
+	cleanupIdentity := errors.New("save consent status: database is busy")
+	tests := []struct {
+		name           string
+		partialErr     error
+		identity       error
+		statusCleanup  bool
+		snapshotStored bool
+		wantWords      []string
+		forbid         string
+	}{
+		{
+			name: "failure",
+			partialErr: &safeTestError{
+				text: "snapshot endpoint failed with [REDACTED]",
+				err:  fmt.Errorf("snapshot endpoint failed with %s: %w", accessToken, failureIdentity),
+			},
+			identity:  failureIdentity,
+			wantWords: []string{"Statement data is enabled for the whole institution", "first snapshot", "failed"},
+		},
+		{
+			name:       "cancellation",
+			partialErr: context.Canceled,
+			identity:   context.Canceled,
+			wantWords:  []string{"Statement data is enabled for the whole institution", "first snapshot", "canceled"},
+		},
+		{
+			name:       "additional consent",
+			partialErr: fmt.Errorf("Plaid response: %w", app.ErrAdditionalConsentRequired),
+			identity:   app.ErrAdditionalConsentRequired,
+			wantWords:  []string{"request was saved", "Plaid still requires consent", "first snapshot"},
+			forbid:     "is enabled",
+		},
+		{
+			name:           "product not ready status cleanup",
+			partialErr:     cleanupIdentity,
+			identity:       cleanupIdentity,
+			statusCleanup:  true,
+			snapshotStored: false,
+			wantWords:      []string{"Statement data is enabled", "first snapshot is not ready", "status"},
+			forbid:         "snapshot was stored",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			partial := app.NewLiabilitiesEnabledError(tt.partialErr, accessToken)
+			if tt.statusCleanup {
+				partial = app.NewLiabilitiesStatusError(tt.partialErr, accessToken, tt.snapshotStored)
+			}
+			var gotErr error
+			output := captureStdout(t, func() {
+				gotErr = runAccountLiabilitiesWith(context.Background(), []string{"enable", "acct-amex"},
+					func(context.Context, string, app.Progress) error { return partial })
+			})
+
+			if !errors.Is(gotErr, tt.identity) {
+				t.Fatalf("command error = %v, want cause %v", gotErr, tt.identity)
+			}
+			var gotPartial *app.LiabilitiesEnabledError
+			if !errors.As(gotErr, &gotPartial) || gotPartial != partial {
+				t.Fatalf("command error = %T, want the original partial error", gotErr)
+			}
+			for _, want := range tt.wantWords {
+				if !strings.Contains(gotErr.Error(), want) {
+					t.Errorf("command error = %q, want %q", gotErr, want)
+				}
+			}
+			if tt.forbid != "" && strings.Contains(gotErr.Error(), tt.forbid) {
+				t.Errorf("command error = %q, want no %q", gotErr, tt.forbid)
+			}
+			if strings.Contains(output, "The first snapshot was requested.") {
+				t.Errorf("output = %q, want no full-success snapshot line", output)
+			}
+			stderrText := fmt.Sprintf("fourseas: %v\n", gotErr)
+			debugText := fmt.Sprintf("%#v", gotErr)
+			if strings.Contains(gotErr.Error(), accessToken) || strings.Contains(output, accessToken) ||
+				strings.Contains(stderrText, accessToken) || strings.Contains(debugText, accessToken) {
+				t.Fatal("command output contains the access token")
+			}
+		})
 	}
 }
 

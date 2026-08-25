@@ -87,6 +87,12 @@ type fakeService struct {
 	enableErr     error
 	consentSaved  bool
 	endpointCalls int
+
+	// liabilityRefreshCalls holds each snapshot-only retry. The operation must
+	// never repeat update consent or transaction sync.
+	liabilityRefreshCalls  []string
+	liabilityRefreshErrs   []error
+	liabilityRefreshEffect func(*fakeService)
 }
 
 type linkCall struct {
@@ -128,6 +134,17 @@ func (f *fakeService) EnableLiabilities(_ context.Context, accountID string, _ a
 		f.enableEffect(f)
 	}
 	return f.enableErr
+}
+
+func (f *fakeService) RefreshLiabilities(_ context.Context, accountID string) error {
+	f.liabilityRefreshCalls = append(f.liabilityRefreshCalls, accountID)
+	if err := takeError(&f.liabilityRefreshErrs); err != nil {
+		return err
+	}
+	if f.liabilityRefreshEffect != nil {
+		f.liabilityRefreshEffect(f)
+	}
+	return nil
 }
 
 func (f *fakeService) CompleteLinkSave(pending app.PendingSave) (app.LinkedItem, error) {
@@ -1621,6 +1638,274 @@ func TestPostEnableAccountRefreshFailureIsTruthfulAndRetriesOnlyRefresh(t *testi
 					m.screen, m.detail.account)
 			}
 		})
+	}
+}
+
+func TestPartialLiabilitiesEnableRetriesSnapshotThenAccounts(t *testing.T) {
+	tests := []struct {
+		name        string
+		cause       error
+		wantMessage string
+	}{
+		{
+			name:        "temporary failure",
+			cause:       errors.New("liabilities are temporarily unavailable"),
+			wantMessage: "Statement data is enabled for the whole institution, but the first refresh failed.",
+		},
+		{
+			name:        "cancellation",
+			cause:       context.Canceled,
+			wantMessage: "Statement data is enabled for the whole institution, but the first refresh was canceled.",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row := creditAccount("acc-1", "Chase")
+			partial := app.NewLiabilitiesEnabledError(tt.cause, "")
+			fake := &fakeService{
+				data: app.AccountData{
+					Accounts:           []model.AccountView{row},
+					LiabilitiesEnabled: map[string]bool{"item-1": false},
+					States: []app.SyncState{{
+						ItemID:                     "item-1",
+						Institution:                "Chase",
+						LiabilitiesConsentRequired: true,
+					}},
+				},
+				enableErr: partial,
+			}
+			fake.liabilityRefreshEffect = func(f *fakeService) {
+				f.data.LiabilitiesEnabled["item-1"] = true
+				f.data.States[0].LiabilitiesConsentRequired = false
+			}
+			m := ready(t, fake)
+			openDetail(t, m, 0)
+			press(t, m, codeKey(tea.KeyDown)) // Enable statement data
+
+			msg := operationResult(t, press(t, m, codeKey(tea.KeyEnter)))
+			if !errors.Is(msg.err, tt.cause) {
+				t.Fatalf("operation error = %v, want cause %v", msg.err, tt.cause)
+			}
+			if _, cmd := m.Update(msg); cmd != nil {
+				t.Fatal("a partial enable started another operation")
+			}
+
+			if !m.liabilitiesEnabled["item-1"] {
+				t.Fatal("partial enable did not set the local Item flag")
+			}
+			for _, action := range m.detailActions() {
+				if action == detailEnableLiabilities {
+					t.Fatal("partial enable left the Enable action visible")
+				}
+			}
+			if m.screen != recoveryScreen {
+				t.Fatalf("screen after partial enable = %v, want recoveryScreen", m.screen)
+			}
+			body := content(m)
+			normalizedBody := strings.Join(strings.Fields(body), " ")
+			for _, want := range []string{
+				tt.wantMessage,
+				"Reason: " + displayError(tt.cause),
+				"Retry requests the statement snapshot. It does not request consent again.",
+				"Retry",
+				"Main",
+			} {
+				if !strings.Contains(normalizedBody, strings.Join(strings.Fields(want), " ")) {
+					t.Errorf("recovery view = %q, want %q", body, want)
+				}
+			}
+			if len(fake.enableCalls) != 1 || len(fake.liabilityRefreshCalls) != 0 || len(fake.accountsCalls) != 1 {
+				t.Fatalf("calls after partial enable = Enable %v, Refresh %v, Accounts %v; want 1, 0, 1",
+					fake.enableCalls, fake.liabilityRefreshCalls, fake.accountsCalls)
+			}
+
+			accountsCmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // Retry snapshot
+			if len(fake.liabilityRefreshCalls) != 1 || len(fake.accountsCalls) != 1 {
+				t.Fatalf("calls after snapshot Retry = Refresh %v, Accounts %v; want 1 and 1",
+					fake.liabilityRefreshCalls, fake.accountsCalls)
+			}
+			runOperation(t, m, accountsCmd)
+			if len(fake.enableCalls) != 1 {
+				t.Fatalf("EnableLiabilities calls after Retry = %v, want one", fake.enableCalls)
+			}
+			if len(fake.accountsCalls) != 2 {
+				t.Fatalf("Accounts calls after snapshot success = %v, want initial and refresh", fake.accountsCalls)
+			}
+			if m.screen != detailScreen || m.detail.account.AccountID != "acc-1" {
+				t.Fatalf("screen = %v, detail = %+v, want refreshed acc-1 detail",
+					m.screen, m.detail.account)
+			}
+		})
+	}
+}
+
+func TestPartialLiabilitiesSnapshotFailureRetriesTheSnapshotAgain(t *testing.T) {
+	row := creditAccount("acc-1", "Chase")
+	firstErr := errors.New("first snapshot failed")
+	retryErr := errors.New("snapshot retry failed")
+	fake := &fakeService{
+		data: app.AccountData{
+			Accounts:           []model.AccountView{row},
+			LiabilitiesEnabled: map[string]bool{"item-1": false},
+		},
+		enableErr:            app.NewLiabilitiesEnabledError(firstErr, ""),
+		liabilityRefreshErrs: []error{retryErr, nil},
+	}
+	fake.liabilityRefreshEffect = func(f *fakeService) {
+		f.data.LiabilitiesEnabled["item-1"] = true
+	}
+	m := ready(t, fake)
+	openDetail(t, m, 0)
+	press(t, m, codeKey(tea.KeyDown))
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+
+	if cmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))); cmd != nil {
+		t.Fatal("failed snapshot retry started account refresh")
+	}
+	if m.screen != recoveryScreen || !strings.Contains(content(m), retryErr.Error()) {
+		t.Fatalf("screen = %v, view = %q; want snapshot retry recovery", m.screen, content(m))
+	}
+	if len(fake.enableCalls) != 1 || len(fake.liabilityRefreshCalls) != 1 || len(fake.accountsCalls) != 1 {
+		t.Fatalf("calls after failed retry = Enable %v, Refresh %v, Accounts %v; want 1 each",
+			fake.enableCalls, fake.liabilityRefreshCalls, fake.accountsCalls)
+	}
+
+	accountsCmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+	runOperation(t, m, accountsCmd)
+	if len(fake.enableCalls) != 1 || len(fake.liabilityRefreshCalls) != 2 || len(fake.accountsCalls) != 2 {
+		t.Fatalf("final calls = Enable %v, Refresh %v, Accounts %v; want 1, 2, 2",
+			fake.enableCalls, fake.liabilityRefreshCalls, fake.accountsCalls)
+	}
+}
+
+func TestLiabilitiesStatusCleanupFailureRetriesSnapshotWithoutConsent(t *testing.T) {
+	row := creditAccount("acc-1", "Chase")
+	cleanupErr := errors.New("save consent status: database is busy")
+	fake := &fakeService{
+		data: app.AccountData{
+			Accounts:           []model.AccountView{row},
+			LiabilitiesEnabled: map[string]bool{"item-1": false},
+		},
+		enableErr: app.NewLiabilitiesStatusError(cleanupErr, "", true),
+	}
+	fake.liabilityRefreshEffect = func(f *fakeService) {
+		f.data.LiabilitiesEnabled["item-1"] = true
+	}
+	m := ready(t, fake)
+	openDetail(t, m, 0)
+	press(t, m, codeKey(tea.KeyDown))
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+
+	body := strings.Join(strings.Fields(content(m)), " ")
+	for _, want := range []string{
+		"Statement data is enabled for the whole institution, and the first snapshot was stored, but its consent status could not be updated.",
+		"Retry requests the statement snapshot. It does not request consent again.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("recovery view = %q, want %q", body, want)
+		}
+	}
+	if !m.liabilitiesEnabled["item-1"] {
+		t.Fatal("cleanup failure did not mark the Item enabled")
+	}
+	for _, action := range m.detailActions() {
+		if action == detailEnableLiabilities {
+			t.Fatal("cleanup failure left the Enable action visible")
+		}
+	}
+
+	accountsCmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+	runOperation(t, m, accountsCmd)
+	if len(fake.enableCalls) != 1 || len(fake.liabilityRefreshCalls) != 1 || len(fake.accountsCalls) != 2 {
+		t.Fatalf("calls = Enable %v, Refresh %v, Accounts %v; want 1, 1, 2",
+			fake.enableCalls, fake.liabilityRefreshCalls, fake.accountsCalls)
+	}
+}
+
+func TestProductNotReadyStatusCleanupFailureDoesNotClaimSnapshotStored(t *testing.T) {
+	row := creditAccount("acc-1", "Chase")
+	cleanupErr := errors.New("save consent status: database is busy")
+	fake := &fakeService{
+		data: app.AccountData{
+			Accounts:           []model.AccountView{row},
+			LiabilitiesEnabled: map[string]bool{"item-1": false},
+		},
+		enableErr: app.NewLiabilitiesStatusError(cleanupErr, "", false),
+	}
+	m := ready(t, fake)
+	openDetail(t, m, 0)
+	press(t, m, codeKey(tea.KeyDown))
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+
+	body := strings.Join(strings.Fields(content(m)), " ")
+	for _, want := range []string{
+		"Statement data is enabled for the whole institution, but the first snapshot is not ready, and its consent status could not be updated.",
+		"Retry requests the statement snapshot. It does not request consent again.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("recovery view = %q, want %q", body, want)
+		}
+	}
+	if strings.Contains(body, "snapshot was stored") {
+		t.Errorf("recovery view = %q, want no stored-snapshot claim", body)
+	}
+
+	accountsCmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+	runOperation(t, m, accountsCmd)
+	if len(fake.enableCalls) != 1 || len(fake.liabilityRefreshCalls) != 1 || len(fake.accountsCalls) != 2 {
+		t.Fatalf("calls = Enable %v, Refresh %v, Accounts %v; want 1, 1, 2",
+			fake.enableCalls, fake.liabilityRefreshCalls, fake.accountsCalls)
+	}
+}
+
+func TestPartialLiabilitiesConsentRequiredRetriesConsent(t *testing.T) {
+	row := creditAccount("acc-1", "Chase")
+	consentErr := fmt.Errorf("Plaid response: %w", app.ErrAdditionalConsentRequired)
+	fake := &fakeService{
+		data: app.AccountData{
+			Accounts:           []model.AccountView{row},
+			LiabilitiesEnabled: map[string]bool{"item-1": false},
+		},
+		enableErr: app.NewLiabilitiesEnabledError(consentErr, ""),
+	}
+	m := ready(t, fake)
+	openDetail(t, m, 0)
+	press(t, m, codeKey(tea.KeyDown))
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+
+	body := strings.Join(strings.Fields(content(m)), " ")
+	for _, want := range []string{
+		"The statement data request was saved, but Plaid still requires consent.",
+		"Retry requests consent again.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("recovery view = %q, want %q", body, want)
+		}
+	}
+	if strings.Contains(body, "Statement data is enabled") {
+		t.Errorf("recovery view = %q, want no enabled claim", body)
+	}
+	if !m.liabilitiesEnabled["item-1"] {
+		t.Fatal("saved request did not set the local Item flag")
+	}
+	foundEnable := false
+	for _, action := range m.detailActions() {
+		foundEnable = foundEnable || action == detailEnableLiabilities
+	}
+	if !foundEnable {
+		t.Fatal("consent-required outcome removed the Enable action")
+	}
+
+	fake.enableErr = nil
+	fake.enableEffect = func(f *fakeService) {
+		f.data.LiabilitiesEnabled["item-1"] = true
+		f.data.States = []app.SyncState{{ItemID: "item-1", Institution: "Chase"}}
+	}
+	accountsCmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+	runOperation(t, m, accountsCmd)
+	if len(fake.enableCalls) != 2 || len(fake.liabilityRefreshCalls) != 0 || len(fake.accountsCalls) != 2 {
+		t.Fatalf("calls = Enable %v, Refresh %v, Accounts %v; want 2, 0, 2",
+			fake.enableCalls, fake.liabilityRefreshCalls, fake.accountsCalls)
 	}
 }
 

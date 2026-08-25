@@ -168,6 +168,8 @@ func (m *Model) runningLine() string {
 		return "Removing"
 	case enableLiabilitiesOperation:
 		return "Enabling statement data"
+	case liabilitiesRefreshOperation:
+		return "Refreshing statement data"
 	case postEnableRefreshOperation:
 		return "Refreshing accounts"
 	}

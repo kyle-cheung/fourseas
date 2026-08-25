@@ -624,6 +624,51 @@ func assertNoAccessToken(t *testing.T, accessToken string, values ...string) {
 	}
 }
 
+type tokenBearingError struct {
+	token    string
+	sentinel error
+}
+
+func (e *tokenBearingError) Error() string {
+	return "request with " + e.token + " failed: " + e.sentinel.Error()
+}
+
+func (e *tokenBearingError) Unwrap() error { return e.sentinel }
+
+func TestRedactAccessTokenDoesNotExposeTheRawError(t *testing.T) {
+	const accessToken = "test-redaction-chain-access-token"
+	sentinel := errors.New("classified failure")
+	raw := &tokenBearingError{token: accessToken, sentinel: sentinel}
+
+	redacted := redactAccessToken(raw, accessToken)
+	if !errors.Is(redacted, sentinel) {
+		t.Fatal("redacted error lost its sentinel identity")
+	}
+	if unwrapped := errors.Unwrap(redacted); unwrapped != nil {
+		t.Fatalf("errors.Unwrap(redacted) = %T, want nil", unwrapped)
+	}
+	var recovered *tokenBearingError
+	if errors.As(redacted, &recovered) {
+		t.Fatal("errors.As recovered the raw token-bearing error")
+	}
+	for _, formatted := range []string{
+		fmt.Sprintf("%v", redacted),
+		fmt.Sprintf("%s", redacted),
+		fmt.Sprintf("%+v", redacted),
+		fmt.Sprintf("%#v", redacted),
+		fmt.Sprintf("%q", redacted),
+	} {
+		assertNoAccessToken(t, accessToken, formatted)
+	}
+	var nilRedacted *accessTokenError
+	if got := nilRedacted.Error(); got == "" {
+		t.Error("nil redacted error returned an empty message")
+	}
+	if errors.Is(nilRedacted, sentinel) {
+		t.Error("nil redacted error matched a sentinel")
+	}
+}
+
 func TestSyncItemFetchesOneLiabilitySnapshotAfterPagination(t *testing.T) {
 	cfg := tempConfig(t, "sandbox")
 	amex := item("item-amex", "American Express", "sandbox")

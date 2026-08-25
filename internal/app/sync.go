@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/kyle-cheung/fourseas/providence/internal/model"
@@ -34,23 +35,43 @@ type accessTokenError struct {
 	text string
 }
 
-func (e *accessTokenError) Error() string { return e.text }
+func (e *accessTokenError) Error() string {
+	if e == nil {
+		return "redacted error"
+	}
+	return e.text
+}
 
-func (e *accessTokenError) Unwrap() error { return e.err }
+func (e *accessTokenError) Is(target error) bool {
+	return e != nil && errors.Is(e.err, target)
+}
+
+func (e *accessTokenError) Format(state fmt.State, verb rune) {
+	if e == nil {
+		io.WriteString(state, "<nil>")
+		return
+	}
+	if verb == 'q' {
+		fmt.Fprintf(state, "%q", e.text)
+		return
+	}
+	io.WriteString(state, e.text)
+}
 
 // redactAccessToken removes the known Item token from displayed and stored
-// error text. Unwrap keeps sentinel classification available to callers.
+// error text. Is keeps sentinel classification without exposing the raw
+// provider error.
 func redactAccessToken(err error, accessToken string) error {
-	if err == nil || accessToken == "" {
+	if err == nil {
 		return err
 	}
 	text := err.Error()
-	if !strings.Contains(text, accessToken) {
-		return err
+	if accessToken != "" {
+		text = strings.ReplaceAll(text, accessToken, redactedAccessToken)
 	}
 	return &accessTokenError{
 		err:  err,
-		text: strings.ReplaceAll(text, accessToken, redactedAccessToken),
+		text: text,
 	}
 }
 
@@ -188,19 +209,37 @@ func (a *App) readItem(ctx context.Context, db *store.Store, item tokens.Item, r
 
 // refreshLiabilities applies the result policy for one complete Item snapshot.
 func (a *App) refreshLiabilities(ctx context.Context, db *store.Store, item tokens.Item) error {
+	return a.refreshLiabilitiesResult(ctx, db, item).err
+}
+
+type liabilityRefreshResult struct {
+	snapshotStored bool
+	err            error
+}
+
+// refreshLiabilitiesResult keeps PRODUCT_NOT_READY distinct from a stored or
+// cleared snapshot for the enable flow. Sync callers use refreshLiabilities
+// and keep the existing error-only policy.
+func (a *App) refreshLiabilitiesResult(
+	ctx context.Context,
+	db *store.Store,
+	item tokens.Item,
+) liabilityRefreshResult {
 	if a.liabilities == nil {
-		return errors.New("liability fetch is not configured")
+		return liabilityRefreshResult{err: errors.New("liability fetch is not configured")}
 	}
 	rows, err := a.liabilities(ctx, a.cfg.Plaid, item.AccessToken)
 	switch {
 	case err == nil:
-		return db.ReplaceLiabilities(ctx, plaid.ProviderName, item.ItemID, rows)
+		err = db.ReplaceLiabilities(ctx, plaid.ProviderName, item.ItemID, rows)
+		return liabilityRefreshResult{snapshotStored: err == nil, err: err}
 	case errors.Is(err, provider.ErrNoLiabilityAccounts):
-		return db.ReplaceLiabilities(ctx, plaid.ProviderName, item.ItemID, nil)
+		err = db.ReplaceLiabilities(ctx, plaid.ProviderName, item.ItemID, nil)
+		return liabilityRefreshResult{snapshotStored: err == nil, err: err}
 	case errors.Is(err, provider.ErrProductNotReady):
-		return nil
+		return liabilityRefreshResult{}
 	default:
-		return err
+		return liabilityRefreshResult{err: err}
 	}
 }
 
