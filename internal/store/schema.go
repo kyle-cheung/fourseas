@@ -106,6 +106,9 @@ CREATE TABLE IF NOT EXISTS account_liabilities (
 	PRIMARY KEY (provider, account_id)
 );
 
+ALTER TABLE account_liabilities
+	ADD COLUMN IF NOT EXISTS last_statement_balance DECIMAL(18,4);
+
 CREATE TABLE IF NOT EXISTS sync_state (
 	provider       VARCHAR NOT NULL,
 	item_id        VARCHAR NOT NULL,

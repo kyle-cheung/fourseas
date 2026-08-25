@@ -41,10 +41,10 @@ formatter and the account currency for both values. Render `—` when the
 statement balance is absent or invalid. The summary does not calculate or
 convert a statement balance.
 
-The schema version stays at 2. The table is new relative to `origin/main`, so
-the existing additive DDL creates the column for a new database. Development
-databases created from this unmerged branch need `fourseas reset` to get the
-new column.
+The schema version stays at 2. After the table creation statement, an
+idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` ensures the nullable
+column for both new databases and existing version-2 branch databases. The
+ensure preserves existing rows; old rows have a NULL statement balance.
 
 ## Display and Error Behavior
 
@@ -66,7 +66,8 @@ conversion, or a new summary table.
 ## Verification
 
 Before changing production code, update existing model, Plaid mapping, store,
-and summary-table expectations and fixtures. Do not add test cases. Then run
-the focused tests and the full test suite. Confirm the data reaches the account
+and summary-table expectations and fixtures. Do not add feature-display test
+cases, except the required schema-compatibility regression. Then run the
+focused tests and the full test suite. Confirm the data reaches the account
 view, present values use the account currency, missing values show `—`, and
 narrow-terminal rendering still truncates complete rows as it does today.

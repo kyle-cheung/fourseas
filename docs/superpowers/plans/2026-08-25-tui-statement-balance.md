@@ -4,7 +4,7 @@
 
 **Goal:** Persist Plaid credit-card statement balances and show them in the main TUI account summary.
 
-**Architecture:** Add `LastStatementBalance decimal.NullDecimal` to the existing liability value and carry it through the Plaid mapper and DuckDB liability table into `model.AccountView`. Extend only `accountSummaryLines`; it will pass the nullable value and the account currency to the existing formatter, which returns `—` for an invalid value. The branch-created table gets additive DDL only, so `SchemaVersion` remains 2 and an existing development database from this branch must be recreated with `fourseas reset`.
+**Architecture:** Add `LastStatementBalance decimal.NullDecimal` to the existing liability value and carry it through the Plaid mapper and DuckDB liability table into `model.AccountView`. Extend only `accountSummaryLines`; it will pass the nullable value and the account currency to the existing formatter, which returns `—` for an invalid value. The schema keeps `SchemaVersion` at 2 and uses one idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` after table creation so existing version-2 branch databases retain their rows and gain a NULL statement-balance column.
 
 **Tech Stack:** Go, shopspring/decimal, Plaid Go SDK, DuckDB, Bubble Tea, Lipgloss.
 
@@ -129,7 +129,7 @@
   FetchedAt:            fetchedAt,
   ```
 
-  Add the new nullable column to the branch-new table only; do not change `SchemaVersion` or add a migration.
+  Keep `SchemaVersion` at 2. After `CREATE TABLE account_liabilities`, add one idempotent statement that ensures the nullable column on existing version-2 databases without changing existing rows.
 
   ```sql
   -- internal/store/schema.go, account_liabilities
@@ -137,6 +137,15 @@
   last_statement_balance DECIMAL(18,4),
   fetched_at             TIMESTAMP NOT NULL,
   ```
+
+  ```sql
+  ALTER TABLE account_liabilities
+      ADD COLUMN IF NOT EXISTS last_statement_balance DECIMAL(18,4);
+  ```
+
+  Add a regression test that drops this column from a seeded version-2 temp
+  database, reopens it, and verifies that the column is restored and the
+  account and liability rows remain.
 
   Include the field in each store boundary in its table order.
 
@@ -210,7 +219,7 @@
 
 - [ ] **Step 5: Format, inspect scope, and commit one focused implementation change.**
 
-  For any existing development database made before this DDL edit on this unmerged branch, run `fourseas reset` before manual use. Do not change CLI behavior or schema version.
+  Existing version-2 development databases gain the column when opened. Do not change CLI behavior or schema version.
 
   Run:
 
@@ -223,4 +232,4 @@
   git commit -m "feat: show statement balance in TUI summary"
   ```
 
-  Expected: `git diff --check` has no output; the staged paths are only the ten files listed above; the commit contains no CLI, detail-view, request, schema-version, migration, or layout-rule change.
+  Expected: `git diff --check` has no output; the staged paths are only the listed implementation and regression-test files; the commit contains no CLI, detail-view, request, schema-version, or layout-rule change.
