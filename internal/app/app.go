@@ -92,14 +92,16 @@ type linkFunc func(context.Context, plaid.Config, int, bool) (plaid.LinkResult, 
 type removeFunc func(context.Context, plaid.Config, string) error
 type sourceFunc func(plaid.Config, string, string, string) (provider.Provider, error)
 type liabilitiesFunc func(context.Context, plaid.Config, string) ([]model.CreditLiability, error)
+type updateLiabilitiesFunc func(context.Context, plaid.Config, string) (plaid.LinkResult, error)
 
 // App is the one façade over the store, the token file, and the provider.
 type App struct {
-	cfg         Config
-	link        linkFunc
-	remove      removeFunc
-	source      sourceFunc
-	liabilities liabilitiesFunc
+	cfg               Config
+	link              linkFunc
+	remove            removeFunc
+	source            sourceFunc
+	liabilities       liabilitiesFunc
+	updateLiabilities updateLiabilitiesFunc
 }
 
 // ErrProductNotReady lets presentation code classify the error without importing a provider.
@@ -121,7 +123,7 @@ func WithRemove(remove func(context.Context, plaid.Config, string) error) Option
 func New(cfg Config, options ...Option) *App {
 	a := newWith(cfg, plaid.Link, plaid.Remove, func(cfg plaid.Config, token, itemID, institution string) (provider.Provider, error) {
 		return plaid.NewSource(cfg, token, itemID, institution)
-	}, plaid.Liabilities)
+	}, plaid.Liabilities, plaid.UpdateLiabilities)
 	for _, option := range options {
 		option(a)
 	}
@@ -134,13 +136,15 @@ func newWith(
 	remove removeFunc,
 	source sourceFunc,
 	liabilities liabilitiesFunc,
+	update updateLiabilitiesFunc,
 ) *App {
 	return &App{
-		cfg:         cfg,
-		link:        link,
-		remove:      remove,
-		source:      source,
-		liabilities: liabilities,
+		cfg:               cfg,
+		link:              link,
+		remove:            remove,
+		source:            source,
+		liabilities:       liabilities,
+		updateLiabilities: update,
 	}
 }
 

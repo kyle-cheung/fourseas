@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/kyle-cheung/fourseas/providence/internal/provider/plaid"
 	"github.com/kyle-cheung/fourseas/providence/internal/store"
+	"github.com/kyle-cheung/fourseas/providence/internal/tokens"
 )
 
 // An access token only works in the environment that issued it. Removing an
@@ -110,6 +112,31 @@ func TestUnlinkRemovesPlaidThenRowsThenToken(t *testing.T) {
 	}
 }
 
+func TestUnlinkPreservesAnItemAddedDuringThePlaidCall(t *testing.T) {
+	cfg := tempConfig(t, "sandbox")
+	amex := item("item-amex", "American Express", "sandbox")
+	seedTokens(t, cfg.TokensPath, amex)
+	seedStore(t, cfg.DBPath, amex)
+	concurrent := item("item-concurrent", "Concurrent Bank", "sandbox")
+	remove := func(context.Context, plaid.Config, string) error {
+		if err := tokens.Save(cfg.TokensPath, loadTokens(t, cfg.TokensPath).Upsert(concurrent)); err != nil {
+			t.Fatalf("save concurrent Item: %v", err)
+		}
+		return nil
+	}
+
+	if _, err := New(cfg, WithRemove(remove)).Unlink(context.Background(), amex.ItemID, nil); err != nil {
+		t.Fatalf("Unlink: %v", err)
+	}
+	saved := loadTokens(t, cfg.TokensPath)
+	if _, found := saved.Find(amex.ItemID); found {
+		t.Error("removed Item is still stored")
+	}
+	if _, found := saved.Find(concurrent.ItemID); !found {
+		t.Error("Item added during the Plaid call was lost")
+	}
+}
+
 // A removal that failed at Plaid leaves a live item, so the local data and the
 // token must stay: they are the only way to try again.
 func TestUnlinkKeepsRowsAndTokenWhenPlaidFails(t *testing.T) {
@@ -181,13 +208,14 @@ func TestUnlinkKeepsTokenWhenLocalCleanupFails(t *testing.T) {
 	seedTokens(t, cfg.TokensPath, amex)
 	seedStore(t, cfg.DBPath, amex)
 
-	// Plaid agrees, and the token file then refuses the write that would
-	// forget the item.
+	// Plaid agrees, and the token directory then refuses the atomic temp file
+	// that would forget the item.
 	remove := func(context.Context, plaid.Config, string) error {
-		if err := os.Chmod(cfg.TokensPath, 0o400); err != nil {
-			t.Fatalf("chmod %s: %v", cfg.TokensPath, err)
+		dir := filepath.Dir(cfg.TokensPath)
+		if err := os.Chmod(dir, 0o500); err != nil {
+			t.Fatalf("chmod %s: %v", dir, err)
 		}
-		t.Cleanup(func() { os.Chmod(cfg.TokensPath, 0o600) })
+		t.Cleanup(func() { os.Chmod(dir, 0o700) })
 		return nil
 	}
 

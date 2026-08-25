@@ -8,6 +8,7 @@
 //	fourseas sync --fx fetch FX rates only
 //	fourseas accounts  list the stored accounts with their balances
 //	fourseas accounts nickname <account-id> "Amex Daily"  name an account
+//	fourseas accounts liabilities enable <account-id>  enable statement data
 //	fourseas show      print the newest stored rows without calling Plaid
 //	fourseas unlink    remove one card at Plaid and delete its local data
 //	fourseas unlink --list  show the linked cards with their item ids
@@ -42,6 +43,9 @@ Usage:
   fourseas accounts  List the stored accounts with their balances and ids
   fourseas accounts nickname <account-id> "Amex Daily"
                      Name an account. An empty name clears the nickname
+  fourseas accounts liabilities enable <account-id>
+                     Enable statement data for the whole institution and
+                     request its first snapshot
   fourseas show      Print the newest stored rows without calling Plaid
   fourseas unlink <item-id>
                      Remove one card at Plaid, then delete its local token,

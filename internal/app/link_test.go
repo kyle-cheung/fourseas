@@ -44,7 +44,7 @@ func TestLinkSavesCompletedItem(t *testing.T) {
 			}
 			var reported []string
 
-			linked, err := newWith(cfg, link, nil, nil, nil).Link(context.Background(), 730, liabilities,
+			linked, err := newWith(cfg, link, nil, nil, nil, nil).Link(context.Background(), 730, liabilities,
 				func(text string) { reported = append(reported, text) })
 			if err != nil {
 				t.Fatalf("Link: %v", err)
@@ -73,6 +73,31 @@ func TestLinkSavesCompletedItem(t *testing.T) {
 	}
 }
 
+func TestLinkPreservesAnItemAddedDuringTheBrowserWait(t *testing.T) {
+	cfg := tempConfig(t, "sandbox")
+	first := item("item-first", "First Bank", "sandbox")
+	seedTokens(t, cfg.TokensPath, first)
+	concurrent := item("item-concurrent", "Concurrent Bank", "sandbox")
+	link := func(context.Context, plaid.Config, int, bool) (plaid.LinkResult, error) {
+		if err := tokens.Save(cfg.TokensPath, loadTokens(t, cfg.TokensPath).Upsert(concurrent)); err != nil {
+			t.Fatalf("save concurrent Item: %v", err)
+		}
+		return plaid.LinkResult{
+			ItemID: "item-new", AccessToken: "item-new-token", Institution: "New Bank",
+		}, nil
+	}
+
+	if _, err := newWith(cfg, link, nil, nil, nil, nil).Link(context.Background(), 730, true, nil); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+	saved := loadTokens(t, cfg.TokensPath)
+	for _, itemID := range []string{first.ItemID, concurrent.ItemID, "item-new"} {
+		if _, found := saved.Find(itemID); !found {
+			t.Errorf("token file lost %s", itemID)
+		}
+	}
+}
+
 // An unusable token file must be found before the browser opens. Plaid bills
 // the item it creates there, and the access token is the only handle to it: a
 // token file that cannot be written afterwards loses that item for good. This
@@ -83,7 +108,7 @@ func TestLinkRefusesAnUnreadableTokenFileBeforeTheBrowserStep(t *testing.T) {
 		t.Fatalf("write %s: %v", cfg.TokensPath, err)
 	}
 
-	_, err := newWith(cfg, linkNever(t), nil, nil, nil).Link(context.Background(), 730, true, nil)
+	_, err := newWith(cfg, linkNever(t), nil, nil, nil, nil).Link(context.Background(), 730, true, nil)
 	if err == nil {
 		t.Fatal("error = nil, want the unreadable token file")
 	}
@@ -105,7 +130,7 @@ func TestLinkReportsTheSignInURLBeforeTheBrowserStep(t *testing.T) {
 		return plaid.LinkResult{ItemID: "item-new", AccessToken: "secret"}, nil
 	}
 
-	if _, err := newWith(cfg, link, nil, nil, nil).Link(context.Background(), 730, true,
+	if _, err := newWith(cfg, link, nil, nil, nil, nil).Link(context.Background(), 730, true,
 		func(text string) { reported = append(reported, text) }); err != nil {
 		t.Fatalf("Link: %v", err)
 	}
@@ -125,7 +150,7 @@ func TestLinkValidatesBeforeLoadingTokens(t *testing.T) {
 		TokensPath: blockedPath(t),
 	}
 
-	_, err := newWith(cfg, linkNever(t), nil, nil, nil).Link(context.Background(), 90, true, nil)
+	_, err := newWith(cfg, linkNever(t), nil, nil, nil, nil).Link(context.Background(), 90, true, nil)
 	if err == nil {
 		t.Fatal("error = nil, want the Plaid validation failure")
 	}
@@ -142,7 +167,7 @@ func TestLinkRejectsOutOfRangeBeforeLoadingTokens(t *testing.T) {
 	}
 
 	for _, days := range []int{MinLinkDays - 1, MaxLinkDays + 1} {
-		_, err := newWith(cfg, linkNever(t), nil, nil, nil).Link(context.Background(), days, true, nil)
+		_, err := newWith(cfg, linkNever(t), nil, nil, nil, nil).Link(context.Background(), days, true, nil)
 		if err == nil {
 			t.Fatalf("Link(%d) error = nil, want the day range failure", days)
 		}
@@ -158,7 +183,7 @@ func TestLinkDoesNotOpenDuckDB(t *testing.T) {
 	cfg := tempConfig(t, "sandbox")
 	cfg.DBPath = blockedPath(t)
 
-	if _, err := newWith(cfg, linkOK, nil, nil, nil).Link(context.Background(), 730, true, nil); err != nil {
+	if _, err := newWith(cfg, linkOK, nil, nil, nil, nil).Link(context.Background(), 730, true, nil); err != nil {
 		t.Fatalf("Link: %v", err)
 	}
 	if _, found := loadTokens(t, cfg.TokensPath).Find("item-new"); !found {
@@ -208,7 +233,7 @@ func closedDirConfig(t *testing.T) (Config, func()) {
 func TestLinkKeepsTheTokenWhenTheSaveFails(t *testing.T) {
 	cfg, open := closedDirConfig(t)
 
-	_, err := newWith(cfg, linkSecret, nil, nil, nil).Link(context.Background(), 730, true, nil)
+	_, err := newWith(cfg, linkSecret, nil, nil, nil, nil).Link(context.Background(), 730, true, nil)
 	if err == nil {
 		t.Fatal("error = nil, want the failed save")
 	}
@@ -224,7 +249,7 @@ func TestLinkKeepsTheTokenWhenTheSaveFails(t *testing.T) {
 	}
 
 	open()
-	linked, err := newWith(cfg, linkNever(t), nil, nil, nil).CompleteLinkSave(notSaved.Pending)
+	linked, err := newWith(cfg, linkNever(t), nil, nil, nil, nil).CompleteLinkSave(notSaved.Pending)
 	if err != nil {
 		t.Fatalf("CompleteLinkSave: %v", err)
 	}
@@ -249,7 +274,7 @@ func TestLinkKeepsTheTokenWhenTheSaveFails(t *testing.T) {
 func TestCompleteLinkSaveKeepsWhatTheFileHoldsNow(t *testing.T) {
 	cfg, open := closedDirConfig(t)
 
-	_, err := newWith(cfg, linkSecret, nil, nil, nil).Link(context.Background(), 730, true, nil)
+	_, err := newWith(cfg, linkSecret, nil, nil, nil, nil).Link(context.Background(), 730, true, nil)
 	var notSaved *TokenNotSavedError
 	if !errors.As(err, &notSaved) {
 		t.Fatalf("error = %v (%T), want a *TokenNotSavedError", err, err)
@@ -259,7 +284,7 @@ func TestCompleteLinkSaveKeepsWhatTheFileHoldsNow(t *testing.T) {
 	open()
 	seedTokens(t, cfg.TokensPath, item("item-other", "Amex", "sandbox"))
 
-	if _, err := newWith(cfg, linkNever(t), nil, nil, nil).CompleteLinkSave(notSaved.Pending); err != nil {
+	if _, err := newWith(cfg, linkNever(t), nil, nil, nil, nil).CompleteLinkSave(notSaved.Pending); err != nil {
 		t.Fatalf("CompleteLinkSave: %v", err)
 	}
 
@@ -283,13 +308,13 @@ func TestCompleteLinkSaveKeepsWhatTheFileHoldsNow(t *testing.T) {
 func TestCompleteLinkSaveReportsTheTokenAsStillUnsaved(t *testing.T) {
 	cfg, _ := closedDirConfig(t)
 
-	_, err := newWith(cfg, linkSecret, nil, nil, nil).Link(context.Background(), 730, true, nil)
+	_, err := newWith(cfg, linkSecret, nil, nil, nil, nil).Link(context.Background(), 730, true, nil)
 	var notSaved *TokenNotSavedError
 	if !errors.As(err, &notSaved) {
 		t.Fatalf("error = %v (%T), want a *TokenNotSavedError", err, err)
 	}
 
-	_, err = newWith(cfg, linkNever(t), nil, nil, nil).CompleteLinkSave(notSaved.Pending)
+	_, err = newWith(cfg, linkNever(t), nil, nil, nil, nil).CompleteLinkSave(notSaved.Pending)
 	var again *TokenNotSavedError
 	if !errors.As(err, &again) {
 		t.Fatalf("second error = %v (%T), want a *TokenNotSavedError", err, err)
@@ -303,7 +328,7 @@ func TestCompleteLinkSaveReportsTheTokenAsStillUnsaved(t *testing.T) {
 func TestTheUnsavedTokenIsNeverWritten(t *testing.T) {
 	cfg, _ := closedDirConfig(t)
 
-	_, err := newWith(cfg, linkSecret, nil, nil, nil).Link(context.Background(), 730, true, nil)
+	_, err := newWith(cfg, linkSecret, nil, nil, nil, nil).Link(context.Background(), 730, true, nil)
 	var notSaved *TokenNotSavedError
 	if !errors.As(err, &notSaved) {
 		t.Fatalf("error = %v (%T), want a *TokenNotSavedError", err, err)
@@ -378,7 +403,7 @@ func TestTokenNotSavedErrorKeepsItsCause(t *testing.T) {
 func TestCompleteLinkSaveRefusesAnEmptyHandle(t *testing.T) {
 	cfg := tempConfig(t, "sandbox")
 
-	_, err := newWith(cfg, linkNever(t), nil, nil, nil).CompleteLinkSave(PendingSave{})
+	_, err := newWith(cfg, linkNever(t), nil, nil, nil, nil).CompleteLinkSave(PendingSave{})
 	if err == nil {
 		t.Fatal("error = nil, want a refusal of the empty handle")
 	}

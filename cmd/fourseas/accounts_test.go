@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kyle-cheung/fourseas/providence/internal/app"
 	"github.com/kyle-cheung/fourseas/providence/internal/model"
 	"github.com/shopspring/decimal"
 )
@@ -30,6 +31,88 @@ func TestAccountCellsShowADashWhenThereIsNoValue(t *testing.T) {
 	}
 	if got := accountLimit(filled); got != "10000.00" {
 		t.Errorf("accountLimit = %q, want %q", got, "10000.00")
+	}
+}
+
+func TestLiabilitiesEnableArgsAcceptOnlyTheExactCommand(t *testing.T) {
+	for _, args := range [][]string{
+		nil,
+		{"enable"},
+		{"enable", "acct-amex", "extra"},
+		{"enable", "   "},
+		{"disable", "acct-amex"},
+		{"replace", "acct-amex"},
+	} {
+		if _, err := liabilitiesEnableArgs(args); err == nil {
+			t.Errorf("liabilitiesEnableArgs(%q) = no error, want one", args)
+		}
+	}
+
+	id, err := liabilitiesEnableArgs([]string{"enable", "  acct-amex  "})
+	if err != nil {
+		t.Fatalf("liabilitiesEnableArgs: %v", err)
+	}
+	if id != "acct-amex" {
+		t.Errorf("account id = %q, want acct-amex", id)
+	}
+}
+
+func TestRunAccountLiabilitiesRejectsInvalidArgumentsBeforeStarting(t *testing.T) {
+	for _, args := range [][]string{
+		nil,
+		{"enable"},
+		{"enable", "acct-amex", "extra"},
+		{"enable", " "},
+		{"disable", "acct-amex"},
+	} {
+		called := false
+		err := runAccountLiabilitiesWith(context.Background(), args,
+			func(context.Context, string, app.Progress) error {
+				called = true
+				return nil
+			})
+		if err == nil {
+			t.Errorf("runAccountLiabilitiesWith(%q) = no error, want one", args)
+		}
+		if called {
+			t.Errorf("runAccountLiabilitiesWith(%q) started the app", args)
+		}
+	}
+}
+
+func TestRunAccountLiabilitiesEnablesTheWholeInstitutionAndRequestsASnapshot(t *testing.T) {
+	called := 0
+	gotID := ""
+	output := captureStdout(t, func() {
+		err := runAccountLiabilitiesWith(context.Background(), []string{"enable", " acct-amex "},
+			func(_ context.Context, accountID string, report app.Progress) error {
+				called++
+				gotID = accountID
+				report("Open http://localhost:8080 in your browser")
+				return nil
+			})
+		if err != nil {
+			t.Fatalf("runAccountLiabilitiesWith: %v", err)
+		}
+	})
+
+	if called != 1 || gotID != "acct-amex" {
+		t.Errorf("enable call = %d for %q, want one call for acct-amex", called, gotID)
+	}
+	for _, want := range []string{
+		"Open http://localhost:8080 in your browser",
+		"Statement data is enabled for the whole institution.",
+		"The first snapshot was requested.",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("output = %q, want it to contain %q", output, want)
+		}
+	}
+}
+
+func TestUsageIncludesTheExactLiabilitiesEnableCommand(t *testing.T) {
+	if !strings.Contains(usage, "fourseas accounts liabilities enable <account-id>") {
+		t.Error("usage does not include the exact liabilities enable command")
 	}
 }
 

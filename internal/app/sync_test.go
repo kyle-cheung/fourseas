@@ -654,9 +654,8 @@ func TestSyncItemFetchesOneLiabilitySnapshotAfterPagination(t *testing.T) {
 	}
 	var lines []string
 
-	views, err := newWith(cfg, nil, nil,
-		sourcesByItem(map[string]*fakeSource{amex.ItemID: source}), liabilities,
-	).SyncItem(context.Background(), amex.ItemID, collect(&lines))
+	views, err := newWith(cfg, nil, nil, sourcesByItem(map[string]*fakeSource{amex.ItemID: source}), liabilities, nil).
+		SyncItem(context.Background(), amex.ItemID, collect(&lines))
 	if err != nil {
 		t.Fatalf("SyncItem: %v", err)
 	}
@@ -772,8 +771,7 @@ func TestSyncItemLiabilityPolicy(t *testing.T) {
 				liabilityCalls++
 				return nil, tt.liabilityErr
 			}
-			client := newWith(cfg, nil, nil,
-				sourcesByItem(map[string]*fakeSource{amex.ItemID: source}), liabilities)
+			client := newWith(cfg, nil, nil, sourcesByItem(map[string]*fakeSource{amex.ItemID: source}), liabilities, nil)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			if tt.cancelBefore {
@@ -850,9 +848,8 @@ func TestSyncAllKeepsCommittedAccountViewsOnLiabilityFailure(t *testing.T) {
 	}
 	var lines []string
 
-	results, err := newWith(cfg, nil, nil,
-		sourcesByItem(map[string]*fakeSource{amex.ItemID: source}), liabilities,
-	).SyncAll(context.Background(), collect(&lines))
+	results, err := newWith(cfg, nil, nil, sourcesByItem(map[string]*fakeSource{amex.ItemID: source}), liabilities, nil).
+		SyncAll(context.Background(), collect(&lines))
 	if err != nil {
 		t.Fatalf("SyncAll: %v", err)
 	}
@@ -883,9 +880,8 @@ func TestSyncItemEnabledLiabilitiesRequiresADependency(t *testing.T) {
 		Accounts:   []model.Account{syncAccount(amex.ItemID, "acct-item-amex")},
 		NextCursor: "c1",
 	}}}
-	views, err := newWith(cfg, nil, nil,
-		sourcesByItem(map[string]*fakeSource{amex.ItemID: source}), nil,
-	).SyncItem(context.Background(), amex.ItemID, nil)
+	views, err := newWith(cfg, nil, nil, sourcesByItem(map[string]*fakeSource{amex.ItemID: source}), nil, nil).
+		SyncItem(context.Background(), amex.ItemID, nil)
 	if err == nil {
 		t.Fatal("SyncItem error = nil, want a missing liability dependency error")
 	}
@@ -911,7 +907,7 @@ func TestSyncItemReturnsOnlyAccountsForTheNewItem(t *testing.T) {
 		"item-amex": onePage(syncAccount("item-amex", "acct-amex")),
 	})
 
-	accounts, err := newWith(cfg, nil, nil, sources, nil).SyncItem(context.Background(), "item-amex", nil)
+	accounts, err := newWith(cfg, nil, nil, sources, nil, nil).SyncItem(context.Background(), "item-amex", nil)
 	if err != nil {
 		t.Fatalf("SyncItem: %v", err)
 	}
@@ -935,7 +931,7 @@ func TestSyncItemRecordsFullProductNotReadyError(t *testing.T) {
 		provider.ErrProductNotReady, message)
 	sources := sourcesByItem(map[string]*fakeSource{"item-amex": failingSource(plaidErr)})
 
-	_, err := newWith(cfg, nil, nil, sources, nil).SyncItem(context.Background(), "item-amex", nil)
+	_, err := newWith(cfg, nil, nil, sources, nil, nil).SyncItem(context.Background(), "item-amex", nil)
 	if err == nil {
 		t.Fatal("SyncItem error = nil, want the Plaid failure")
 	}
@@ -965,7 +961,7 @@ func TestSyncAllContinuesAfterOneItemFails(t *testing.T) {
 	})
 	var lines []string
 
-	results, err := newWith(cfg, nil, nil, sources, nil).SyncAll(context.Background(), collect(&lines))
+	results, err := newWith(cfg, nil, nil, sources, nil, nil).SyncAll(context.Background(), collect(&lines))
 	if err != nil {
 		t.Fatalf("SyncAll: %v", err)
 	}
@@ -1011,7 +1007,7 @@ func TestSyncAllUsesItemIDWhenInstitutionIsEmpty(t *testing.T) {
 	sources := sourcesByItem(map[string]*fakeSource{"item-nameless": onePage()})
 	var lines []string
 
-	results, err := newWith(cfg, nil, nil, sources, nil).SyncAll(context.Background(), collect(&lines))
+	results, err := newWith(cfg, nil, nil, sources, nil, nil).SyncAll(context.Background(), collect(&lines))
 	if err != nil {
 		t.Fatalf("SyncAll: %v", err)
 	}
@@ -1040,7 +1036,7 @@ func TestSyncAllReportsCancellationAsTheOperationError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	results, err := newWith(cfg, nil, nil, sources, nil).SyncAll(ctx, nil)
+	results, err := newWith(cfg, nil, nil, sources, nil, nil).SyncAll(ctx, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("SyncAll error = %v, want it to report the cancellation", err)
 	}
@@ -1063,7 +1059,7 @@ func TestSyncAllRefusesWhenNothingIsLinked(t *testing.T) {
 	cfg := tempConfig(t, "sandbox")
 	seedTokens(t, cfg.TokensPath)
 
-	_, err := newWith(cfg, nil, nil, nil, nil).SyncAll(context.Background(), nil)
+	_, err := newWith(cfg, nil, nil, nil, nil, nil).SyncAll(context.Background(), nil)
 	if err == nil {
 		t.Fatal("SyncAll error = nil, want the nothing-linked failure")
 	}

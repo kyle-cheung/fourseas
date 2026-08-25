@@ -1,9 +1,13 @@
 package tokens
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestUpsertReplacesInPlaceAndLeavesTheOriginalAlone(t *testing.T) {
@@ -109,6 +113,173 @@ func TestSaveThenLoad(t *testing.T) {
 	}
 	if !got.Items[0].Liabilities {
 		t.Error("liabilities = false after save and load, want true")
+	}
+}
+
+func TestSaveDoesNotReplaceTheFileWhenTheTempWriteFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens.json")
+	original := File{Items: []Item{{ItemID: "item-original", AccessToken: "original-token"}}}
+	if err := Save(path, original); err != nil {
+		t.Fatalf("seed tokens: %v", err)
+	}
+
+	wantErr := errors.New("injected interrupted write")
+	originalWrite := writeTokenTemp
+	writeTokenTemp = func(file *os.File, data []byte) error {
+		if _, err := file.Write(data[:len(data)/2]); err != nil {
+			return err
+		}
+		return wantErr
+	}
+	t.Cleanup(func() { writeTokenTemp = originalWrite })
+
+	err := Save(path, File{Items: []Item{{ItemID: "item-new", AccessToken: "new-token"}}})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Save error = %v, want injected write failure", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("load tokens: %v", err)
+	}
+	if len(got.Items) != 1 || got.Items[0].ItemID != "item-original" {
+		t.Errorf("tokens after failed Save = %+v, want the original file", got.Items)
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("read token directory: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".tmp-") {
+			t.Errorf("failed Save left temporary file %q", entry.Name())
+		}
+	}
+}
+
+func TestMutateSerializesProcessesAndPreservesBothItems(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens.json")
+	if err := Save(path, File{}); err != nil {
+		t.Fatalf("seed tokens: %v", err)
+	}
+
+	dir := filepath.Dir(path)
+	firstEntered := filepath.Join(dir, "first-entered")
+	secondEntered := filepath.Join(dir, "second-entered")
+	releaseFirst := filepath.Join(dir, "release-first")
+	first := tokenHelperCommand(path, "item-a", firstEntered, releaseFirst)
+	if err := first.Start(); err != nil {
+		t.Fatalf("start first token process: %v", err)
+	}
+	t.Cleanup(func() { _ = first.Process.Kill() })
+	waitForPath(t, firstEntered)
+
+	second := tokenHelperCommand(path, "item-b", secondEntered, "")
+	if err := second.Start(); err != nil {
+		t.Fatalf("start second token process: %v", err)
+	}
+	t.Cleanup(func() { _ = second.Process.Kill() })
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- second.Wait() }()
+	select {
+	case err := <-secondDone:
+		t.Fatalf("second process ended before the first released the lock: %v", err)
+	case <-time.After(200 * time.Millisecond):
+		if _, err := os.Stat(secondEntered); !os.IsNotExist(err) {
+			t.Fatalf("second process entered the mutation while the first held the lock: %v", err)
+		}
+	}
+
+	if err := os.WriteFile(releaseFirst, nil, 0o600); err != nil {
+		t.Fatalf("release first process: %v", err)
+	}
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- first.Wait() }()
+	waitForProcess(t, "first", firstDone)
+	waitForProcess(t, "second", secondDone)
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got.Items) != 2 {
+		t.Fatalf("got %d Items, want both stale writers to be preserved", len(got.Items))
+	}
+	for _, itemID := range []string{"item-a", "item-b"} {
+		if _, found := got.Find(itemID); !found {
+			t.Errorf("final file does not contain %s", itemID)
+		}
+	}
+}
+
+func TestMutateSubprocessHelper(t *testing.T) {
+	if os.Getenv("FOURSEAS_TOKEN_HELPER") != "1" {
+		return
+	}
+	path := os.Getenv("FOURSEAS_TOKEN_PATH")
+	itemID := os.Getenv("FOURSEAS_TOKEN_ITEM")
+	entered := os.Getenv("FOURSEAS_TOKEN_ENTERED")
+	release := os.Getenv("FOURSEAS_TOKEN_RELEASE")
+	_, err := Mutate(path, func(current File) (File, error) {
+		if err := os.WriteFile(entered, nil, 0o600); err != nil {
+			return File{}, err
+		}
+		if release != "" {
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				if _, err := os.Stat(release); err == nil {
+					break
+				} else if !os.IsNotExist(err) {
+					return File{}, err
+				}
+				if time.Now().After(deadline) {
+					return File{}, errors.New("timed out waiting for subprocess release")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+		return current.Upsert(Item{ItemID: itemID, AccessToken: itemID + "-token"}), nil
+	})
+	if err != nil {
+		t.Fatalf("Mutate: %v", err)
+	}
+}
+
+func tokenHelperCommand(path, itemID, entered, release string) *exec.Cmd {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestMutateSubprocessHelper$")
+	cmd.Env = append(os.Environ(),
+		"FOURSEAS_TOKEN_HELPER=1",
+		"FOURSEAS_TOKEN_PATH="+path,
+		"FOURSEAS_TOKEN_ITEM="+itemID,
+		"FOURSEAS_TOKEN_ENTERED="+entered,
+		"FOURSEAS_TOKEN_RELEASE="+release,
+	)
+	return cmd
+}
+
+func waitForPath(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat coordination path: %v", err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", path)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func waitForProcess(t *testing.T, name string, done <-chan error) {
+	t.Helper()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("%s token process: %v", name, err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timed out waiting for %s token process", name)
 	}
 }
 

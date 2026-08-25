@@ -46,3 +46,41 @@ func TestLinkTokenRequestCarriesNewItemProductsAndRequestedDays(t *testing.T) {
 		})
 	}
 }
+
+func TestLinkTokenRequestCarriesOnlyUpdateLiabilitiesConsent(t *testing.T) {
+	const accessToken = "test-update-access-token"
+	cfg := Config{RedirectURI: "https://example.test/oauth"}
+
+	req := linkTokenRequest(cfg, linkRequest{accessToken: accessToken})
+
+	if got := req.GetClientName(); got != "Fourseas" {
+		t.Errorf("client_name = %q, want Fourseas", got)
+	}
+	if got := req.GetLanguage(); got != "en" {
+		t.Errorf("language = %q, want en", got)
+	}
+	wantCountries := []plaidsdk.CountryCode{plaidsdk.COUNTRYCODE_US, plaidsdk.COUNTRYCODE_CA}
+	if got := req.GetCountryCodes(); !reflect.DeepEqual(got, wantCountries) {
+		t.Errorf("country_codes = %v, want %v", got, wantCountries)
+	}
+	user := req.GetUser()
+	if got := user.GetClientUserId(); got != "fourseas-local-user" {
+		t.Errorf("user.client_user_id = %q, want fourseas-local-user", got)
+	}
+	if got := req.GetRedirectUri(); got != cfg.RedirectURI {
+		t.Errorf("redirect_uri = %q, want %q", got, cfg.RedirectURI)
+	}
+	if got := req.GetAccessToken(); got != accessToken {
+		t.Error("access_token does not match the existing Item token")
+	}
+	wantAdditional := []plaidsdk.Products{plaidsdk.PRODUCTS_LIABILITIES}
+	if got := req.GetAdditionalConsentedProducts(); !reflect.DeepEqual(got, wantAdditional) {
+		t.Errorf("additional_consented_products = %v, want %v", got, wantAdditional)
+	}
+	if _, set := req.GetProductsOk(); set {
+		t.Error("products is set in update mode")
+	}
+	if _, set := req.GetTransactionsOk(); set {
+		t.Error("transactions is set in update mode")
+	}
+}

@@ -80,9 +80,8 @@ func (e *TokenNotSavedError) Unwrap() error { return e.Err }
 // CompleteLinkSave writes the access token of an item Plaid has already
 // created. It is the retry of a failed save, and it never calls Plaid.
 //
-// It reads the token file again first, because the user may have repaired that
-// file between the failure and this call. The snapshot taken at the failure is
-// used only when the file cannot be read now, so a repair is never overwritten.
+// It reloads the token file under an exclusive lock, because the user may have
+// repaired that file between the failure and this call.
 //
 // It returns the same LinkedItem a successful Link returns. A save that fails
 // again returns another *TokenNotSavedError, so the caller keeps the token and
@@ -91,11 +90,9 @@ func (a *App) CompleteLinkSave(pending PendingSave) (LinkedItem, error) {
 	if pending.item.ItemID == "" || pending.path == "" {
 		return LinkedItem{}, fmt.Errorf("no unsaved link to complete")
 	}
-	file := pending.file
-	if fresh, err := tokens.Load(pending.path); err == nil {
-		file = fresh
-	}
-	if err := tokens.Save(pending.path, file.Upsert(pending.item)); err != nil {
+	if _, err := tokens.Mutate(pending.path, func(current tokens.File) (tokens.File, error) {
+		return current.Upsert(pending.item), nil
+	}); err != nil {
 		return LinkedItem{}, &TokenNotSavedError{Pending: pending, Err: err}
 	}
 	return LinkedItem{ItemID: pending.item.ItemID, Institution: pending.item.Institution}, nil
@@ -130,7 +127,9 @@ func (a *App) Link(ctx context.Context, days int, liabilities bool, report Progr
 		Institution: result.Institution, Env: a.cfg.Plaid.Env, Liabilities: liabilities,
 		LinkedAt: time.Now().UTC(),
 	}
-	if err := tokens.Save(a.cfg.TokensPath, saved.Upsert(item)); err != nil {
+	if _, err := tokens.Mutate(a.cfg.TokensPath, func(current tokens.File) (tokens.File, error) {
+		return current.Upsert(item), nil
+	}); err != nil {
 		// Plaid bills this item from now on, and item holds the only handle to
 		// it. The token goes back to the caller instead of being dropped.
 		return LinkedItem{}, &TokenNotSavedError{
