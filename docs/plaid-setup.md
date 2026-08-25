@@ -77,6 +77,37 @@ after moving to production, they are left over from a sandbox run.
 3. Link each card again. A sandbox access token does not work in production, and
    the CLI skips tokens that were linked in a different environment.
 
+## 6. Liabilities consent and billing
+
+New links request Plaid Liabilities consent by default. Use
+`fourseas link --liabilities=false` to opt out before Plaid creates the Item.
+Liabilities is a separate Plaid product. Separate billing may begin when
+fourseas calls `/liabilities/get`.
+
+To request consent for an existing credit account, run:
+
+```sh
+fourseas accounts liabilities enable <account-id>
+```
+
+The account selects an Item. Plaid Link update mode applies the consent to the
+whole institution, not to one account. The update request sends the existing
+access token and the usual Link and OAuth redirect fields. It omits products
+and transaction history. It does not exchange a public token after success, so
+the Item keeps its access token.
+
+The local completion callback accepts JSON `POST` requests only. It checks the
+callback host, origin, and a per-session nonce. After browser success, fourseas
+reloads the token file under its cross-process write lock. It preserves Items
+that another process added while Link was open. It also verifies that the
+target Item, environment, and access token did not change before it enables the
+setting. Token writes are owner-only and use atomic replacement.
+
+Fourseas cannot disable Liabilities on an active Item. To stop the subscription,
+unlink the Item and link it again with `--liabilities=false`. Issue
+[#24](https://github.com/kyle-cheung/fourseas/issues/24) tracks a replace-Item
+workflow.
+
 ## Limits worth knowing
 
 **History is chosen once, at link time.** `fourseas link` sends
@@ -113,6 +144,13 @@ an intermediate cursor saved by an older version and performs one full sync.
 **One cursor for each institution, not for each account.** `/transactions/sync`
 works on an access token, and one access token covers every account in that
 institution. A single card cannot be synced alone.
+
+**Liabilities refreshes only when enabled.** Each Item stores its local enabled
+setting. Fourseas calls `/liabilities/get` once after all transaction pages
+complete. `PRODUCT_NOT_READY` is a temporary success: fourseas keeps the old
+snapshot and tries again on the next sync. Missing consent keeps the snapshot
+and exposes the enable action in account details. Other failures also keep the
+snapshot and return the account values from committed transaction pages.
 
 **Pending and posted are separate transactions.** Plaid gives them different
 transaction ids, and the posted one carries `pending_transaction_id` pointing at

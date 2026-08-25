@@ -28,9 +28,11 @@ Plaid needs setup in its dashboard before `link` works. See
 | `fourseas link` | Link one institution through Plaid Link in the browser |
 | `fourseas sync` | Fetch what changed from Plaid, refresh FX rates, and print the newest rows |
 | `fourseas link --days <n>` | Link with `n` days of history. 30 to 730, 730 by default |
+| `fourseas link --liabilities=false` | Opt out of Plaid Liabilities before the Item is created |
 | `fourseas sync --fx` | Refresh FX rates only |
-| `fourseas accounts` | List accounts with ids, balances, and nicknames |
+| `fourseas accounts` | List accounts with balances, limits, due dates, payment data, and ids |
 | `fourseas accounts nickname <id> "<name>"` | Name an account. An empty name clears it |
+| `fourseas accounts liabilities enable <id>` | Request Liabilities consent for the account's institution |
 | `fourseas show` | Print the newest stored rows without calling Plaid |
 | `fourseas unlink <item-id>` | Remove one institution at Plaid, then delete its local token and data. Asks first |
 | `fourseas unlink --list` | List the linked institutions with the item ids `unlink` takes |
@@ -75,6 +77,40 @@ Two more points:
   looks short.
 - **The bank sets the real limit.** 730 days is what Plaid permits, not what
   every institution holds. You get what the bank provides.
+
+### Statement and payment data
+
+New links request consent for Plaid Liabilities by default. This product can
+supply a credit card due date and its latest payment. Separate Plaid
+Liabilities billing may begin when fourseas calls the endpoint. Use
+`fourseas link --liabilities=false` to opt out before Plaid creates the Item.
+
+An existing credit account can request consent later:
+
+```bash
+bin/fourseas accounts liabilities enable <account-id>
+```
+
+The command opens Plaid Link in update mode for the whole institution. It keeps
+the existing Item and access token. A successful update does not exchange a
+new token. Fourseas then records the setting and requests the first snapshot.
+
+Each normal sync refreshes Liabilities only for Items that have the setting
+enabled. `PRODUCT_NOT_READY` is temporary: the sync succeeds, keeps any stored
+snapshot, and tries again next time. Missing consent also keeps the snapshot
+and makes the enable action available in account details. Other Liabilities
+failures keep the snapshot and the transaction pages that already committed.
+The account result still contains those committed values.
+
+`fourseas accounts` puts the currency in each balance and limit cell. It does
+not use a separate currency column. The terminal interface shows account,
+balance, due date, and latest payment in a summary table above the main menu.
+Missing values use `—`.
+
+Fourseas cannot disable an active Liabilities subscription in place. Unlink
+the Item and link it again with `--liabilities=false`. Issue
+[#24](https://github.com/kyle-cheung/fourseas/issues/24) tracks a replace-Item
+workflow.
 
 ### Remove a card
 
@@ -315,8 +351,10 @@ that window until you remove the item and link it again.
 the two can never disagree. Deleting the file fetches everything again, which is
 cheap and safe.
 
-**Access tokens sit in a plain file.** `.secrets/tokens.json`, mode 0600, not in
-git. This is good enough for one local user, and not for anything shared.
+**Access tokens sit in a plain file.** `.secrets/tokens.json` is not in git.
+Token and lock files are owner-only. Writes use a temporary file and atomic
+replacement under a cross-process lock. This is for one local user, not for a
+shared machine.
 
 **One user, one machine.** No accounts, no sharing, no sync between machines.
 
@@ -329,11 +367,15 @@ sum of money is wrong.
 | ----- | ----- |
 | `institutions` | One row for each linked Plaid Item |
 | `accounts` | One row for each card, with balances and the nickname |
+| `account_liabilities` | Local Plaid Liabilities data for each credit account |
 | `transactions` | Every transaction, including the superseded ones |
 | `fx_rates` | Daily exchange rates from each currency to USD |
 | `sync_state` | The cursor for each institution |
 | `schema_version` | One integer |
 | `v_transactions` | The view above: joined, and without superseded rows |
+
+`AccountViews` left-joins `account_liabilities`. An account stays visible when
+it has no Liabilities row.
 
 There is no migration framework. When the file on disk has another version, the
 command stops and tells you to run `fourseas reset`. All of this data can be

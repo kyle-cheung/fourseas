@@ -22,9 +22,11 @@ text.
 
 ## The internal/app contract
 
-`*app.App` has eight operations: `Accounts`, `Link`, `CompleteLinkSave`,
-`SyncItem`, `SyncAll`, `SetNickname`, `UnlinkPreview`, and `Unlink`. The
-`service` interface in `internal/tui/model.go` lists the same eight.
+`*app.App` has nine operations: `Accounts`, `Link`, `CompleteLinkSave`,
+`EnableLiabilities`, `SyncItem`, `SyncAll`, `SetNickname`, `UnlinkPreview`, and
+`Unlink`. The `service` interface in `internal/tui/model.go` lists the same
+nine. The TUI operation enum has ten values. It gives the account refresh after
+Liabilities consent its own `postEnableRefreshOperation` state.
 
 Rules that the code depends on:
 
@@ -60,6 +62,20 @@ Rules that the code depends on:
 - The local half of `Unlink` runs on `context.WithoutCancel` with the bound
   `localCleanupTimeout`, after Plaid agrees to the removal. The user cannot stop
   the local deletes, because Plaid no longer bills the item.
+- `App.EnableLiabilities(accountID)` resolves a credit account to its Item. It
+  opens Plaid Link in update mode for that whole institution. Update mode keeps
+  the access token and common Link and OAuth redirect fields. It omits products
+  and transaction history, and it does not exchange a token.
+- The update completion endpoint accepts a local JSON `POST` only. It validates
+  the Host and Origin headers and a per-session nonce. After success, the app
+  reloads and changes the current token file under the write lock. This keeps
+  concurrent Items and rejects a changed target token or environment. Token
+  files use owner-only, atomic writes under a cross-process lock.
+- `SyncItem` calls Liabilities once, after transaction pagination, only when the
+  Item setting is enabled. `ErrProductNotReady` preserves the old snapshot and
+  returns success. Missing consent preserves the snapshot and records an
+  actionable state. Other errors preserve the snapshot and return the account
+  views for data that already committed.
 
 ## The TUI model
 
@@ -119,6 +135,27 @@ Bubble Tea methods use pointer receivers, so `Update` returns the same model.
   `cancelled` and `recoverWith` return to that screen. The exception is a
   cancelled first sync of a new link: the model shows the account list, because
   enter on the history screen would create a second billed item.
+- `Add account` opens `addSetupScreen`. It starts with 730 history days and
+  Liabilities set to `Yes`. Enter on the history row opens `historyScreen`.
+  Enter on the Liabilities row toggles the value. Enter on `Continue` passes
+  both values to `startLink`.
+- A credit account detail shows `Enable statement data` when its Item is off or
+  the last sync recorded missing consent. The action calls
+  `EnableLiabilities` for the account. A success marks the Item enabled before
+  it starts `postEnableRefreshOperation`, so the stale action cannot appear
+  during the refresh.
+- `EnableLiabilities` can return a cancellation after Plaid consent succeeds,
+  `Liabilities=true` is saved, and the first `/liabilities/get` call begins.
+  This cancellation can follow a stored or billed state change. The TUI shows
+  recovery instead of hiding it. Retry repeats the enable and consent action
+  for the same account.
+- A nil `EnableLiabilities` result starts `postEnableRefreshOperation`. If that
+  account reload fails or is canceled, recovery says that consent succeeded.
+  Retry reloads `Accounts` only. It does not open Link or call the Liabilities
+  endpoint again.
+- `Main` from recovery refreshes account state. Do not hide cancellation after
+  an operation that can have changed billed or stored state. The recovery text
+  must state which change completed and what Retry does.
 - `m.send` is `program.Send`, and `Run` sets it. It stays nil in a test, so
   `report` checks it before use.
 - `m.now` is the clock. A test replaces it.
@@ -143,6 +180,13 @@ follows.
 - `m.header(title)` writes the brand `fourseas ≋` and the name of the screen.
   `m.footer(keys)` writes `m.stateLines()`, then the faint rule and the key
   help. Both return lines, so a screen builder appends them.
+- The main screen puts the account summary above the `Main menu` heading. The
+  summary has `Account`, `Balance`, `Due`, and `Last payment` columns. Money
+  includes its currency. Missing values use the shared `format.missing` value.
+  The table has no border, does not wrap cells, and keeps one account on one
+  line. Lipgloss chooses the natural table width. Each rendered line then gets
+  the normal left gutter and is cut to the TUI content width. Do not force the
+  table to fill the terminal.
 - `m.stateLines()` is the one slot every screen keeps for what the interface is
   doing now, or for what it has just done: the running line, then a leftover
   progress line, then the outcome of the last flow. It sits above the rule,
@@ -188,6 +232,8 @@ follows.
    set before the call is lost. Set a retry only when the operation can run
    again as it was.
 7. Add the operation to `destructive` if it changes stored or billed state.
+   A destructive cancellation must open truthful recovery instead of returning
+   silently to the old screen.
 
 ## How to test
 
@@ -201,6 +247,9 @@ follows.
 - `fakeService` records `completeCalls` beside `linkDays`. A test of a failed
   save asserts both: the retry must call `CompleteLinkSave` once and must not
   call `Link` a second time.
+- Enable-flow tests must check each state boundary. A post-consent refresh retry
+  must increase the `Accounts` call count without increasing the
+  `EnableLiabilities` call count.
 - To read a screen, call the `content` helper. It returns `m.View().Content`
   with the escape sequences removed, so an assertion compares printable text.
   The `hasRow` helper checks that one line holds a label and its value in the
@@ -219,5 +268,5 @@ follows.
   accounts overflow a short terminal.
 - The default SIGTERM handling of Bubble Tea sends `QuitMsg` and ends the
   process. The active operation is not cancelled.
-- `internal/tokens` writes the token file with `os.WriteFile`, without a
-  temporary file and a rename.
+- The implementation is designed to support Windows token locking and
+  replacement. The runtime path still needs verification on a Windows host.
