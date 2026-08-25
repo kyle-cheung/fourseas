@@ -8,8 +8,8 @@ Every step here was found by hitting the failure it prevents.
 
 ## 1. Account and keys
 
-Make an account at <https://dashboard.plaid.com>. The entry tier is free and
-gives live production data at a small scale. You do not talk to sales for it.
+Make an account at <https://dashboard.plaid.com>. Sandbox is free. Plaid's Trial
+plan gives free Production access within its plan limits.
 
 Get the client id and the secrets from **Developers > Keys**. The sandbox secret
 and the production secret are different values. Using the sandbox secret against
@@ -81,8 +81,7 @@ after moving to production, they are left over from a sandbox run.
 
 New links request Plaid Liabilities consent by default. Use
 `fourseas link --liabilities=false` to opt out before Plaid creates the Item.
-Liabilities is a separate Plaid product. Separate billing may begin when
-fourseas calls `/liabilities/get`.
+Liabilities is a separate Plaid product.
 
 To request consent for an existing credit account, run:
 
@@ -90,18 +89,18 @@ To request consent for an existing credit account, run:
 fourseas accounts liabilities enable <account-id>
 ```
 
-The account selects an Item. Plaid Link update mode applies the consent to the
-whole institution, not to one account. The update request sends the existing
-access token and the usual Link and OAuth redirect fields. It omits products
-and transaction history. It does not exchange a public token after success, so
-the Item keeps its access token.
+The account selects an Item. Plaid Link update mode applies consent to the whole
+institution, not to one account. It keeps the Item and its access token. See
+[the TUI maintainer guide](tui.md#the-internalapp-contract) for callback,
+recovery, and token-storage details.
 
-The local completion callback accepts JSON `POST` requests only. It checks the
-callback host, origin, and a per-session nonce. After browser success, fourseas
-reloads the token file under its cross-process write lock. It preserves Items
-that another process added while Link was open. It also verifies that the
-target Item, environment, and access token did not change before it enables the
-setting. Token writes are owner-only and use atomic replacement.
+[Plaid's billing guide](https://plaid.com/docs/account/billing/) states that
+Sandbox is free and the Trial plan includes free Production use within its
+limits. On paid Production plans, Transactions and Liabilities use subscription
+pricing. Your agreement with Plaid controls the actual charges. After a
+subscription product is added, Plaid can charge while the Item has a valid
+access token even if fourseas makes no more API calls or calls fail.
+`/item/remove` ends the subscription.
 
 Fourseas cannot disable Liabilities on an active Item. To stop the subscription,
 unlink the Item and link it again with `--liabilities=false`. Issue
@@ -120,15 +119,11 @@ cannot be raised for the life of the item: `days_requested` in a later
 already linked, run `fourseas unlink <item-id>` and link the card again. Use
 `fourseas link --days <n>` (30 to 730) to ask for less.
 
-**Plaid bills every live item, each month.** The Transactions product is charged
-for each item you hold, whether or not you sync it. Deleting the local access
-token does not stop that charge: the item stays alive at Plaid, and the token
-that could have removed it is gone.
-
-`fourseas unlink <item-id>` calls `/item/remove` first, and only then deletes the
-local rows and the token. That is what stops the cost. `fourseas unlink --list`
-shows the item ids. An item Plaid already dropped answers `ITEM_NOT_FOUND`, which
-unlink treats as a success and carries on with the local delete.
+**Use `/item/remove` to end a paid subscription.** Deleting the local token does
+not remove the Item at Plaid. `fourseas unlink <item-id>` calls `/item/remove`
+first, then deletes local rows and the token. `fourseas unlink --list` shows the
+Item IDs. An Item Plaid already dropped returns `ITEM_NOT_FOUND`; unlink treats
+that response as success and continues with the local delete.
 
 **A long first sync can be interrupted by the bank.** When the transaction data
 of an item changes while the pages are read, Plaid fails the call with
