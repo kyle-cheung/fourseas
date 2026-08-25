@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/kyle-cheung/fourseas/providence/internal/model"
 	"github.com/kyle-cheung/fourseas/providence/internal/provider"
@@ -25,6 +26,33 @@ const legacyCursorFailures = 2
 
 // labelWidth keeps the item name of every reported line in one column.
 const labelWidth = 28
+
+const redactedAccessToken = "[REDACTED]"
+
+type accessTokenError struct {
+	err  error
+	text string
+}
+
+func (e *accessTokenError) Error() string { return e.text }
+
+func (e *accessTokenError) Unwrap() error { return e.err }
+
+// redactAccessToken removes the known Item token from displayed and stored
+// error text. Unwrap keeps sentinel classification available to callers.
+func redactAccessToken(err error, accessToken string) error {
+	if err == nil || accessToken == "" {
+		return err
+	}
+	text := err.Error()
+	if !strings.Contains(text, accessToken) {
+		return err
+	}
+	return &accessTokenError{
+		err:  err,
+		text: strings.ReplaceAll(text, accessToken, redactedAccessToken),
+	}
+}
 
 // SyncItem fetches the new transactions of one linked institution and returns
 // the accounts that item holds afterwards.
@@ -107,14 +135,19 @@ func (a *App) syncItem(ctx context.Context, db *store.Store, item tokens.Item, r
 	if err == nil {
 		return views, nil
 	}
+	err = redactAccessToken(err, item.AccessToken)
 	if ctx.Err() != nil {
-		return nil, err
+		return views, err
 	}
-	statusErr := db.SetStatus(ctx, plaid.ProviderName, item.ItemID, err.Error())
+	status := err.Error()
+	if errors.Is(err, provider.ErrAdditionalConsentRequired) {
+		status = liabilitiesConsentRequiredStatus + status
+	}
+	statusErr := db.SetStatus(ctx, plaid.ProviderName, item.ItemID, status)
 	if statusErr != nil {
-		return nil, errors.Join(err, statusErr)
+		return views, errors.Join(err, statusErr)
 	}
-	return nil, err
+	return views, err
 }
 
 // readItem pages through one item's changes and writes them to the store.
@@ -134,6 +167,15 @@ func (a *App) readItem(ctx context.Context, db *store.Store, item tokens.Item, r
 	if err != nil {
 		return nil, err
 	}
+	if item.Liabilities {
+		if liabilityErr := a.refreshLiabilities(ctx, db, item); liabilityErr != nil {
+			views, viewErr := db.AccountViews(ctx)
+			if viewErr != nil {
+				return nil, errors.Join(liabilityErr, viewErr)
+			}
+			return filterAccounts(views, item.ItemID), liabilityErr
+		}
+	}
 	views, err := db.AccountViews(ctx)
 	if err != nil {
 		return nil, err
@@ -142,6 +184,24 @@ func (a *App) readItem(ctx context.Context, db *store.Store, item tokens.Item, r
 	progress(report, itemLine(item, "%d added, %d modified, %d removed",
 		counts.added, counts.modified, counts.removed))
 	return filterAccounts(views, item.ItemID), nil
+}
+
+// refreshLiabilities applies the result policy for one complete Item snapshot.
+func (a *App) refreshLiabilities(ctx context.Context, db *store.Store, item tokens.Item) error {
+	if a.liabilities == nil {
+		return errors.New("liability fetch is not configured")
+	}
+	rows, err := a.liabilities(ctx, a.cfg.Plaid, item.AccessToken)
+	switch {
+	case err == nil:
+		return db.ReplaceLiabilities(ctx, plaid.ProviderName, item.ItemID, rows)
+	case errors.Is(err, provider.ErrNoLiabilityAccounts):
+		return db.ReplaceLiabilities(ctx, plaid.ProviderName, item.ItemID, nil)
+	case errors.Is(err, provider.ErrProductNotReady):
+		return nil
+	default:
+		return err
+	}
 }
 
 // itemLine is one reported line about one item, in the shared name column.

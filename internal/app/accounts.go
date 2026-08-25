@@ -28,10 +28,26 @@ func (a *App) Accounts(ctx context.Context, itemID string) (AccountData, error) 
 	}
 
 	data := AccountData{
-		Accounts: filterAccounts(views, itemID),
-		States:   syncStates(states, saved, itemID),
+		Accounts:           filterAccounts(views, itemID),
+		States:             syncStates(states, saved, itemID),
+		LiabilitiesEnabled: liabilitiesEnabled(saved, itemID),
 	}
 	return data, nil
+}
+
+func liabilitiesEnabled(saved tokens.File, itemID string) map[string]bool {
+	enabled := make(map[string]bool, len(saved.Items))
+	for _, item := range saved.Items {
+		if itemID != "" && item.ItemID != itemID {
+			continue
+		}
+		enabled[item.ItemID] = item.Liabilities
+	}
+	return enabled
+}
+
+func liabilitiesConsentRequired(status string) bool {
+	return strings.HasPrefix(status, liabilitiesConsentRequiredStatus)
 }
 
 // SetNickname gives one account the name the user calls it by. A blank
@@ -74,10 +90,11 @@ func syncStates(states []model.SyncState, saved tokens.File, itemID string) []Sy
 			institution = Label(item)
 		}
 		out = append(out, SyncState{
-			ItemID:       state.ItemID,
-			Institution:  institution,
-			LastSyncedAt: state.LastSyncedAt,
-			LastStatus:   state.LastStatus,
+			ItemID:                     state.ItemID,
+			Institution:                institution,
+			LastSyncedAt:               state.LastSyncedAt,
+			LastStatus:                 state.LastStatus,
+			LiabilitiesConsentRequired: liabilitiesConsentRequired(state.LastStatus),
 		})
 	}
 	return out

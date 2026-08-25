@@ -21,6 +21,7 @@ type Item struct {
 	AccessToken string    `json:"access_token"`
 	Institution string    `json:"institution"`
 	Env         string    `json:"env"`
+	Liabilities bool      `json:"liabilities"`
 	LinkedAt    time.Time `json:"linked_at"`
 }
 

@@ -20,13 +20,19 @@ import (
 
 // fakeSource returns a fixed list of pages and records the cursors it was given.
 type fakeSource struct {
+	name    string
 	pages   []provider.Batch
 	errs    []error
 	call    int
 	cursors []string
 }
 
-func (f *fakeSource) Name() string { return "fake" }
+func (f *fakeSource) Name() string {
+	if f.name != "" {
+		return f.name
+	}
+	return "fake"
+}
 
 func (f *fakeSource) Sync(_ context.Context, cursor string) (provider.Batch, error) {
 	f.cursors = append(f.cursors, cursor)
@@ -571,6 +577,327 @@ func lastStatus(t *testing.T, dbPath, itemID string) string {
 	return ""
 }
 
+// seedLiabilitySnapshot stores one old snapshot for the account that
+// seedStore created. The matching account must exist before this helper runs.
+func seedLiabilitySnapshot(t *testing.T, dbPath, itemID string, fetchedAt time.Time) {
+	t.Helper()
+	db, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	row := model.CreditLiability{
+		Provider:  plaid.ProviderName,
+		ItemID:    itemID,
+		AccountID: "acct-" + itemID,
+		FetchedAt: fetchedAt,
+	}
+	if err := db.ReplaceLiabilities(context.Background(), plaid.ProviderName, itemID, []model.CreditLiability{row}); err != nil {
+		t.Fatalf("seed liability snapshot: %v", err)
+	}
+}
+
+// accountViews reads committed account data after an operation closes its
+// database handle.
+func accountViews(t *testing.T, dbPath string) []model.AccountView {
+	t.Helper()
+	db, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	views, err := db.AccountViews(context.Background())
+	if err != nil {
+		t.Fatalf("account views: %v", err)
+	}
+	return views
+}
+
+func assertNoAccessToken(t *testing.T, accessToken string, values ...string) {
+	t.Helper()
+	for _, value := range values {
+		if strings.Contains(value, accessToken) {
+			t.Error("captured output contains the fake access token")
+		}
+	}
+}
+
+func TestSyncItemFetchesOneLiabilitySnapshotAfterPagination(t *testing.T) {
+	cfg := tempConfig(t, "sandbox")
+	amex := item("item-amex", "American Express", "sandbox")
+	amex.AccessToken = "test-liability-access-token"
+	amex.Liabilities = true
+	seedTokens(t, cfg.TokensPath, amex)
+
+	source := &fakeSource{name: plaid.ProviderName, pages: []provider.Batch{
+		{NextCursor: "c1", HasMore: true},
+		{Accounts: []model.Account{syncAccount(amex.ItemID, "acct-item-amex")}, NextCursor: "c2"},
+	}}
+	liabilityCalls := 0
+	fetchedAt := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	liabilities := func(_ context.Context, _ plaid.Config, accessToken string) ([]model.CreditLiability, error) {
+		liabilityCalls++
+		if source.call != 2 {
+			t.Errorf("liability fetch followed %d transaction calls, want 2", source.call)
+		}
+		if accessToken != amex.AccessToken {
+			t.Error("liability fetch received an unexpected access token")
+		}
+		return []model.CreditLiability{{
+			Provider:  plaid.ProviderName,
+			ItemID:    amex.ItemID,
+			AccountID: "acct-item-amex",
+			FetchedAt: fetchedAt,
+		}}, nil
+	}
+	var lines []string
+
+	views, err := newWith(cfg, nil, nil,
+		sourcesByItem(map[string]*fakeSource{amex.ItemID: source}), liabilities,
+	).SyncItem(context.Background(), amex.ItemID, collect(&lines))
+	if err != nil {
+		t.Fatalf("SyncItem: %v", err)
+	}
+	if source.call != 2 {
+		t.Errorf("transaction calls = %d, want 2", source.call)
+	}
+	if liabilityCalls != 1 {
+		t.Errorf("liability calls = %d, want 1", liabilityCalls)
+	}
+	if len(views) != 1 || views[0].Liability == nil {
+		t.Fatalf("views = %+v, want one account with a liability", views)
+	}
+	if !views[0].Liability.FetchedAt.Equal(fetchedAt) {
+		t.Errorf("liability fetched_at = %v, want %v", views[0].Liability.FetchedAt, fetchedAt)
+	}
+	assertNoAccessToken(t, amex.AccessToken, strings.Join(lines, "\n"), lastStatus(t, cfg.DBPath, amex.ItemID))
+}
+
+func TestSyncItemLiabilityPolicy(t *testing.T) {
+	const policyAccessToken = "test-policy-access-token"
+	oldFetchedAt := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	temporaryErr := errors.New("Plaid liabilities are temporarily unavailable")
+	consentErr := fmt.Errorf("get liabilities with %s: %w: consent is required",
+		policyAccessToken, provider.ErrAdditionalConsentRequired)
+
+	tests := []struct {
+		name               string
+		enabled            bool
+		liabilityErr       error
+		syncs              int
+		cancelBefore       bool
+		wantCalls          int
+		wantErr            error
+		wantOldSnapshot    bool
+		wantStatusContains string
+		wantStatusPrefix   string
+	}{
+		{
+			name:            "disabled",
+			liabilityErr:    errors.New("disabled item must not fetch liabilities"),
+			syncs:           1,
+			wantCalls:       0,
+			wantOldSnapshot: true,
+		},
+		{
+			name:            "no liability accounts clears snapshot",
+			enabled:         true,
+			liabilityErr:    fmt.Errorf("get liabilities: %w", provider.ErrNoLiabilityAccounts),
+			syncs:           1,
+			wantCalls:       1,
+			wantOldSnapshot: false,
+		},
+		{
+			name:            "product not ready preserves snapshot and retries",
+			enabled:         true,
+			liabilityErr:    fmt.Errorf("get liabilities: %w", provider.ErrProductNotReady),
+			syncs:           2,
+			wantCalls:       2,
+			wantOldSnapshot: true,
+		},
+		{
+			name:             "additional consent preserves snapshot and returns views",
+			enabled:          true,
+			liabilityErr:     consentErr,
+			syncs:            1,
+			wantCalls:        1,
+			wantErr:          ErrAdditionalConsentRequired,
+			wantOldSnapshot:  true,
+			wantStatusPrefix: "fourseas:liabilities-consent-required: ",
+		},
+		{
+			name:               "temporary error preserves snapshot and returns views",
+			enabled:            true,
+			liabilityErr:       temporaryErr,
+			syncs:              1,
+			wantCalls:          1,
+			wantErr:            temporaryErr,
+			wantOldSnapshot:    true,
+			wantStatusContains: temporaryErr.Error(),
+		},
+		{
+			name:            "canceled context preserves snapshot and status",
+			enabled:         true,
+			syncs:           1,
+			cancelBefore:    true,
+			wantCalls:       0,
+			wantErr:         context.Canceled,
+			wantOldSnapshot: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := tempConfig(t, "sandbox")
+			amex := item("item-amex", "American Express", "sandbox")
+			amex.AccessToken = policyAccessToken
+			amex.Liabilities = tt.enabled
+			seedTokens(t, cfg.TokensPath, amex)
+			seedStore(t, cfg.DBPath, amex)
+			seedLiabilitySnapshot(t, cfg.DBPath, amex.ItemID, oldFetchedAt)
+			previousStatus := lastStatus(t, cfg.DBPath, amex.ItemID)
+
+			pages := make([]provider.Batch, tt.syncs)
+			for i := range pages {
+				pages[i] = provider.Batch{
+					Accounts:   []model.Account{syncAccount(amex.ItemID, "acct-item-amex")},
+					NextCursor: fmt.Sprintf("c%d", i+1),
+				}
+			}
+			source := &fakeSource{name: plaid.ProviderName, pages: pages}
+			liabilityCalls := 0
+			liabilities := func(_ context.Context, _ plaid.Config, _ string) ([]model.CreditLiability, error) {
+				liabilityCalls++
+				return nil, tt.liabilityErr
+			}
+			client := newWith(cfg, nil, nil,
+				sourcesByItem(map[string]*fakeSource{amex.ItemID: source}), liabilities)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			if tt.cancelBefore {
+				cancel()
+			} else {
+				defer cancel()
+			}
+			var lines []string
+			for attempt := 0; attempt < tt.syncs; attempt++ {
+				views, err := client.SyncItem(ctx, amex.ItemID, collect(&lines))
+				if tt.wantErr == nil {
+					if err != nil {
+						t.Fatalf("SyncItem attempt %d: %v", attempt+1, err)
+					}
+				} else if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("SyncItem attempt %d error = %v, want %v", attempt+1, err, tt.wantErr)
+				}
+				if tt.wantErr != nil && !tt.cancelBefore {
+					if len(views) != 1 || views[0].Liability == nil {
+						t.Fatalf("failed SyncItem views = %+v, want the committed account and old liability", views)
+					}
+				}
+				if err != nil {
+					assertNoAccessToken(t, amex.AccessToken, err.Error())
+				}
+			}
+
+			if liabilityCalls != tt.wantCalls {
+				t.Errorf("liability calls = %d, want %d", liabilityCalls, tt.wantCalls)
+			}
+			views := accountViews(t, cfg.DBPath)
+			if len(views) != 1 {
+				t.Fatalf("stored views = %+v, want one", views)
+			}
+			if tt.wantOldSnapshot {
+				if views[0].Liability == nil || !views[0].Liability.FetchedAt.Equal(oldFetchedAt) {
+					t.Errorf("stored liability = %+v, want the old snapshot", views[0].Liability)
+				}
+			} else if views[0].Liability != nil {
+				t.Errorf("stored liability = %+v, want it cleared", views[0].Liability)
+			}
+
+			status := lastStatus(t, cfg.DBPath, amex.ItemID)
+			if tt.cancelBefore && status != previousStatus {
+				t.Errorf("last_status = %q, want unchanged %q", status, previousStatus)
+			}
+			if tt.wantStatusContains != "" && !strings.Contains(status, tt.wantStatusContains) {
+				t.Errorf("last_status = %q, want it to contain %q", status, tt.wantStatusContains)
+			}
+			if tt.wantStatusPrefix != "" && !strings.HasPrefix(status, tt.wantStatusPrefix) {
+				t.Error("last_status does not start with the liability consent marker")
+			}
+			assertNoAccessToken(t, amex.AccessToken, strings.Join(lines, "\n"), status)
+		})
+	}
+}
+
+func TestSyncAllKeepsCommittedAccountViewsOnLiabilityFailure(t *testing.T) {
+	cfg := tempConfig(t, "sandbox")
+	amex := item("item-amex", "American Express", "sandbox")
+	amex.AccessToken = "test-sync-all-access-token"
+	amex.Liabilities = true
+	seedTokens(t, cfg.TokensPath, amex)
+	seedStore(t, cfg.DBPath, amex)
+	seedLiabilitySnapshot(t, cfg.DBPath, amex.ItemID, time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC))
+
+	source := &fakeSource{name: plaid.ProviderName, pages: []provider.Batch{{
+		Accounts:   []model.Account{syncAccount(amex.ItemID, "acct-item-amex")},
+		NextCursor: "c1",
+	}}}
+	liabilityErr := fmt.Errorf("request with %s failed: %w", amex.AccessToken, provider.ErrAdditionalConsentRequired)
+	liabilities := func(context.Context, plaid.Config, string) ([]model.CreditLiability, error) {
+		return nil, liabilityErr
+	}
+	var lines []string
+
+	results, err := newWith(cfg, nil, nil,
+		sourcesByItem(map[string]*fakeSource{amex.ItemID: source}), liabilities,
+	).SyncAll(context.Background(), collect(&lines))
+	if err != nil {
+		t.Fatalf("SyncAll: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1", len(results))
+	}
+	if !errors.Is(results[0].Err, ErrAdditionalConsentRequired) {
+		t.Fatal("result error does not preserve the additional-consent sentinel")
+	}
+	if len(results[0].Accounts) != 1 || results[0].Accounts[0].Liability == nil {
+		t.Errorf("result accounts = %+v, want the committed account and old liability", results[0].Accounts)
+	}
+	status := lastStatus(t, cfg.DBPath, amex.ItemID)
+	if !strings.HasPrefix(status, "fourseas:liabilities-consent-required: ") {
+		t.Error("last_status does not start with the liability consent marker")
+	}
+	assertNoAccessToken(t, amex.AccessToken, results[0].Err.Error(), strings.Join(lines, "\n"), status)
+}
+
+func TestSyncItemEnabledLiabilitiesRequiresADependency(t *testing.T) {
+	cfg := tempConfig(t, "sandbox")
+	amex := item("item-amex", "American Express", "sandbox")
+	amex.AccessToken = "test-missing-dependency-access-token"
+	amex.Liabilities = true
+	seedTokens(t, cfg.TokensPath, amex)
+
+	source := &fakeSource{name: plaid.ProviderName, pages: []provider.Batch{{
+		Accounts:   []model.Account{syncAccount(amex.ItemID, "acct-item-amex")},
+		NextCursor: "c1",
+	}}}
+	views, err := newWith(cfg, nil, nil,
+		sourcesByItem(map[string]*fakeSource{amex.ItemID: source}), nil,
+	).SyncItem(context.Background(), amex.ItemID, nil)
+	if err == nil {
+		t.Fatal("SyncItem error = nil, want a missing liability dependency error")
+	}
+	if !strings.Contains(err.Error(), "liability fetch is not configured") {
+		t.Error("SyncItem error does not explain the missing liability dependency")
+	}
+	if len(views) != 1 {
+		t.Errorf("returned %d committed account views, want 1", len(views))
+	}
+	assertNoAccessToken(t, amex.AccessToken, err.Error(), lastStatus(t, cfg.DBPath, amex.ItemID))
+}
+
 // The TUI shows one institution at a time, so a single sync must answer with
 // that item's accounts only.
 func TestSyncItemReturnsOnlyAccountsForTheNewItem(t *testing.T) {
@@ -584,7 +911,7 @@ func TestSyncItemReturnsOnlyAccountsForTheNewItem(t *testing.T) {
 		"item-amex": onePage(syncAccount("item-amex", "acct-amex")),
 	})
 
-	accounts, err := newWith(cfg, nil, nil, sources).SyncItem(context.Background(), "item-amex", nil)
+	accounts, err := newWith(cfg, nil, nil, sources, nil).SyncItem(context.Background(), "item-amex", nil)
 	if err != nil {
 		t.Fatalf("SyncItem: %v", err)
 	}
@@ -608,7 +935,7 @@ func TestSyncItemRecordsFullProductNotReadyError(t *testing.T) {
 		provider.ErrProductNotReady, message)
 	sources := sourcesByItem(map[string]*fakeSource{"item-amex": failingSource(plaidErr)})
 
-	_, err := newWith(cfg, nil, nil, sources).SyncItem(context.Background(), "item-amex", nil)
+	_, err := newWith(cfg, nil, nil, sources, nil).SyncItem(context.Background(), "item-amex", nil)
 	if err == nil {
 		t.Fatal("SyncItem error = nil, want the Plaid failure")
 	}
@@ -638,7 +965,7 @@ func TestSyncAllContinuesAfterOneItemFails(t *testing.T) {
 	})
 	var lines []string
 
-	results, err := newWith(cfg, nil, nil, sources).SyncAll(context.Background(), collect(&lines))
+	results, err := newWith(cfg, nil, nil, sources, nil).SyncAll(context.Background(), collect(&lines))
 	if err != nil {
 		t.Fatalf("SyncAll: %v", err)
 	}
@@ -684,7 +1011,7 @@ func TestSyncAllUsesItemIDWhenInstitutionIsEmpty(t *testing.T) {
 	sources := sourcesByItem(map[string]*fakeSource{"item-nameless": onePage()})
 	var lines []string
 
-	results, err := newWith(cfg, nil, nil, sources).SyncAll(context.Background(), collect(&lines))
+	results, err := newWith(cfg, nil, nil, sources, nil).SyncAll(context.Background(), collect(&lines))
 	if err != nil {
 		t.Fatalf("SyncAll: %v", err)
 	}
@@ -713,7 +1040,7 @@ func TestSyncAllReportsCancellationAsTheOperationError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	results, err := newWith(cfg, nil, nil, sources).SyncAll(ctx, nil)
+	results, err := newWith(cfg, nil, nil, sources, nil).SyncAll(ctx, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("SyncAll error = %v, want it to report the cancellation", err)
 	}
@@ -736,7 +1063,7 @@ func TestSyncAllRefusesWhenNothingIsLinked(t *testing.T) {
 	cfg := tempConfig(t, "sandbox")
 	seedTokens(t, cfg.TokensPath)
 
-	_, err := newWith(cfg, nil, nil, nil).SyncAll(context.Background(), nil)
+	_, err := newWith(cfg, nil, nil, nil, nil).SyncAll(context.Background(), nil)
 	if err == nil {
 		t.Fatal("SyncAll error = nil, want the nothing-linked failure")
 	}

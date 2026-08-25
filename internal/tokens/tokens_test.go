@@ -1,6 +1,7 @@
 package tokens
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -86,7 +87,12 @@ func TestLoadMissingFileIsEmptyNotAnError(t *testing.T) {
 
 func TestSaveThenLoad(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".secrets", "tokens.json")
-	want := File{Items: []Item{{ItemID: "item-1", AccessToken: "secret", Institution: "Amex"}}}
+	want := File{Items: []Item{{
+		ItemID:      "item-1",
+		AccessToken: "test-access-token",
+		Institution: "Amex",
+		Liabilities: true,
+	}}}
 
 	if err := Save(path, want); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -95,7 +101,38 @@ func TestSaveThenLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(got.Items) != 1 || got.Items[0].AccessToken != "secret" {
-		t.Errorf("got %+v, want %+v", got.Items, want.Items)
+	if len(got.Items) != 1 {
+		t.Fatalf("got %d items, want 1", len(got.Items))
+	}
+	if got.Items[0].AccessToken != want.Items[0].AccessToken {
+		t.Error("access token did not survive save and load")
+	}
+	if !got.Items[0].Liabilities {
+		t.Error("liabilities = false after save and load, want true")
+	}
+}
+
+func TestLoadMissingLiabilitiesDefaultsFalse(t *testing.T) {
+	raw := []byte(`{"items":[
+		{"item_id":"item-old","access_token":"test-old-token"},
+		{"item_id":"item-new","access_token":"test-new-token","liabilities":true}
+	]}`)
+
+	path := filepath.Join(t.TempDir(), "tokens.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("load token file: %v", err)
+	}
+	if len(got.Items) != 2 {
+		t.Fatalf("got %d items, want 2", len(got.Items))
+	}
+	if got.Items[0].Liabilities {
+		t.Error("old item liabilities = true, want false")
+	}
+	if !got.Items[1].Liabilities {
+		t.Error("new item liabilities = false, want true")
 	}
 }

@@ -6,7 +6,25 @@ import (
 	"testing"
 
 	"github.com/kyle-cheung/fourseas/providence/internal/provider"
+	plaidsdk "github.com/plaid/plaid-go/v40/plaid"
 )
+
+func TestAPIErrorDoesNotExposeAnUnreadableRawBody(t *testing.T) {
+	const tokenLikeSecret = "token-like-secret-value"
+	plaidErr := plaidsdk.MakeGenericOpenAPIError(
+		[]byte("upstream response included "+tokenLikeSecret),
+		"400 Bad Request",
+		nil,
+	)
+
+	err := apiError("get liabilities", plaidErr, nil)
+	if strings.Contains(err.Error(), tokenLikeSecret) {
+		t.Error("api error contains the token-like value from the raw response body")
+	}
+	if !strings.Contains(err.Error(), "unreadable error response") {
+		t.Error("api error does not explain that Plaid returned an unreadable response")
+	}
+}
 
 func TestCodedErrorClassifiesActionableCodes(t *testing.T) {
 	tests := []struct {

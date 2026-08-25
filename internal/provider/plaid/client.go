@@ -84,7 +84,10 @@ func apiError(op string, err error, resp *http.Response) error {
 			return codedError(op, body.ErrorCode, string(body.GetErrorType()), body.GetErrorMessage())
 		}
 		if len(plaidErr.Body()) > 0 {
-			return fmt.Errorf("%s: plaid error: %s", op, plaidErr.Body())
+			if resp != nil {
+				return fmt.Errorf("%s: Plaid returned an unreadable error response (http %d)", op, resp.StatusCode)
+			}
+			return fmt.Errorf("%s: Plaid returned an unreadable error response", op)
 		}
 	}
 	if resp != nil {
