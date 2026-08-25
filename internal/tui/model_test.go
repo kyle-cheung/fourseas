@@ -2774,29 +2774,39 @@ func TestAnOrdinaryLinkFailureStillRetriesTheLink(t *testing.T) {
 }
 
 // The wording must say that the bank part succeeded, so the user does not read
-// Retry as "try the bank again", and it must say what Main costs.
-func TestTokenNotSavedWording(t *testing.T) {
+// Retry as "try the bank again", and it must qualify possible charges.
+func TestTokenNotSavedWordingQualifiesPossibleCharges(t *testing.T) {
 	notes := tokenNotSavedNotes("TD Canada Trust", "item-new",
 		errors.New("write tokens.json: permission denied"))
 	joined := strings.Join(notes, "\n")
+	flatNotes := strings.Join(notes, " ")
 
 	for _, want := range []string{
-		"TD Canada Trust is linked at Plaid. Plaid bills this item each month.",
+		"TD Canada Trust is active at Plaid.",
+		"On paid Production plans, subscription products can incur monthly charges under your Plaid agreement.",
 		"Item id: item-new",
 		"Reason: write tokens.json: permission denied",
 		"Retry saves the token again. It does not open the bank a second time.",
-		"Main leaves this item billed with no saved token.",
-		"Without the token you cannot sync this item or remove it.",
+		"Main leaves the active Item without a saved token.",
+		"Without the token, fourseas cannot sync or remove the Item.",
+		"Contact Plaid Support to remove an Item whose token was lost.",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("the notes do not hold %q:\n%s", want, joined)
 		}
 	}
-	// Every line has to fit the narrowest screen the interface assumes.
-	for _, line := range append(notes, tokenNotSavedMessage) {
-		if width := lipgloss.Width(line) + lipgloss.Width(blankMark) + rightPad; width > defaultWidth {
-			t.Errorf("line %q is %d cells wide, want at most %d", line, width, defaultWidth)
+	for _, unwanted := range []string{
+		"Plaid bills every live card each month",
+		"Plaid bills this item each month",
+		"Plaid created this item and bills it each month",
+		"A second link creates another Item that can also incur charges.",
+	} {
+		if strings.Contains(joined, unwanted) {
+			t.Errorf("the notes contain %q:\n%s", unwanted, joined)
 		}
+	}
+	if !strings.Contains(flatNotes, "A second link creates a second Item. On a paid Production plan, its subscription products can also incur charges under your Plaid agreement.") {
+		t.Errorf("the second-Item warning is not qualified:\n%s", joined)
 	}
 }
 
@@ -2809,6 +2819,7 @@ func TestTokenNotSavedScreenKeepsTheMeaningAtEveryWidth(t *testing.T) {
 		fake := &fakeService{linkErr: tokenNotSaved()}
 		m := ready(t, fake)
 		m.width = width
+		m.height = 60
 		runOperation(t, m, startDefaultLink(t, m))
 
 		body := content(m)
@@ -2816,8 +2827,10 @@ func TestTokenNotSavedScreenKeepsTheMeaningAtEveryWidth(t *testing.T) {
 		for _, want := range []string{
 			tokenNotSavedMessage,
 			"Retry saves the token again. It does not open the bank a second time.",
-			"Main leaves this item billed with no saved token.",
-			"Without the token you cannot sync this item or remove it.",
+			"Main leaves the active Item without a saved token.",
+			"Without the token, fourseas cannot sync or remove the Item.",
+			"Contact Plaid Support to remove an Item whose token was lost.",
+			"A second link creates a second Item. On a paid Production plan, its subscription products can also incur charges under your Plaid agreement.",
 		} {
 			if !strings.Contains(flat, want) {
 				t.Errorf("at width %d the recovery screen does not say %q:\n%s", width, want, body)
@@ -2827,6 +2840,59 @@ func TestTokenNotSavedScreenKeepsTheMeaningAtEveryWidth(t *testing.T) {
 			if lipgloss.Width(line) > width {
 				t.Errorf("at width %d the line %q is %d cells wide", width, line, lipgloss.Width(line))
 			}
+		}
+	}
+}
+
+func TestTokenNotSavedRecoveryFitsA40By24Terminal(t *testing.T) {
+	m := ready(t, &fakeService{})
+	m.width, m.height = 40, 24
+	m.screen = recoveryScreen
+	m.recovery = recoveryState{
+		message:        tokenNotSavedMessage,
+		compactMessage: tokenNotSavedCompactMessage,
+		notes: tokenNotSavedNotes("TD Canada Trust", "item-new",
+			errors.New("write tokens.json: permission denied")),
+		compactNotes: tokenNotSavedCompactNotes("item-new"),
+		retry:        func() tea.Cmd { return nil },
+	}
+
+	plain := ansi.Strip(m.View().Content)
+	lines := strings.Split(plain, "\n")
+	if len(lines) > m.height {
+		t.Errorf("rendered lines = %d, want at most %d:\n%s", len(lines), m.height, plain)
+	}
+	visible := strings.Join(lines[:min(len(lines), m.height)], "\n")
+	visibleFlat := strings.Join(strings.Fields(visible), " ")
+	for _, want := range []string{
+		"Item linked; token not saved.",
+		"Item id: item-new",
+		"No token: fourseas cannot sync/remove.",
+		"Retry saves token; it does not relink.",
+		"Main leaves the Item active.",
+		"Cannot recover token? Contact Plaid Support.",
+		"On paid Production plans, subscription products can incur charges under your Plaid agreement; a second link creates another Item whose products can incur them too.",
+		"enter select",
+	} {
+		if !strings.Contains(visibleFlat, want) {
+			t.Errorf("first %d lines do not hold %q:\n%s", m.height, want, visible)
+		}
+	}
+	for _, choice := range []string{"› Retry", "Main"} {
+		found := false
+		for _, line := range lines[:min(len(lines), m.height)] {
+			if strings.TrimSpace(line) == choice {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("first %d lines do not show the %q action:\n%s", m.height, choice, visible)
+		}
+	}
+	for _, line := range lines {
+		if width := lipgloss.Width(line); width > m.width {
+			t.Errorf("line %q is %d cells wide, want at most %d", line, width, m.width)
 		}
 	}
 }

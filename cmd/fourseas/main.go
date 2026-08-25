@@ -32,7 +32,7 @@ Usage:
   fourseas link      Link one card through Plaid Link in your browser. Requests
                      730 days of history, the most Plaid permits
                      New links enable statement data through Plaid Liabilities by default.
-                     Plaid Liabilities can have separate billing.
+                     On paid Production plans, Liabilities can incur subscription charges under your Plaid agreement.
   fourseas link --days 365
                      Link with less history. 30 to 730 days. Plaid fixes the
                      amount when the card is linked and cannot change it later
@@ -49,9 +49,9 @@ Usage:
   fourseas show      Print the newest stored rows without calling Plaid
   fourseas unlink <item-id>
                      Remove one card at Plaid, then delete its local token,
-                     accounts, and transactions. Asks first. Plaid bills every
-                     live card each month, and a re-link is the only way to
-                     change how much history a card holds
+                     accounts, and transactions. Asks first. Active subscriptions
+                     for the Item end at Plaid. A re-link is the only way to change
+                     how much history a card holds
   fourseas unlink --list
                      List the linked cards with the item ids unlink takes
   fourseas reset     Drop all data and build the schema again. Asks first

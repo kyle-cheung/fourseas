@@ -88,12 +88,14 @@ type unlinkState struct {
 }
 
 type recoveryState struct {
-	message string
+	message        string
+	compactMessage string
 	// notes are the extra lines under the message. A failure the user has to
 	// understand before choosing needs more than one line.
-	notes  []string
-	cursor int
-	retry  func() tea.Cmd
+	notes        []string
+	compactNotes []string
+	cursor       int
+	retry        func() tea.Cmd
 }
 
 // Model is the one owner of every screen's state.
@@ -690,14 +692,15 @@ func (m *Model) showPostEnableRefreshFailure(err error) tea.Cmd {
 }
 
 // showTokenNotSaved opens the recovery screen of a link whose item Plaid has
-// already created and already bills. The retry saves the token again, and the
-// notes say that the bank part is done, so the user does not read Retry as
-// "try the bank again".
+// already created. The retry saves the token again, and the notes say that the
+// bank part is done, so the user does not read Retry as "try the bank again".
 func (m *Model) showTokenNotSaved(err *app.TokenNotSavedError) tea.Cmd {
 	pending := err.Pending
 	m.showFailure(err)
 	m.recovery.message = tokenNotSavedMessage
 	m.recovery.notes = tokenNotSavedNotes(pending.Institution(), pending.ItemID(), err.Err)
+	m.recovery.compactMessage = tokenNotSavedCompactMessage
+	m.recovery.compactNotes = tokenNotSavedCompactNotes(pending.ItemID())
 	m.recovery.retry = func() tea.Cmd { return m.startLinkSave(pending) }
 	return nil
 }
@@ -706,6 +709,8 @@ func (m *Model) showTokenNotSaved(err *app.TokenNotSavedError) tea.Cmd {
 // failed operation left.
 func (m *Model) showFailure(err error) tea.Cmd {
 	m.recovery.message = displayError(err)
+	m.recovery.compactMessage = ""
+	m.recovery.compactNotes = nil
 	m.recovery.cursor = 0
 	m.screen = recoveryScreen
 	return nil

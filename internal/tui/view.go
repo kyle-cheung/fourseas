@@ -426,9 +426,11 @@ func (m *Model) historyLines() []string {
 // differently once the user knows that the bank is linked.
 const tokenNotSavedMessage = "The bank connected. Only the save of the access token failed."
 
+const tokenNotSavedCompactMessage = "Item linked; token not saved."
+
 // tokenNotSavedNotes explains what the user now owns and what each choice
-// does. The item is billed from now on, and the access token is the only way to
-// reach it, so both choices have a cost the user must read before choosing.
+// does. The item is active, and the access token is the only way to reach it,
+// so both choices have a cost the user must read before choosing.
 func tokenNotSavedNotes(institution, itemID string, cause error) []string {
 	name := institution
 	if name == "" {
@@ -437,26 +439,55 @@ func tokenNotSavedNotes(institution, itemID string, cause error) []string {
 	if name == "" {
 		name = "The new item"
 	}
-	notes := []string{name + " is linked at Plaid. Plaid bills this item each month."}
+	notes := []string{
+		name + " is active at Plaid.",
+		"On paid Production plans, subscription products can incur monthly charges under your Plaid agreement.",
+	}
 	if itemID != "" {
 		notes = append(notes, "Item id: "+itemID)
 	}
 	return append(notes,
 		"Reason: "+displayError(cause),
 		"Retry saves the token again. It does not open the bank a second time.",
-		"Main leaves this item billed with no saved token.",
-		"Without the token you cannot sync this item or remove it.",
+		"Main leaves the active Item without a saved token.",
+		"Without the token, fourseas cannot sync or remove the Item.",
+		"Contact Plaid Support to remove an Item whose token was lost.",
+		"A second link creates a second Item. On a paid Production plan, its subscription products can also incur charges under your Plaid agreement.",
+	)
+}
+
+// tokenNotSavedCompactNotes keeps every consequence and recovery action in a
+// short terminal. The detailed notes remain in use when they fit.
+func tokenNotSavedCompactNotes(itemID string) []string {
+	notes := make([]string, 0, 6)
+	if itemID != "" {
+		notes = append(notes, "Item id: "+itemID)
+	}
+	return append(notes,
+		"No token: fourseas cannot sync/remove.",
+		"Retry saves token; it does not relink.",
+		"Main leaves the Item active.",
+		"Cannot recover token? Contact Plaid Support.",
+		"On paid Production plans, subscription products can incur charges under your Plaid agreement; a second link creates another Item whose products can incur them too.",
 	)
 }
 
 // recoveryLines shows what failed and what the user can do about it.
 func (m *Model) recoveryLines() []string {
+	lines := m.recoveryLinesFor(m.recovery.message, m.recovery.notes)
+	if m.height > 0 && len(lines) > m.height && m.recovery.compactMessage != "" {
+		return m.recoveryLinesFor(m.recovery.compactMessage, m.recovery.compactNotes)
+	}
+	return lines
+}
+
+func (m *Model) recoveryLinesFor(message string, notes []string) []string {
 	lines := m.header("Something went wrong")
 	// The message is wrapped for the same reason the notes are, and the lines
 	// under the first one keep the width of the mark, so the sentence reads as
 	// one block.
 	mark := failedMark + " "
-	for i, line := range wrapText(m.recovery.message, max(m.noteWidth()-lipgloss.Width(mark), 1)) {
+	for i, line := range wrapText(message, max(m.noteWidth()-lipgloss.Width(mark), 1)) {
 		if i > 0 {
 			mark = strings.Repeat(" ", lipgloss.Width(failedMark)+1)
 		}
@@ -466,7 +497,7 @@ func (m *Model) recoveryLines() []string {
 	// choice, and truncate is a hard cut: it would turn "It does not open the
 	// bank" into "It does n", which says the opposite of what the user must
 	// read here.
-	for _, note := range m.recovery.notes {
+	for _, note := range notes {
 		for _, line := range wrapText(note, m.noteWidth()) {
 			lines = append(lines, truncate(blankMark+mutedStyle.Render(line), m.contentWidth()))
 		}

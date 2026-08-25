@@ -39,7 +39,7 @@ func runLinkWith(ctx context.Context, cfg settings, options linkOptions, svc lin
 	fmt.Printf("Plaid environment: %s\n", cfg.plaid.Env)
 	fmt.Printf("History requested: %d days. Plaid fixes this now and cannot change it later.\n", options.days)
 	if options.liabilities {
-		fmt.Println("Statement data: enabled. Plaid Liabilities can have separate billing.")
+		fmt.Println("Statement data: enabled. On paid Production plans, Liabilities can incur subscription charges under your Plaid agreement.")
 	}
 	if cfg.plaid.RedirectURI == "" {
 		fmt.Printf("No PLAID_REDIRECT_URI is set. Banks that use OAuth, such as Scotiabank,\n" +
@@ -80,10 +80,10 @@ type linkService interface {
 
 // linkOnce links one card and makes sure its access token reaches the disk.
 //
-// Plaid bills the item it creates, and the access token is the only handle to
-// that item. A save that fails is therefore tried once more from the handle the
-// failure carries. The browser step never runs a second time: a new link
-// creates a second billed item at the same bank.
+// Plaid creates the item before the access token is saved. A save that fails is
+// therefore tried once more from the handle the failure carries. The browser
+// step never runs a second time: a new link creates another item at the same
+// bank.
 func linkOnce(ctx context.Context, svc linkService, days int, liabilities bool, report app.Progress) (app.LinkedItem, error) {
 	linked, err := svc.Link(ctx, days, liabilities, report)
 	var notSaved *app.TokenNotSavedError
@@ -108,28 +108,27 @@ func linkOnce(ctx context.Context, svc linkService, days int, liabilities bool, 
 		notSaved.Pending.Institution(), notSaved.Pending.ItemID(), cause)
 }
 
-// tokenNotSavedMessage is what the user reads when the token of a billed item
-// stays unsaved. It names the item, because the Plaid dashboard is the only
-// place left to act on it, and it refuses the one recovery the user would try
-// first.
+// tokenNotSavedMessage is what the user reads when the token of an active item
+// stays unsaved. It names the item and refuses the one recovery the user would
+// try first.
 func tokenNotSavedMessage(institution, itemID string, cause error) error {
 	name := institution
 	if name == "" {
 		name = itemID
 	}
-	return fmt.Errorf(`the access token of a billed item was not saved: %w
+	return fmt.Errorf(`the access token of an active Item was not saved: %w
 
   Institution: %s
   Item id:     %s
 
-Plaid created this item and bills it each month. The access token is the only
-way to reach it, and fourseas did not write it to disk.
+This Item is active at Plaid. On paid Production plans, subscription products can incur monthly charges under your Plaid agreement.
 
-Do NOT run `+"`fourseas link`"+` to recover this item. A new link creates a SECOND
-billed item at the same bank, and this item stays billed.
+Without the token, fourseas cannot sync or remove the Item.
+Contact Plaid Support to remove an Item whose token was lost.
 
-Make the token file writable, then link again only if you accept a second item.
-To stop the charge for this item, remove it in the Plaid dashboard.`,
+Do NOT run `+"`fourseas link`"+` to recover this Item. A second link creates a second Item. On a paid Production plan, its subscription products can also incur charges under your Plaid agreement.
+
+Make the token file writable, then link again only if you accept another Item.`,
 		cause, name, itemID)
 }
 

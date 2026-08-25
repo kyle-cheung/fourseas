@@ -53,11 +53,21 @@ func TestSignInLineKeepsTheWording(t *testing.T) {
 func TestUsageExplainsDefaultLiabilitiesAndTheOptOut(t *testing.T) {
 	for _, want := range []string{
 		"New links enable statement data through Plaid Liabilities by default.",
-		"Plaid Liabilities can have separate billing.",
+		"On paid Production plans, Liabilities can incur subscription charges under your Plaid agreement.",
 		"--liabilities=false opts out before linking.",
 	} {
 		if !strings.Contains(usage, want) {
 			t.Errorf("usage does not contain %q:\n%s", want, usage)
+		}
+	}
+	for _, unwanted := range []string{
+		"Plaid Liabilities can have separate billing.",
+		"Plaid bills every live card each month",
+		"Plaid bills this item each month",
+		"Plaid created this item and bills it each month",
+	} {
+		if strings.Contains(usage, unwanted) {
+			t.Errorf("usage contains %q:\n%s", unwanted, usage)
 		}
 	}
 }
@@ -207,8 +217,8 @@ func TestLinkOnceReportsTheUnsavedTokenWithoutASecondLink(t *testing.T) {
 	if fake.completeCalls != 1 {
 		t.Errorf("CompleteLinkSave ran %d times, want the one retry", fake.completeCalls)
 	}
-	if !strings.Contains(err.Error(), "SECOND") {
-		t.Errorf("error = %q, want the warning about a second billed item", err)
+	if !strings.Contains(err.Error(), "another Item") {
+		t.Errorf("error = %q, want the warning about another Item", err)
 	}
 }
 
@@ -245,7 +255,7 @@ func TestLinkOnceLeavesAnOrdinaryFailureAlone(t *testing.T) {
 }
 
 func TestRunLinkPrintsTheLiabilitiesNoticeOnlyBeforeAnEnabledLink(t *testing.T) {
-	const notice = "Statement data: enabled. Plaid Liabilities can have separate billing."
+	const notice = "Statement data: enabled. On paid Production plans, Liabilities can incur subscription charges under your Plaid agreement."
 	for _, liabilities := range []bool{true, false} {
 		t.Run(strconv.FormatBool(liabilities), func(t *testing.T) {
 			fake := &fakeLinker{
@@ -276,13 +286,16 @@ func TestRunLinkPrintsTheLiabilitiesNoticeOnlyBeforeAnEnabledLink(t *testing.T) 
 			} else if noticeAt >= 0 {
 				t.Errorf("output = %q, want no liabilities notice", out)
 			}
+			if strings.Contains(out, "Plaid Liabilities can have separate billing.") {
+				t.Errorf("output contains the unqualified liabilities warning:\n%s", out)
+			}
 		})
 	}
 }
 
-// The message must name the item the user now pays for, and must not offer a
-// new link as the way out.
-func TestTokenNotSavedMessageNamesTheBilledItem(t *testing.T) {
+// The message must name the active item and must not offer a new link as the
+// way out.
+func TestTokenNotSavedMessageQualifiesPossibleCharges(t *testing.T) {
 	err := tokenNotSavedMessage("TD Canada Trust", "item-new",
 		errors.New("write tokens.json: permission denied"))
 
@@ -290,11 +303,25 @@ func TestTokenNotSavedMessageNamesTheBilledItem(t *testing.T) {
 		"TD Canada Trust",
 		"item-new",
 		"write tokens.json: permission denied",
-		"SECOND",
+		"This Item is active at Plaid.",
+		"On paid Production plans, subscription products can incur monthly charges under your Plaid agreement.",
+		"Without the token, fourseas cannot sync or remove the Item.",
+		"Contact Plaid Support to remove an Item whose token was lost.",
+		"A second link creates a second Item. On a paid Production plan, its subscription products can also incur charges under your Plaid agreement.",
 		"fourseas link",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("message does not hold %q:\n%s", want, err)
+		}
+	}
+	for _, unwanted := range []string{
+		"Plaid bills every live card each month",
+		"Plaid bills this item each month",
+		"Plaid created this item and bills it each month",
+		"A second link creates another Item that can also incur charges.",
+	} {
+		if strings.Contains(err.Error(), unwanted) {
+			t.Errorf("message contains %q:\n%s", unwanted, err)
 		}
 	}
 }
