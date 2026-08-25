@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/kyle-cheung/fourseas/providence/internal/provider/plaid"
@@ -29,15 +30,24 @@ func (p PendingSave) Institution() string { return p.item.Institution }
 // ItemID is the id Plaid gave the unsaved item.
 func (p PendingSave) ItemID() string { return p.item.ItemID }
 
-// String redacts the access token, so a stray %v or %s cannot print it.
-//
-// Known and accepted: %#v ignores String and prints the unexported fields by
-// Go syntax. That would print file as well, which is every access token of the
-// whole token file and not only the new one. No code here uses %#v, and Go
-// offers no way to refuse it. Never format a PendingSave with %#v.
+// String identifies the pending item and redacts its access token.
 func (p PendingSave) String() string {
 	return fmt.Sprintf("PendingSave{item_id:%q institution:%q access_token:[redacted]}",
 		p.item.ItemID, p.item.Institution)
+}
+
+// Format makes every fmt verb use the redacted form. This also protects a
+// PendingSave that is inside a slice, struct, or interface.
+func (p PendingSave) Format(state fmt.State, verb rune) {
+	writeRedacted(state, verb, p.String())
+}
+
+func writeRedacted(state fmt.State, verb rune, text string) {
+	if verb == 'q' {
+		fmt.Fprint(state, strconv.Quote(text))
+		return
+	}
+	fmt.Fprint(state, text)
 }
 
 // TokenNotSavedError says Plaid has created an item and billing has started,
@@ -59,15 +69,19 @@ func (e *TokenNotSavedError) Error() string {
 	return "the item is linked at Plaid but its access token was not saved: " + e.Err.Error()
 }
 
+// Format prevents diagnostic verbs from expanding Pending and its secrets.
+func (e *TokenNotSavedError) Format(state fmt.State, verb rune) {
+	writeRedacted(state, verb, e.Error())
+}
+
 // Unwrap keeps the cause reachable for errors.Is and errors.As.
 func (e *TokenNotSavedError) Unwrap() error { return e.Err }
 
 // CompleteLinkSave writes the access token of an item Plaid has already
 // created. It is the retry of a failed save, and it never calls Plaid.
 //
-// It reads the token file again first, because the user may have repaired that
-// file between the failure and this call. The snapshot taken at the failure is
-// used only when the file cannot be read now, so a repair is never overwritten.
+// It reloads the token file under an exclusive lock, because the user may have
+// repaired that file between the failure and this call.
 //
 // It returns the same LinkedItem a successful Link returns. A save that fails
 // again returns another *TokenNotSavedError, so the caller keeps the token and
@@ -76,11 +90,9 @@ func (a *App) CompleteLinkSave(pending PendingSave) (LinkedItem, error) {
 	if pending.item.ItemID == "" || pending.path == "" {
 		return LinkedItem{}, fmt.Errorf("no unsaved link to complete")
 	}
-	file := pending.file
-	if fresh, err := tokens.Load(pending.path); err == nil {
-		file = fresh
-	}
-	if err := tokens.Save(pending.path, file.Upsert(pending.item)); err != nil {
+	if _, err := tokens.Mutate(pending.path, func(current tokens.File) (tokens.File, error) {
+		return current.Upsert(pending.item), nil
+	}); err != nil {
 		return LinkedItem{}, &TokenNotSavedError{Pending: pending, Err: err}
 	}
 	return LinkedItem{ItemID: pending.item.ItemID, Institution: pending.item.Institution}, nil
@@ -93,7 +105,7 @@ func (a *App) CompleteLinkSave(pending PendingSave) (LinkedItem, error) {
 // *TokenNotSavedError, which carries the token in an opaque handle:
 // CompleteLinkSave finishes the save from it. Running Link again after such an
 // error creates a second billed item and must not be offered.
-func (a *App) Link(ctx context.Context, days int, report Progress) (LinkedItem, error) {
+func (a *App) Link(ctx context.Context, days int, liabilities bool, report Progress) (LinkedItem, error) {
 	if days < MinLinkDays || days > MaxLinkDays {
 		return LinkedItem{}, fmt.Errorf("history must be from %d through %d days, got %d", MinLinkDays, MaxLinkDays, days)
 	}
@@ -106,15 +118,18 @@ func (a *App) Link(ctx context.Context, days int, report Progress) (LinkedItem, 
 	}
 
 	progress(report, "Open "+plaid.LinkURL(a.cfg.Plaid)+" in your browser")
-	result, err := a.link(ctx, a.cfg.Plaid, days)
+	result, err := a.link(ctx, a.cfg.Plaid, days, liabilities)
 	if err != nil {
 		return LinkedItem{}, err
 	}
 	item := tokens.Item{
 		ItemID: result.ItemID, AccessToken: result.AccessToken,
-		Institution: result.Institution, Env: a.cfg.Plaid.Env, LinkedAt: time.Now().UTC(),
+		Institution: result.Institution, Env: a.cfg.Plaid.Env, Liabilities: liabilities,
+		LinkedAt: time.Now().UTC(),
 	}
-	if err := tokens.Save(a.cfg.TokensPath, saved.Upsert(item)); err != nil {
+	if _, err := tokens.Mutate(a.cfg.TokensPath, func(current tokens.File) (tokens.File, error) {
+		return current.Upsert(item), nil
+	}); err != nil {
 		// Plaid bills this item from now on, and item holds the only handle to
 		// it. The token goes back to the caller instead of being dropped.
 		return LinkedItem{}, &TokenNotSavedError{

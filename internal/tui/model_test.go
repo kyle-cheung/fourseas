@@ -34,15 +34,15 @@ type fakeService struct {
 	// linkItem is what a successful Link returns, and linkErr replaces it.
 	linkItem app.LinkedItem
 	linkErr  error
-	// linkDays holds the history length of every Link call, in order.
-	linkDays []int
+	// linkCalls holds both choices of every Link call, in order.
+	linkCalls []linkCall
 	// links holds every item a successful Link saved, as App.Link saves the
 	// token before any sync runs.
 	links map[string]bool
 
 	// completeCalls holds the handle of every CompleteLinkSave call, in order.
 	// A failed save must be completed from the handle and never by linking
-	// again, so a test reads this list beside linkDays.
+	// again, so a test reads this list beside linkCalls.
 	completeCalls []app.PendingSave
 	// completeItem is what a successful CompleteLinkSave returns, and
 	// completeErr replaces it.
@@ -78,6 +78,26 @@ type fakeService struct {
 	unlinkCalls  []string
 	unlinkResult app.UnlinkResult
 	unlinkErr    error
+
+	// enableCalls holds the account id of every EnableLiabilities call, in
+	// order. enableEffect models a state change that happens before the call
+	// returns, including a partial change followed by cancellation.
+	enableCalls   []string
+	enableEffect  func(*fakeService)
+	enableErr     error
+	consentSaved  bool
+	endpointCalls int
+
+	// liabilityRefreshCalls holds each snapshot-only retry. The operation must
+	// never repeat update consent or transaction sync.
+	liabilityRefreshCalls  []string
+	liabilityRefreshErrs   []error
+	liabilityRefreshEffect func(*fakeService)
+}
+
+type linkCall struct {
+	days        int
+	liabilities bool
 }
 
 // takeError takes the first prepared error off a queue.
@@ -96,8 +116,8 @@ func (f *fakeService) Accounts(ctx context.Context, itemID string) (app.AccountD
 	return f.data, f.accountsErr
 }
 
-func (f *fakeService) Link(_ context.Context, days int, _ app.Progress) (app.LinkedItem, error) {
-	f.linkDays = append(f.linkDays, days)
+func (f *fakeService) Link(_ context.Context, days int, liabilities bool, _ app.Progress) (app.LinkedItem, error) {
+	f.linkCalls = append(f.linkCalls, linkCall{days: days, liabilities: liabilities})
 	if f.linkErr != nil {
 		return app.LinkedItem{}, f.linkErr
 	}
@@ -106,6 +126,25 @@ func (f *fakeService) Link(_ context.Context, days int, _ app.Progress) (app.Lin
 	}
 	f.links[f.linkItem.ItemID] = true
 	return f.linkItem, nil
+}
+
+func (f *fakeService) EnableLiabilities(_ context.Context, accountID string, _ app.Progress) error {
+	f.enableCalls = append(f.enableCalls, accountID)
+	if f.enableEffect != nil {
+		f.enableEffect(f)
+	}
+	return f.enableErr
+}
+
+func (f *fakeService) RefreshLiabilities(_ context.Context, accountID string) error {
+	f.liabilityRefreshCalls = append(f.liabilityRefreshCalls, accountID)
+	if err := takeError(&f.liabilityRefreshErrs); err != nil {
+		return err
+	}
+	if f.liabilityRefreshEffect != nil {
+		f.liabilityRefreshEffect(f)
+	}
+	return nil
 }
 
 func (f *fakeService) CompleteLinkSave(pending app.PendingSave) (app.LinkedItem, error) {
@@ -160,6 +199,44 @@ func (f *fakeService) Unlink(_ context.Context, itemID string, _ app.Progress) (
 // content is the active screen as plain text. The interface writes styled
 // lines, so a test reads the printable text with the escape sequences removed.
 func content(m *Model) string { return ansi.Strip(m.View().Content) }
+
+// hostileDisplayName wraps visible text in terminal controls that stored
+// account names must never write back to the terminal.
+func hostileDisplayName(visible string) string {
+	return "\x1b[31m" + visible + "\x1b[0m" +
+		"\x1b]52;c;c2VjcmV0\x07" +
+		"\r\n\b\x00\x01\x1f\x7f\u0080\u0085"
+}
+
+func assertSafeAccountNames(t *testing.T, raw string, names ...string) {
+	t.Helper()
+	for _, sequence := range []string{
+		"\x1b[31m", "\x1b]52;", "\x07", "\r", "\b", "\x00", "\x01", "\x1f", "\x7f", "\u0080", "\u0085",
+	} {
+		if strings.Contains(raw, sequence) {
+			t.Errorf("raw view contains unsafe terminal sequence %q: %q", sequence, raw)
+		}
+	}
+	for _, r := range raw {
+		if r == '\n' || r == '\x1b' {
+			continue
+		}
+		if r < ' ' || r >= '\x7f' && r <= '\u009f' {
+			t.Errorf("raw view contains control character %U: %q", r, raw)
+		}
+	}
+	for _, name := range names {
+		lines := 0
+		for _, line := range strings.Split(raw, "\n") {
+			if strings.Contains(line, name) {
+				lines++
+			}
+		}
+		if lines != 1 {
+			t.Errorf("safe account name %q appears on %d physical lines, want 1: %q", name, lines, raw)
+		}
+	}
+}
 
 // hasRow says whether one line of a screen holds the label at the left and the
 // value at the right. The cursor mark and the column padding are removed, so
@@ -318,6 +395,233 @@ func TestMainNavigationAndQuit(t *testing.T) {
 	}
 	if !quits(press(t, m, ctrlC())) {
 		t.Error("ctrl+c with no running operation did not quit")
+	}
+}
+
+func TestMainAccountSummaryTable(t *testing.T) {
+	now := time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC)
+	due := time.Date(2026, time.September, 12, 0, 0, 0, 0, time.UTC)
+	paid := time.Date(2026, time.August, 20, 0, 0, 0, 0, time.UTC)
+	partialDue := time.Date(2025, time.December, 5, 0, 0, 0, 0, time.UTC)
+	partialPaid := time.Date(2026, time.August, 18, 0, 0, 0, 0, time.UTC)
+
+	accounts := []model.AccountView{
+		account("acc-1", "Amex Daily", "Blue Cash", "1001", "American Express", 1284.21),
+		account("acc-2", "", "Scotia Visa", "2002", "Scotiabank", 320.1),
+		account("acc-3", "", "", "3003", "Wealthsimple", 2400),
+		account("acc-4", "Cash reserve", "Cash", "4004", "Wealthsimple", -810),
+	}
+	accounts[0].Currency = "usd"
+	accounts[0].Liability = &model.CreditLiability{
+		PaymentDueDate:       &due,
+		LastPaymentDate:      &paid,
+		LastPaymentAmount:    decimal.NewNullDecimal(decimal.NewFromInt(500)),
+		LastStatementBalance: decimal.NewNullDecimal(decimal.NewFromInt(1000)),
+	}
+	accounts[1].Currency = "cad"
+	accounts[1].Liability = &model.CreditLiability{
+		PaymentDueDate:    &partialDue,
+		LastPaymentDate:   &partialPaid,
+		LastPaymentAmount: decimal.NullDecimal{},
+	}
+	accounts[2].Currency = "jpy"
+	accounts[3].Currency = "CAD"
+	accounts[3].Liability = &model.CreditLiability{}
+
+	m := ready(t, &fakeService{data: app.AccountData{Accounts: accounts}})
+	m.now = func() time.Time { return now }
+	m.width = 100
+	body := content(m)
+
+	for _, want := range []string{
+		"Account", "Cur. balance", "Stmt balance", "Due", "Last payment",
+		"Amex Daily", "1,284.21 USD", "1,000.00 USD", "Sep 12", "Aug 20 · 500.00 USD",
+		"Scotia Visa", "320.10 CAD", "Dec 05, 2025",
+		"acc-3", "2,400.00 JPY", "Cash reserve", "-810.00 CAD",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("main view = %q, want it to contain %q", body, want)
+		}
+	}
+	if got := strings.Count(body, "—"); got != 8 {
+		t.Errorf("main view has %d missing values, want 8 for absent liability data: %q", got, body)
+	}
+
+	wordmark := strings.Index(body, brandName+" "+brandMark)
+	header := strings.Index(body, "Account")
+	menu := strings.Index(body, "Main menu")
+	if wordmark < 0 || header < 0 || menu < 0 || !(wordmark < header && header < menu) {
+		t.Fatalf("main view order = %q, want wordmark, table, then Main menu", body)
+	}
+	if !strings.Contains(body, "\n  Main menu\n\n› Accounts") {
+		t.Errorf("main view = %q, want Main menu directly above the choices", body)
+	}
+
+	last := header
+	for _, name := range []string{"Amex Daily", "Scotia Visa", "acc-3", "Cash reserve"} {
+		position := strings.Index(body, name)
+		if position <= last {
+			t.Errorf("account %q is at %d after prior position %d; want stored row order", name, position, last)
+		}
+		last = position
+	}
+
+	lines := strings.Split(body[header-len(blankMark):menu], "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, blankMark) {
+			t.Errorf("table line %q does not start with blankMark", line)
+		}
+		if width := lipgloss.Width(line); width >= m.contentWidth() {
+			t.Errorf("table line %q is %d cells wide, want natural width below terminal width %d",
+				line, width, m.contentWidth())
+		}
+	}
+}
+
+func TestMainAccountSummarySanitizesAccountNames(t *testing.T) {
+	accounts := []model.AccountView{
+		account("acc-1", hostileDisplayName("Nick\r\n safe"), "Provider one", "1001", "Bank", 10),
+		account("acc-2", hostileDisplayName(""), hostileDisplayName("Provider\t safe"), "2002", "Bank", 20),
+		account(hostileDisplayName("acc-\n safe"), hostileDisplayName(""), hostileDisplayName(""), "3003", "Bank", 30),
+	}
+	m := ready(t, &fakeService{data: app.AccountData{Accounts: accounts}})
+
+	assertSafeAccountNames(t, m.View().Content, "Nick safe", "Provider safe", "acc- safe")
+}
+
+func TestAccountListAndDetailSanitizeAccountNames(t *testing.T) {
+	view := account("acc-1", hostileDisplayName("Nick\r\n safe"), "Provider", "1001", "Bank", 10)
+	m := ready(t, &fakeService{data: app.AccountData{Accounts: []model.AccountView{view}}})
+
+	press(t, m, codeKey(tea.KeyEnter))
+	assertSafeAccountNames(t, m.View().Content, "Nick safe")
+	press(t, m, codeKey(tea.KeyEnter))
+	assertSafeAccountNames(t, m.View().Content, "Nick safe")
+}
+
+func TestMainRenderUsesOneCapturedTime(t *testing.T) {
+	captured := time.Date(2025, time.December, 31, 23, 59, 45, 0, time.UTC)
+	later := time.Date(2026, time.January, 1, 0, 0, 45, 0, time.UTC)
+	lastSync := captured.Add(-30 * time.Second)
+	due := time.Date(2026, time.January, 2, 0, 0, 0, 0, time.UTC)
+	view := account("acc-1", "Card", "Credit card", "1001", "Bank", 100)
+	view.Liability = &model.CreditLiability{PaymentDueDate: &due}
+	m := ready(t, &fakeService{data: app.AccountData{
+		Accounts: []model.AccountView{view},
+		States: []app.SyncState{{
+			ItemID:       "item-1",
+			Institution:  "Bank",
+			LastSyncedAt: &lastSync,
+			LastStatus:   "ok",
+		}},
+	}})
+
+	clockCalls := 0
+	m.now = func() time.Time {
+		clockCalls++
+		if clockCalls == 1 {
+			return captured
+		}
+		return later
+	}
+	body := content(m)
+
+	if clockCalls != 1 {
+		t.Fatalf("one main render called the clock %d times, want 1", clockCalls)
+	}
+	if !hasRow(body, "Sync", okMark+" Last sync: just now") {
+		t.Errorf("main view = %q, want sync status formatted with the captured time", body)
+	}
+	if !strings.Contains(body, "Jan 02, 2026") {
+		t.Errorf("main view = %q, want the due date formatted with the same captured time", body)
+	}
+}
+
+func TestMainAccountSummaryTableAtNarrowWidth(t *testing.T) {
+	now := time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC)
+	due := time.Date(2026, time.September, 12, 0, 0, 0, 0, time.UTC)
+	paid := time.Date(2026, time.August, 20, 0, 0, 0, 0, time.UTC)
+	accounts := []model.AccountView{
+		account("acc-1", "Amex Daily", "Blue Cash", "1001", "American Express", 1284.21),
+		account("acc-2", "", "Scotia Visa", "2002", "Scotiabank", 320.1),
+		account("acc-3", "", "", "3003", "Wealthsimple", 2400),
+		account("acc-4", "Cash reserve", "Cash", "4004", "Wealthsimple", -810),
+	}
+	accounts[0].Liability = &model.CreditLiability{
+		PaymentDueDate:       &due,
+		LastPaymentDate:      &paid,
+		LastPaymentAmount:    decimal.NewNullDecimal(decimal.NewFromInt(500)),
+		LastStatementBalance: decimal.NewNullDecimal(decimal.NewFromInt(1000)),
+	}
+
+	m := ready(t, &fakeService{data: app.AccountData{Accounts: accounts}})
+	m.now = func() time.Time { return now }
+	const narrow = 50
+	m.width = narrow
+	body := content(m)
+	for _, name := range []string{"Amex Daily", "Scotia Visa", "acc-3", "Cash reserve"} {
+		lines := 0
+		for _, line := range strings.Split(body, "\n") {
+			if strings.Contains(line, name) {
+				lines++
+			}
+		}
+		if lines != 1 {
+			t.Errorf("account %q appears on %d physical lines, want exactly 1: %q", name, lines, body)
+		}
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if width := lipgloss.Width(line); width > narrow {
+			t.Errorf("main line %q is %d cells wide, want at most %d", line, width, narrow)
+		}
+	}
+}
+
+func TestMainEmptyAccountSummary(t *testing.T) {
+	m := ready(t, &fakeService{})
+	body := content(m)
+	if !hasLine(body, "No accounts are linked yet.") {
+		t.Errorf("empty main view = %q, want exact empty-account message", body)
+	}
+	if !strings.Contains(body, "No accounts are linked yet.\n\n  Main menu\n\n› Accounts") {
+		t.Errorf("empty main view = %q, want the message above the usable menu", body)
+	}
+
+	press(t, m, codeKey(tea.KeyDown))
+	if m.main.cursor != choiceAdd {
+		t.Fatalf("cursor after down = %d, want Add account", m.main.cursor)
+	}
+	press(t, m, codeKey(tea.KeyUp))
+	press(t, m, codeKey(tea.KeyEnter))
+	if m.screen != accountsScreen {
+		t.Fatalf("screen after selecting Accounts = %v, want accountsScreen", m.screen)
+	}
+}
+
+func TestAccountRowUsesOneGroupedCurrencyBearingBalance(t *testing.T) {
+	view := account("acc-1", "", "Everyday Checking", "1234", "Chase", 1284.21)
+	row := ansi.Strip(accountRow(view, false, lipgloss.NewStyle(), 80))
+	if !strings.Contains(row, "1,284.21 USD") {
+		t.Errorf("account row = %q, want the shared money format", row)
+	}
+	if got := strings.Count(row, "USD"); got != 1 {
+		t.Errorf("account row = %q, want one currency value, got %d", row, got)
+	}
+}
+
+func TestDetailUsesOneGroupedCurrencyBearingBalance(t *testing.T) {
+	view := account("acc-1", "", "Everyday Checking", "1234", "Chase", 1284.21)
+	m := ready(t, &fakeService{data: app.AccountData{Accounts: []model.AccountView{view}}})
+	openDetail(t, m, 0)
+	body := content(m)
+	if !strings.Contains(body, "1,284.21 USD") {
+		t.Errorf("detail view = %q, want the shared money format", body)
+	}
+	if got := strings.Count(body, "USD"); got != 1 {
+		t.Errorf("detail view = %q, want one currency value, got %d", body, got)
 	}
 }
 
@@ -540,7 +844,7 @@ func TestAccountRowKeepsNameAtNarrowWidths(t *testing.T) {
 	view := account("acc-1", "Café Ünicode", "Everyday Checking", "1234", "Chase", 1234.56)
 
 	wide := accountRow(view, true, itemStyle, 80)
-	for _, want := range []string{"Café Ünicode", "••1234", "Chase", "USD", "1234.56", "NEW"} {
+	for _, want := range []string{"Café Ünicode", "••1234", "Chase", "1,234.56 USD", "NEW"} {
 		if !strings.Contains(wide, want) {
 			t.Errorf("wide row = %q, want it to contain %q", wide, want)
 		}
@@ -695,25 +999,149 @@ func typeText(t *testing.T, m *Model, text string) {
 	}
 }
 
-// openHistory walks the main menu to the history length choice.
+// openAddSetup walks the main menu to the choices for one new account.
+func openAddSetup(t *testing.T, m *Model) {
+	t.Helper()
+	for m.main.cursor < choiceAdd {
+		press(t, m, codeKey(tea.KeyDown))
+	}
+	for m.main.cursor > choiceAdd {
+		press(t, m, codeKey(tea.KeyUp))
+	}
+	press(t, m, codeKey(tea.KeyEnter))
+	if m.screen != addSetupScreen {
+		t.Fatalf("screen after choosing Add account = %v, want addSetupScreen", m.screen)
+	}
+}
+
+// openHistory walks the main menu and add setup to the history length choice.
 func openHistory(t *testing.T, m *Model) {
 	t.Helper()
-	press(t, m, codeKey(tea.KeyDown))
+	openAddSetup(t, m)
 	press(t, m, codeKey(tea.KeyEnter))
 	if m.screen != historyScreen {
-		t.Fatalf("screen after choosing Add account = %v, want historyScreen", m.screen)
+		t.Fatalf("screen after choosing Transaction history = %v, want historyScreen", m.screen)
 	}
+}
+
+// startDefaultLink selects the default history choice, then starts Link from
+// Continue on the setup screen.
+func startDefaultLink(t *testing.T, m *Model) tea.Cmd {
+	t.Helper()
+	openHistory(t, m)
+	if cmd := press(t, m, codeKey(tea.KeyEnter)); cmd != nil {
+		t.Fatal("choosing the default history started Link")
+	}
+	press(t, m, codeKey(tea.KeyDown))
+	press(t, m, codeKey(tea.KeyDown))
+	return press(t, m, codeKey(tea.KeyEnter))
 }
 
 // addUntilFirstNickname runs the add flow from the main menu to the first
 // nickname prompt.
 func addUntilFirstNickname(t *testing.T, m *Model) {
 	t.Helper()
-	openHistory(t, m)
-	cmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // Link
-	runOperation(t, m, cmd)                                       // SyncItem
+	cmd := runOperation(t, m, startDefaultLink(t, m)) // Link
+	runOperation(t, m, cmd)                           // SyncItem
 	if m.screen != nicknameScreen {
 		t.Fatalf("screen after the first sync = %v, want nicknameScreen", m.screen)
+	}
+}
+
+func TestAddSetupDefaultsTogglesAndPassesLiabilitiesToLink(t *testing.T) {
+	fake := &fakeService{linkItem: app.LinkedItem{ItemID: "item-new", Institution: "Chase"}}
+	m := ready(t, fake)
+
+	openAddSetup(t, m)
+	if m.add != (addState{days: app.MaxLinkDays, liabilities: true}) {
+		t.Fatalf("add state = %+v, want 730 days, Liabilities on, and the first row", m.add)
+	}
+	body := content(m)
+	for _, row := range [][2]string{
+		{"Transaction history", "730 days"},
+		{"Enable Liabilities API?", "Yes"},
+	} {
+		if !hasRow(body, row[0], row[1]) {
+			t.Errorf("add setup = %q, want row %q %q", body, row[0], row[1])
+		}
+	}
+	for _, want := range []string{
+		"Continue",
+		"Fetch credit card statement, payment, and interest details.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("add setup = %q, want %q", body, want)
+		}
+	}
+
+	press(t, m, codeKey(tea.KeyDown)) // Enable Liabilities API?
+	press(t, m, codeKey(tea.KeyEnter))
+	if m.add.liabilities || !hasRow(content(m), "Enable Liabilities API?", "No") {
+		t.Fatalf("Liabilities after the first toggle = %v, want No", m.add.liabilities)
+	}
+	press(t, m, codeKey(tea.KeyEnter))
+	if !m.add.liabilities || !hasRow(content(m), "Enable Liabilities API?", "Yes") {
+		t.Fatalf("Liabilities after the second toggle = %v, want Yes", m.add.liabilities)
+	}
+
+	press(t, m, codeKey(tea.KeyUp)) // Transaction history
+	press(t, m, codeKey(tea.KeyEnter))
+	if m.screen != historyScreen {
+		t.Fatalf("screen after opening history = %v, want historyScreen", m.screen)
+	}
+	if len(fake.linkCalls) != 0 {
+		t.Fatalf("Link calls after opening history = %v, want none", fake.linkCalls)
+	}
+	press(t, m, codeKey(tea.KeyEsc))
+	if m.screen != addSetupScreen {
+		t.Fatalf("screen after history esc = %v, want addSetupScreen", m.screen)
+	}
+	press(t, m, codeKey(tea.KeyEsc))
+	if m.screen != mainScreen {
+		t.Fatalf("screen after setup esc = %v, want mainScreen", m.screen)
+	}
+
+	openHistory(t, m)
+	press(t, m, codeKey(tea.KeyDown)) // 365 days
+	if cmd := press(t, m, codeKey(tea.KeyEnter)); cmd != nil {
+		t.Fatal("choosing fixed history started Link")
+	}
+	if m.screen != addSetupScreen || m.add.days != 365 {
+		t.Fatalf("screen = %v, days = %d, want setup with 365 days", m.screen, m.add.days)
+	}
+	if len(fake.linkCalls) != 0 {
+		t.Fatalf("Link calls after fixed history = %v, want none", fake.linkCalls)
+	}
+
+	press(t, m, codeKey(tea.KeyEnter)) // open history again
+	for m.history.cursor < len(historyDays) {
+		press(t, m, codeKey(tea.KeyDown))
+	}
+	press(t, m, codeKey(tea.KeyEnter))
+	if m.screen != customDaysScreen {
+		t.Fatalf("screen after choosing Custom = %v, want customDaysScreen", m.screen)
+	}
+	m.prompt.input.SetValue("120")
+	if cmd := press(t, m, codeKey(tea.KeyEnter)); cmd != nil {
+		t.Fatal("choosing custom history started Link")
+	}
+	if m.screen != addSetupScreen || m.add.days != 120 {
+		t.Fatalf("screen = %v, days = %d, want setup with 120 days", m.screen, m.add.days)
+	}
+	if len(fake.linkCalls) != 0 {
+		t.Fatalf("Link calls after custom history = %v, want none", fake.linkCalls)
+	}
+
+	press(t, m, codeKey(tea.KeyDown))  // Liabilities
+	press(t, m, codeKey(tea.KeyEnter)) // No
+	press(t, m, codeKey(tea.KeyDown))  // Continue
+	cmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+	if cmd == nil {
+		t.Fatal("a successful Link did not start the first sync")
+	}
+	want := []linkCall{{days: 120, liabilities: false}}
+	if len(fake.linkCalls) != 1 || fake.linkCalls[0] != want[0] {
+		t.Fatalf("Link calls = %+v, want %+v", fake.linkCalls, want)
 	}
 }
 
@@ -738,9 +1166,14 @@ func TestAddFlowLinksSyncsNamesAndMarksNewAccounts(t *testing.T) {
 		t.Errorf("history cursor = %d, want the longest history as the default", m.history.cursor)
 	}
 
+	if cmd := press(t, m, codeKey(tea.KeyEnter)); cmd != nil { // choose 730 days
+		t.Fatal("choosing history started Link")
+	}
+	press(t, m, codeKey(tea.KeyDown))
+	press(t, m, codeKey(tea.KeyDown))
 	cmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // Link
-	if len(fake.linkDays) != 1 || fake.linkDays[0] != 730 {
-		t.Fatalf("Link days = %v, want one call for 730 days", fake.linkDays)
+	if len(fake.linkCalls) != 1 || fake.linkCalls[0] != (linkCall{days: 730, liabilities: true}) {
+		t.Fatalf("Link calls = %v, want one call for 730 days with Liabilities", fake.linkCalls)
 	}
 	if m.linked.ItemID != "item-new" || m.linked.Institution != "Chase" {
 		t.Fatalf("linked item = %+v, want the returned metadata", m.linked)
@@ -817,14 +1250,19 @@ func TestCustomHistoryKeepsAnUnusableValueOnThePrompt(t *testing.T) {
 			t.Errorf("prompt view = %q, want %q", body, errHistoryRange.Error())
 		}
 	}
-	if len(fake.linkDays) != 0 {
-		t.Fatalf("Link days = %v, want no link for an unusable value", fake.linkDays)
+	if len(fake.linkCalls) != 0 {
+		t.Fatalf("Link calls = %v, want no link for an unusable value", fake.linkCalls)
 	}
 
 	m.prompt.input.SetValue(" 120 ")
-	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
-	if len(fake.linkDays) != 1 || fake.linkDays[0] != 120 {
-		t.Fatalf("Link days = %v, want one call for 120 days", fake.linkDays)
+	if cmd := press(t, m, codeKey(tea.KeyEnter)); cmd != nil {
+		t.Fatal("a valid custom value started Link")
+	}
+	if m.screen != addSetupScreen || m.add.days != 120 {
+		t.Fatalf("screen = %v, days = %d, want setup with 120 days", m.screen, m.add.days)
+	}
+	if len(fake.linkCalls) != 0 {
+		t.Fatalf("Link calls = %v, want none before Continue", fake.linkCalls)
 	}
 }
 
@@ -862,9 +1300,8 @@ func TestAddFlowSyncFailureKeepsLinkedItemForRetry(t *testing.T) {
 	}
 	m := ready(t, fake)
 
-	openHistory(t, m)
-	cmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // Link
-	cmd = runOperation(t, m, cmd)                                 // the failing SyncItem
+	cmd := runOperation(t, m, startDefaultLink(t, m)) // Link
+	cmd = runOperation(t, m, cmd)                     // the failing SyncItem
 	if cmd != nil {
 		t.Fatal("the failed sync started another command; the interface must not retry on its own")
 	}
@@ -901,8 +1338,7 @@ func TestRetryLeavesTheRecoveryScreenBehind(t *testing.T) {
 	fake := &fakeService{linkErr: errors.New("plaid is unavailable")}
 	m := ready(t, fake)
 
-	openHistory(t, m)
-	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // the failing Link
+	runOperation(t, m, startDefaultLink(t, m)) // the failing Link
 	if m.screen != recoveryScreen {
 		t.Fatalf("screen after a failed link = %v, want recoveryScreen", m.screen)
 	}
@@ -911,8 +1347,8 @@ func TestRetryLeavesTheRecoveryScreenBehind(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("Retry started no operation")
 	}
-	if m.screen != historyScreen {
-		t.Fatalf("screen while the retry runs = %v, want historyScreen", m.screen)
+	if m.screen != addSetupScreen {
+		t.Fatalf("screen while the retry runs = %v, want addSetupScreen", m.screen)
 	}
 	if body := content(m); strings.Contains(body, "Something went wrong") {
 		t.Errorf("view while the retry runs = %q, want the retried screen, not the cleared failure", body)
@@ -926,8 +1362,8 @@ func TestRetryLeavesTheRecoveryScreenBehind(t *testing.T) {
 	}
 	runOperation(t, m, cmd)
 
-	if m.screen != historyScreen {
-		t.Fatalf("screen after a cancelled retry = %v, want historyScreen", m.screen)
+	if m.screen != addSetupScreen {
+		t.Fatalf("screen after a cancelled retry = %v, want addSetupScreen", m.screen)
 	}
 	if m.linked != (app.LinkedItem{}) {
 		t.Errorf("linked item = %+v, want it cleared", m.linked)
@@ -935,25 +1371,24 @@ func TestRetryLeavesTheRecoveryScreenBehind(t *testing.T) {
 	if body := content(m); strings.Contains(body, "Something went wrong") {
 		t.Errorf("view after a cancelled retry = %q, want the history choice", body)
 	}
-	if len(fake.linkDays) != 2 {
-		t.Errorf("Link calls = %v, want the first call and the retry", fake.linkDays)
+	if len(fake.linkCalls) != 2 {
+		t.Errorf("Link calls = %v, want the first call and the retry", fake.linkCalls)
 	}
 }
 
-func TestLinkCancellationReturnsToHistoryChoice(t *testing.T) {
+func TestLinkCancellationReturnsToAddSetup(t *testing.T) {
 	fake := &fakeService{
 		linkItem: app.LinkedItem{ItemID: "item-new", Institution: "Chase"},
 		linkErr:  context.Canceled,
 	}
 	m := ready(t, fake)
 
-	openHistory(t, m)
-	cmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+	cmd := runOperation(t, m, startDefaultLink(t, m))
 	if cmd != nil {
 		t.Fatal("a cancelled link started another command")
 	}
-	if m.screen != historyScreen {
-		t.Fatalf("screen after a cancelled link = %v, want historyScreen", m.screen)
+	if m.screen != addSetupScreen {
+		t.Fatalf("screen after a cancelled link = %v, want addSetupScreen", m.screen)
 	}
 	if m.linked != (app.LinkedItem{}) {
 		t.Errorf("linked item = %+v, want it cleared", m.linked)
@@ -1004,6 +1439,9 @@ func TestNicknameFailureKeepsPromptOpen(t *testing.T) {
 // openDetail walks the main menu to the detail screen of one account row.
 func openDetail(t *testing.T, m *Model, row int) {
 	t.Helper()
+	for m.main.cursor > choiceAccounts {
+		press(t, m, codeKey(tea.KeyUp))
+	}
 	press(t, m, codeKey(tea.KeyEnter)) // Accounts
 	for i := 0; i < row; i++ {
 		press(t, m, codeKey(tea.KeyDown))
@@ -1011,6 +1449,623 @@ func openDetail(t *testing.T, m *Model, row int) {
 	press(t, m, codeKey(tea.KeyEnter))
 	if m.screen != detailScreen {
 		t.Fatalf("screen after opening a row = %v, want detailScreen", m.screen)
+	}
+}
+
+func creditAccount(id, institution string) model.AccountView {
+	view := account(id, "", "Credit card", "1234", institution, 20)
+	view.Type = "credit"
+	return view
+}
+
+func TestAccountRefreshCopiesLiabilitiesEnabled(t *testing.T) {
+	row := creditAccount("acc-1", "Chase")
+	source := map[string]bool{"item-1": false}
+	state := app.SyncState{ItemID: "item-1", Institution: "Chase", LastStatus: "ok"}
+	m := ready(t, &fakeService{data: app.AccountData{
+		Accounts:           []model.AccountView{row},
+		States:             []app.SyncState{state},
+		LiabilitiesEnabled: source,
+	}})
+
+	if got, found := m.liabilitiesEnabled["item-1"]; !found || got {
+		t.Fatalf("copied Liabilities flag = %v, found = %v, want stored false", got, found)
+	}
+	if len(m.accounts.rows) != 1 || m.accounts.rows[0].AccountID != "acc-1" {
+		t.Fatalf("account rows = %+v, want acc-1 preserved", m.accounts.rows)
+	}
+	if len(m.syncStates) != 1 || m.syncStates[0] != state {
+		t.Fatalf("sync states = %+v, want %+v", m.syncStates, state)
+	}
+
+	source["item-1"] = true
+	if m.liabilitiesEnabled["item-1"] {
+		t.Fatal("the Model aliases the AccountData Liabilities map")
+	}
+}
+
+func TestAccountRefreshLeavesDetailWhenTheSelectedAccountDisappears(t *testing.T) {
+	row := creditAccount("acc-1", "Chase")
+	fake := &fakeService{data: app.AccountData{
+		Accounts:           []model.AccountView{row},
+		LiabilitiesEnabled: map[string]bool{"item-1": false},
+	}}
+	m := ready(t, fake)
+	openDetail(t, m, 0)
+	m.detail.cursor = 2
+
+	fake.data = app.AccountData{LiabilitiesEnabled: map[string]bool{}}
+	runOperation(t, m, m.refreshAccounts())
+
+	if m.screen != accountsScreen {
+		t.Fatalf("screen after the selected account disappeared = %v, want accountsScreen", m.screen)
+	}
+	if m.detail != (detailState{}) {
+		t.Fatalf("detail after the selected account disappeared = %+v, want empty state", m.detail)
+	}
+	if m.accounts.cursor != 0 {
+		t.Fatalf("account cursor = %d, want reset for the empty account list", m.accounts.cursor)
+	}
+	if cmd := press(t, m, codeKey(tea.KeyEnter)); cmd != nil || m.screen != accountsScreen {
+		t.Fatalf("enter on the empty account list returned cmd %v and screen %v", cmd, m.screen)
+	}
+}
+
+func TestDetailDisabledCreditShowsStatementActionAndRefreshesAfterSuccess(t *testing.T) {
+	row := creditAccount("acc-1", "Chase")
+	fake := &fakeService{data: app.AccountData{
+		Accounts:           []model.AccountView{row},
+		LiabilitiesEnabled: map[string]bool{"item-1": false},
+	}}
+	fake.enableEffect = func(f *fakeService) {
+		f.data.LiabilitiesEnabled["item-1"] = true
+	}
+	m := ready(t, fake)
+	openDetail(t, m, 0)
+
+	body := content(m)
+	for _, want := range []string{
+		"Enable statement data",
+		"This enables statement data for the whole institution.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("detail view = %q, want %q", body, want)
+		}
+	}
+	actions := m.detailActions()
+	if len(actions) != 3 || actions[0] != detailRename ||
+		actions[1] != detailEnableLiabilities || actions[2] != detailUnlink {
+		t.Fatalf("detail actions = %v, want Rename, Enable, Unlink", actions)
+	}
+
+	press(t, m, codeKey(tea.KeyDown)) // Enable statement data
+	cmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+	if len(fake.enableCalls) != 1 || fake.enableCalls[0] != "acc-1" {
+		t.Fatalf("EnableLiabilities calls = %v, want one call for acc-1", fake.enableCalls)
+	}
+	runOperation(t, m, cmd) // account refresh
+
+	if m.screen != detailScreen || m.detail.account.AccountID != "acc-1" {
+		t.Fatalf("screen = %v, detail = %+v, want refreshed acc-1 detail", m.screen, m.detail.account)
+	}
+	if !m.liabilitiesEnabled["item-1"] {
+		t.Fatal("refreshed Model does not show the enabled Item flag")
+	}
+	actions = m.detailActions()
+	if len(actions) != 2 || actions[0] != detailRename || actions[1] != detailUnlink {
+		t.Fatalf("detail actions after enable = %v, want Rename and Unlink", actions)
+	}
+	if m.detail.cursor != 1 || detailActionLabel(actions[m.detail.cursor]) != "Unlink institution" {
+		t.Fatalf("detail cursor = %d, action = %q, want the valid Unlink index",
+			m.detail.cursor, detailActionLabel(actions[m.detail.cursor]))
+	}
+}
+
+func TestPostEnableAccountRefreshFailureIsTruthfulAndRetriesOnlyRefresh(t *testing.T) {
+	tests := []struct {
+		name        string
+		err         error
+		wantMessage string
+	}{
+		{
+			name:        "failure",
+			err:         errors.New("read accounts: database is unavailable"),
+			wantMessage: "Statement data was enabled, but the account refresh failed.",
+		},
+		{
+			name:        "cancellation",
+			err:         context.Canceled,
+			wantMessage: "Statement data was enabled, but the account refresh was canceled.",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row := creditAccount("acc-1", "Chase")
+			fake := &fakeService{data: app.AccountData{
+				Accounts:           []model.AccountView{row},
+				LiabilitiesEnabled: map[string]bool{"item-1": false},
+			}}
+			m := ready(t, fake)
+			fake.accountsErr = tt.err
+			openDetail(t, m, 0)
+			press(t, m, codeKey(tea.KeyDown)) // Enable statement data
+
+			refreshCmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+			if !m.liabilitiesEnabled["item-1"] {
+				t.Fatal("successful consent did not mark the Item enabled before refresh")
+			}
+			if m.runningKind == accountsOperation {
+				t.Fatal("post-enable refresh uses the generic cancellable account operation")
+			}
+			if body := content(m); strings.Contains(body, "Enable statement data") {
+				t.Errorf("detail during refresh = %q, want no stale enable action", body)
+			}
+
+			if cmd := runOperation(t, m, refreshCmd); cmd != nil {
+				t.Fatal("a failed post-enable refresh started another operation")
+			}
+			if m.screen != recoveryScreen {
+				t.Fatalf("screen after refresh %s = %v, want recoveryScreen", tt.name, m.screen)
+			}
+			body := content(m)
+			for _, want := range []string{
+				tt.wantMessage,
+				displayError(tt.err),
+				"Retry refreshes accounts. It does not request consent again.",
+				"Retry",
+				"Main",
+			} {
+				if !strings.Contains(body, want) {
+					t.Errorf("recovery view = %q, want %q", body, want)
+				}
+			}
+			if !m.liabilitiesEnabled["item-1"] {
+				t.Fatal("failed refresh replaced the locally enabled Item flag")
+			}
+			if len(fake.enableCalls) != 1 {
+				t.Fatalf("EnableLiabilities calls = %v, want one", fake.enableCalls)
+			}
+
+			fake.accountsErr = nil
+			fake.data.LiabilitiesEnabled["item-1"] = true
+			runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // Retry refresh
+			if len(fake.enableCalls) != 1 {
+				t.Fatalf("EnableLiabilities calls after Retry = %v, want no second consent", fake.enableCalls)
+			}
+			if len(fake.accountsCalls) != 3 {
+				t.Fatalf("Accounts calls = %v, want initial, failed, and retried refresh", fake.accountsCalls)
+			}
+			if m.screen != detailScreen || m.detail.account.AccountID != "acc-1" {
+				t.Fatalf("screen = %v, detail = %+v, want refreshed acc-1 detail",
+					m.screen, m.detail.account)
+			}
+		})
+	}
+}
+
+func TestPartialLiabilitiesEnableRetriesSnapshotThenAccounts(t *testing.T) {
+	tests := []struct {
+		name        string
+		cause       error
+		wantMessage string
+	}{
+		{
+			name:        "temporary failure",
+			cause:       errors.New("liabilities are temporarily unavailable"),
+			wantMessage: "Statement data is enabled for the whole institution, but the first refresh failed.",
+		},
+		{
+			name:        "cancellation",
+			cause:       context.Canceled,
+			wantMessage: "Statement data is enabled for the whole institution, but the first refresh was canceled.",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row := creditAccount("acc-1", "Chase")
+			partial := app.NewLiabilitiesEnabledError(tt.cause, "")
+			fake := &fakeService{
+				data: app.AccountData{
+					Accounts:           []model.AccountView{row},
+					LiabilitiesEnabled: map[string]bool{"item-1": false},
+					States: []app.SyncState{{
+						ItemID:                     "item-1",
+						Institution:                "Chase",
+						LiabilitiesConsentRequired: true,
+					}},
+				},
+				enableErr: partial,
+			}
+			fake.liabilityRefreshEffect = func(f *fakeService) {
+				f.data.LiabilitiesEnabled["item-1"] = true
+				f.data.States[0].LiabilitiesConsentRequired = false
+			}
+			m := ready(t, fake)
+			openDetail(t, m, 0)
+			press(t, m, codeKey(tea.KeyDown)) // Enable statement data
+
+			msg := operationResult(t, press(t, m, codeKey(tea.KeyEnter)))
+			if !errors.Is(msg.err, tt.cause) {
+				t.Fatalf("operation error = %v, want cause %v", msg.err, tt.cause)
+			}
+			if _, cmd := m.Update(msg); cmd != nil {
+				t.Fatal("a partial enable started another operation")
+			}
+
+			if !m.liabilitiesEnabled["item-1"] {
+				t.Fatal("partial enable did not set the local Item flag")
+			}
+			for _, action := range m.detailActions() {
+				if action == detailEnableLiabilities {
+					t.Fatal("partial enable left the Enable action visible")
+				}
+			}
+			if m.screen != recoveryScreen {
+				t.Fatalf("screen after partial enable = %v, want recoveryScreen", m.screen)
+			}
+			body := content(m)
+			normalizedBody := strings.Join(strings.Fields(body), " ")
+			for _, want := range []string{
+				tt.wantMessage,
+				"Reason: " + displayError(tt.cause),
+				"Retry requests the statement snapshot. It does not request consent again.",
+				"Retry",
+				"Main",
+			} {
+				if !strings.Contains(normalizedBody, strings.Join(strings.Fields(want), " ")) {
+					t.Errorf("recovery view = %q, want %q", body, want)
+				}
+			}
+			if len(fake.enableCalls) != 1 || len(fake.liabilityRefreshCalls) != 0 || len(fake.accountsCalls) != 1 {
+				t.Fatalf("calls after partial enable = Enable %v, Refresh %v, Accounts %v; want 1, 0, 1",
+					fake.enableCalls, fake.liabilityRefreshCalls, fake.accountsCalls)
+			}
+
+			accountsCmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // Retry snapshot
+			if len(fake.liabilityRefreshCalls) != 1 || len(fake.accountsCalls) != 1 {
+				t.Fatalf("calls after snapshot Retry = Refresh %v, Accounts %v; want 1 and 1",
+					fake.liabilityRefreshCalls, fake.accountsCalls)
+			}
+			runOperation(t, m, accountsCmd)
+			if len(fake.enableCalls) != 1 {
+				t.Fatalf("EnableLiabilities calls after Retry = %v, want one", fake.enableCalls)
+			}
+			if len(fake.accountsCalls) != 2 {
+				t.Fatalf("Accounts calls after snapshot success = %v, want initial and refresh", fake.accountsCalls)
+			}
+			if m.screen != detailScreen || m.detail.account.AccountID != "acc-1" {
+				t.Fatalf("screen = %v, detail = %+v, want refreshed acc-1 detail",
+					m.screen, m.detail.account)
+			}
+		})
+	}
+}
+
+func TestPartialLiabilitiesSnapshotFailureRetriesTheSnapshotAgain(t *testing.T) {
+	row := creditAccount("acc-1", "Chase")
+	firstErr := errors.New("first snapshot failed")
+	retryErr := errors.New("snapshot retry failed")
+	fake := &fakeService{
+		data: app.AccountData{
+			Accounts:           []model.AccountView{row},
+			LiabilitiesEnabled: map[string]bool{"item-1": false},
+		},
+		enableErr:            app.NewLiabilitiesEnabledError(firstErr, ""),
+		liabilityRefreshErrs: []error{retryErr, nil},
+	}
+	fake.liabilityRefreshEffect = func(f *fakeService) {
+		f.data.LiabilitiesEnabled["item-1"] = true
+	}
+	m := ready(t, fake)
+	openDetail(t, m, 0)
+	press(t, m, codeKey(tea.KeyDown))
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+
+	if cmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))); cmd != nil {
+		t.Fatal("failed snapshot retry started account refresh")
+	}
+	if m.screen != recoveryScreen || !strings.Contains(content(m), retryErr.Error()) {
+		t.Fatalf("screen = %v, view = %q; want snapshot retry recovery", m.screen, content(m))
+	}
+	if len(fake.enableCalls) != 1 || len(fake.liabilityRefreshCalls) != 1 || len(fake.accountsCalls) != 1 {
+		t.Fatalf("calls after failed retry = Enable %v, Refresh %v, Accounts %v; want 1 each",
+			fake.enableCalls, fake.liabilityRefreshCalls, fake.accountsCalls)
+	}
+
+	accountsCmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+	runOperation(t, m, accountsCmd)
+	if len(fake.enableCalls) != 1 || len(fake.liabilityRefreshCalls) != 2 || len(fake.accountsCalls) != 2 {
+		t.Fatalf("final calls = Enable %v, Refresh %v, Accounts %v; want 1, 2, 2",
+			fake.enableCalls, fake.liabilityRefreshCalls, fake.accountsCalls)
+	}
+}
+
+func TestLiabilitiesStatusCleanupFailureRetriesSnapshotWithoutConsent(t *testing.T) {
+	row := creditAccount("acc-1", "Chase")
+	cleanupErr := errors.New("save consent status: database is busy")
+	fake := &fakeService{
+		data: app.AccountData{
+			Accounts:           []model.AccountView{row},
+			LiabilitiesEnabled: map[string]bool{"item-1": false},
+		},
+		enableErr: app.NewLiabilitiesStatusError(cleanupErr, "", true),
+	}
+	fake.liabilityRefreshEffect = func(f *fakeService) {
+		f.data.LiabilitiesEnabled["item-1"] = true
+	}
+	m := ready(t, fake)
+	openDetail(t, m, 0)
+	press(t, m, codeKey(tea.KeyDown))
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+
+	body := strings.Join(strings.Fields(content(m)), " ")
+	for _, want := range []string{
+		"Statement data is enabled for the whole institution, and the first snapshot was stored, but its consent status could not be updated.",
+		"Retry requests the statement snapshot. It does not request consent again.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("recovery view = %q, want %q", body, want)
+		}
+	}
+	if !m.liabilitiesEnabled["item-1"] {
+		t.Fatal("cleanup failure did not mark the Item enabled")
+	}
+	for _, action := range m.detailActions() {
+		if action == detailEnableLiabilities {
+			t.Fatal("cleanup failure left the Enable action visible")
+		}
+	}
+
+	accountsCmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+	runOperation(t, m, accountsCmd)
+	if len(fake.enableCalls) != 1 || len(fake.liabilityRefreshCalls) != 1 || len(fake.accountsCalls) != 2 {
+		t.Fatalf("calls = Enable %v, Refresh %v, Accounts %v; want 1, 1, 2",
+			fake.enableCalls, fake.liabilityRefreshCalls, fake.accountsCalls)
+	}
+}
+
+func TestProductNotReadyStatusCleanupFailureDoesNotClaimSnapshotStored(t *testing.T) {
+	row := creditAccount("acc-1", "Chase")
+	cleanupErr := errors.New("save consent status: database is busy")
+	fake := &fakeService{
+		data: app.AccountData{
+			Accounts:           []model.AccountView{row},
+			LiabilitiesEnabled: map[string]bool{"item-1": false},
+		},
+		enableErr: app.NewLiabilitiesStatusError(cleanupErr, "", false),
+	}
+	m := ready(t, fake)
+	openDetail(t, m, 0)
+	press(t, m, codeKey(tea.KeyDown))
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+
+	body := strings.Join(strings.Fields(content(m)), " ")
+	for _, want := range []string{
+		"Statement data is enabled for the whole institution, but the first snapshot is not ready, and its consent status could not be updated.",
+		"Retry requests the statement snapshot. It does not request consent again.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("recovery view = %q, want %q", body, want)
+		}
+	}
+	if strings.Contains(body, "snapshot was stored") {
+		t.Errorf("recovery view = %q, want no stored-snapshot claim", body)
+	}
+
+	accountsCmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+	runOperation(t, m, accountsCmd)
+	if len(fake.enableCalls) != 1 || len(fake.liabilityRefreshCalls) != 1 || len(fake.accountsCalls) != 2 {
+		t.Fatalf("calls = Enable %v, Refresh %v, Accounts %v; want 1, 1, 2",
+			fake.enableCalls, fake.liabilityRefreshCalls, fake.accountsCalls)
+	}
+}
+
+func TestPartialLiabilitiesConsentRequiredRetriesConsent(t *testing.T) {
+	row := creditAccount("acc-1", "Chase")
+	consentErr := fmt.Errorf("Plaid response: %w", app.ErrAdditionalConsentRequired)
+	fake := &fakeService{
+		data: app.AccountData{
+			Accounts:           []model.AccountView{row},
+			LiabilitiesEnabled: map[string]bool{"item-1": false},
+		},
+		enableErr: app.NewLiabilitiesEnabledError(consentErr, ""),
+	}
+	m := ready(t, fake)
+	openDetail(t, m, 0)
+	press(t, m, codeKey(tea.KeyDown))
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+
+	body := strings.Join(strings.Fields(content(m)), " ")
+	for _, want := range []string{
+		"The statement data request was saved, but Plaid still requires consent.",
+		"Retry requests consent again.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("recovery view = %q, want %q", body, want)
+		}
+	}
+	if strings.Contains(body, "Statement data is enabled") {
+		t.Errorf("recovery view = %q, want no enabled claim", body)
+	}
+	if !m.liabilitiesEnabled["item-1"] {
+		t.Fatal("saved request did not set the local Item flag")
+	}
+	foundEnable := false
+	for _, action := range m.detailActions() {
+		foundEnable = foundEnable || action == detailEnableLiabilities
+	}
+	if !foundEnable {
+		t.Fatal("consent-required outcome removed the Enable action")
+	}
+
+	fake.enableErr = nil
+	fake.enableEffect = func(f *fakeService) {
+		f.data.LiabilitiesEnabled["item-1"] = true
+		f.data.States = []app.SyncState{{ItemID: "item-1", Institution: "Chase"}}
+	}
+	accountsCmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+	runOperation(t, m, accountsCmd)
+	if len(fake.enableCalls) != 2 || len(fake.liabilityRefreshCalls) != 0 || len(fake.accountsCalls) != 2 {
+		t.Fatalf("calls = Enable %v, Refresh %v, Accounts %v; want 2, 0, 2",
+			fake.enableCalls, fake.liabilityRefreshCalls, fake.accountsCalls)
+	}
+}
+
+func TestLiabilitiesExplanationsRemainWholeAtNarrowWidth(t *testing.T) {
+	row := creditAccount("acc-1", "Chase")
+	m := ready(t, &fakeService{data: app.AccountData{
+		Accounts:           []model.AccountView{row},
+		LiabilitiesEnabled: map[string]bool{"item-1": false},
+	}})
+	m.width = 40
+
+	openAddSetup(t, m)
+	setup := strings.Join(strings.Fields(content(m)), " ")
+	if want := "Fetch credit card statement, payment, and interest details."; !strings.Contains(setup, want) {
+		t.Errorf("narrow setup = %q, want the whole explanation %q", setup, want)
+	}
+	press(t, m, codeKey(tea.KeyEsc))
+	openDetail(t, m, 0)
+	detail := strings.Join(strings.Fields(content(m)), " ")
+	if want := "This enables statement data for the whole institution."; !strings.Contains(detail, want) {
+		t.Errorf("narrow detail = %q, want the whole scope note %q", detail, want)
+	}
+}
+
+func TestDetailNonCreditOmitsStatementActionAndKeepsUnlinkIndex(t *testing.T) {
+	row := account("acc-1", "", "Everyday Checking", "1234", "Chase", 20)
+	row.Type = "depository"
+	fake := &fakeService{
+		data: app.AccountData{
+			Accounts:           []model.AccountView{row},
+			LiabilitiesEnabled: map[string]bool{"item-1": false},
+		},
+		preview: app.UnlinkData{ItemID: "item-1", Institution: "Chase"},
+	}
+	m := ready(t, fake)
+	openDetail(t, m, 0)
+
+	if body := content(m); strings.Contains(body, "Enable statement data") {
+		t.Errorf("non-credit detail = %q, want no statement action", body)
+	}
+	actions := m.detailActions()
+	if len(actions) != 2 || actions[1] != detailUnlink {
+		t.Fatalf("non-credit actions = %v, want Rename and Unlink", actions)
+	}
+	press(t, m, codeKey(tea.KeyDown))
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+	if len(fake.previewCalls) != 1 || fake.previewCalls[0] != "item-1" {
+		t.Fatalf("UnlinkPreview calls = %v, want item-1 from the dynamic index", fake.previewCalls)
+	}
+}
+
+func TestDetailConsentRequiredShowsStatementActionWhenItemIsEnabled(t *testing.T) {
+	row := creditAccount("acc-1", "Chase")
+	m := ready(t, &fakeService{data: app.AccountData{
+		Accounts:           []model.AccountView{row},
+		LiabilitiesEnabled: map[string]bool{"item-1": true},
+		States: []app.SyncState{{
+			ItemID:                     "item-1",
+			Institution:                "Chase",
+			LiabilitiesConsentRequired: true,
+		}},
+	}})
+	openDetail(t, m, 0)
+
+	if body := content(m); !strings.Contains(body, "Enable statement data") {
+		t.Errorf("consent-required detail = %q, want the statement action", body)
+	}
+}
+
+func TestDetailStatementRetryUsesTheSameAccount(t *testing.T) {
+	row := creditAccount("acc-1", "Chase")
+	fake := &fakeService{
+		data: app.AccountData{
+			Accounts:           []model.AccountView{row},
+			LiabilitiesEnabled: map[string]bool{"item-1": false},
+		},
+		enableErr: errors.New("consent did not finish"),
+	}
+	m := ready(t, fake)
+	openDetail(t, m, 0)
+	press(t, m, codeKey(tea.KeyDown))
+	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+	if m.screen != recoveryScreen {
+		t.Fatalf("screen after failed enable = %v, want recoveryScreen", m.screen)
+	}
+
+	fake.enableErr = nil
+	fake.enableEffect = func(f *fakeService) {
+		f.data.LiabilitiesEnabled["item-1"] = true
+	}
+	cmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // Retry
+	runOperation(t, m, cmd)                                       // account refresh
+	want := []string{"acc-1", "acc-1"}
+	if len(fake.enableCalls) != 2 || fake.enableCalls[0] != want[0] || fake.enableCalls[1] != want[1] {
+		t.Fatalf("EnableLiabilities calls = %v, want %v", fake.enableCalls, want)
+	}
+	if m.screen != detailScreen || m.detail.account.AccountID != "acc-1" {
+		t.Fatalf("screen = %v, detail = %+v, want acc-1 detail", m.screen, m.detail.account)
+	}
+}
+
+func TestEnableLiabilitiesCancellationIsShownAtEachStateBoundary(t *testing.T) {
+	tests := []struct {
+		name          string
+		effect        func(*fakeService)
+		wantSaved     bool
+		wantEndpoints int
+	}{
+		{name: "before consent"},
+		{
+			name: "after saved flag and initial endpoint call",
+			effect: func(f *fakeService) {
+				f.consentSaved = true
+				f.endpointCalls++
+				f.data.LiabilitiesEnabled["item-1"] = true
+			},
+			wantSaved:     true,
+			wantEndpoints: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row := creditAccount("acc-1", "Chase")
+			fake := &fakeService{
+				data: app.AccountData{
+					Accounts:           []model.AccountView{row},
+					LiabilitiesEnabled: map[string]bool{"item-1": false},
+				},
+				enableEffect: tt.effect,
+				enableErr:    context.Canceled,
+			}
+			m := ready(t, fake)
+			openDetail(t, m, 0)
+			press(t, m, codeKey(tea.KeyDown))
+			if cmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))); cmd != nil {
+				t.Fatal("a cancelled enable started another operation")
+			}
+
+			if m.screen != recoveryScreen {
+				t.Fatalf("screen after cancellation = %v, want recoveryScreen", m.screen)
+			}
+			body := content(m)
+			for _, want := range []string{"context canceled", "Retry", "Main"} {
+				if !strings.Contains(body, want) {
+					t.Errorf("recovery view = %q, want %q", body, want)
+				}
+			}
+			if fake.consentSaved != tt.wantSaved || fake.endpointCalls != tt.wantEndpoints {
+				t.Fatalf("saved = %v, endpoint calls = %d, want %v and %d",
+					fake.consentSaved, fake.endpointCalls, tt.wantSaved, tt.wantEndpoints)
+			}
+
+			press(t, m, codeKey(tea.KeyDown)) // Main
+			runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+			if got := m.liabilitiesEnabled["item-1"]; got != tt.wantSaved {
+				t.Fatalf("flag after recovery refresh = %v, want %v", got, tt.wantSaved)
+			}
+		})
 	}
 }
 
@@ -1267,9 +2322,9 @@ func TestUnlinkErrorIsShownEvenWhenCancelled(t *testing.T) {
 	}
 }
 
-// The first sync of a just-linked item runs from the history menu. Landing
-// back there hides the finished link and turns enter into a second billed
-// link at the same bank.
+// The first sync of a just-linked item runs from the add setup. Landing back
+// there hides the finished link and leaves a second billed link one action
+// away.
 func TestCancelledFirstSyncLandsOnTheAccountsScreen(t *testing.T) {
 	fake := &fakeService{
 		data:     app.AccountData{Accounts: []model.AccountView{account("acc-1", "", "Everyday Checking", "1234", "Chase", 10)}},
@@ -1278,14 +2333,13 @@ func TestCancelledFirstSyncLandsOnTheAccountsScreen(t *testing.T) {
 	}
 	m := ready(t, fake)
 
-	openHistory(t, m)
-	cmd := runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // Link
-	if cmd = runOperation(t, m, cmd); cmd != nil {                // the cancelled first sync
+	cmd := runOperation(t, m, startDefaultLink(t, m)) // Link
+	if cmd = runOperation(t, m, cmd); cmd != nil {    // the cancelled first sync
 		t.Fatal("a cancelled first sync started another command")
 	}
 
-	if m.screen == historyScreen {
-		t.Fatal("a cancelled first sync left the user on the history menu, where enter links again")
+	if m.screen == addSetupScreen {
+		t.Fatal("a cancelled first sync left the user on add setup, where Continue links again")
 	}
 	if m.screen != accountsScreen {
 		t.Fatalf("screen after a cancelled first sync = %v, want accountsScreen", m.screen)
@@ -1297,8 +2351,8 @@ func TestCancelledFirstSyncLandsOnTheAccountsScreen(t *testing.T) {
 	if strings.Contains(body, "Something went wrong") {
 		t.Errorf("view = %q, want cancellation not shown as a failure", body)
 	}
-	if len(fake.linkDays) != 1 {
-		t.Errorf("Link calls = %v, want only the one the user asked for", fake.linkDays)
+	if len(fake.linkCalls) != 1 {
+		t.Errorf("Link calls = %v, want only the one the user asked for", fake.linkCalls)
 	}
 }
 
@@ -1629,8 +2683,7 @@ func TestLinkSaveFailureRetriesTheSaveAndNotTheBank(t *testing.T) {
 		syncAccounts: []model.AccountView{account("acc-1", "", "Everyday", "1234", "TD Canada Trust", 10)},
 	}
 	m := ready(t, fake)
-	openHistory(t, m)
-	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // the link, which fails at the save
+	runOperation(t, m, startDefaultLink(t, m)) // the link, which fails at the save
 
 	if m.screen != recoveryScreen {
 		t.Fatalf("screen after the failed save = %v, want recoveryScreen", m.screen)
@@ -1644,8 +2697,8 @@ func TestLinkSaveFailureRetriesTheSaveAndNotTheBank(t *testing.T) {
 
 	cmd := press(t, m, codeKey(tea.KeyEnter)) // Retry
 	next := runOperation(t, m, cmd)
-	if len(fake.linkDays) != 1 {
-		t.Fatalf("Link ran %d times, want the one link Plaid already billed", len(fake.linkDays))
+	if len(fake.linkCalls) != 1 {
+		t.Fatalf("Link ran %d times, want the one link Plaid already billed", len(fake.linkCalls))
 	}
 	if len(fake.completeCalls) != 1 {
 		t.Fatalf("CompleteLinkSave ran %d times, want once", len(fake.completeCalls))
@@ -1666,8 +2719,7 @@ func TestLinkSaveFailureRetriesTheSaveAndNotTheBank(t *testing.T) {
 func TestASecondSaveFailureStillRetriesTheSave(t *testing.T) {
 	fake := &fakeService{linkErr: tokenNotSaved(), completeErr: tokenNotSaved()}
 	m := ready(t, fake)
-	openHistory(t, m)
-	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // the failed link
+	runOperation(t, m, startDefaultLink(t, m)) // the failed link
 
 	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // Retry, which fails again
 	if m.screen != recoveryScreen {
@@ -1677,8 +2729,8 @@ func TestASecondSaveFailureStillRetriesTheSave(t *testing.T) {
 	if len(fake.completeCalls) != 2 {
 		t.Errorf("CompleteLinkSave ran %d times, want twice", len(fake.completeCalls))
 	}
-	if len(fake.linkDays) != 1 {
-		t.Errorf("Link ran %d times, want the one link Plaid already billed", len(fake.linkDays))
+	if len(fake.linkCalls) != 1 {
+		t.Errorf("Link ran %d times, want the one link Plaid already billed", len(fake.linkCalls))
 	}
 }
 
@@ -1692,16 +2744,15 @@ func TestASaveFailingWithAnOrdinaryErrorStillRetriesTheSave(t *testing.T) {
 		completeErr: errors.New("no unsaved link to complete"),
 	}
 	m := ready(t, fake)
-	openHistory(t, m)
-	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // the failed link
+	runOperation(t, m, startDefaultLink(t, m))             // the failed link
 	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // Retry, which fails plainly
 	if m.screen != recoveryScreen {
 		t.Fatalf("screen after the plain failure = %v, want recoveryScreen", m.screen)
 	}
 	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // Retry again
 
-	if len(fake.linkDays) != 1 {
-		t.Errorf("Link ran %d times, want the one link Plaid already billed", len(fake.linkDays))
+	if len(fake.linkCalls) != 1 {
+		t.Errorf("Link ran %d times, want the one link Plaid already billed", len(fake.linkCalls))
 	}
 	if len(fake.completeCalls) != 2 {
 		t.Errorf("CompleteLinkSave ran %d times, want twice", len(fake.completeCalls))
@@ -1713,12 +2764,11 @@ func TestASaveFailingWithAnOrdinaryErrorStillRetriesTheSave(t *testing.T) {
 func TestAnOrdinaryLinkFailureStillRetriesTheLink(t *testing.T) {
 	fake := &fakeService{linkErr: errors.New("plaid is unavailable")}
 	m := ready(t, fake)
-	openHistory(t, m)
-	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+	runOperation(t, m, startDefaultLink(t, m))
 
 	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter))) // Retry
-	if len(fake.linkDays) != 2 {
-		t.Errorf("Link ran %d times, want the retry to link again", len(fake.linkDays))
+	if len(fake.linkCalls) != 2 {
+		t.Errorf("Link ran %d times, want the retry to link again", len(fake.linkCalls))
 	}
 	if len(fake.completeCalls) != 0 {
 		t.Errorf("CompleteLinkSave ran %d times, want none", len(fake.completeCalls))
@@ -1726,29 +2776,39 @@ func TestAnOrdinaryLinkFailureStillRetriesTheLink(t *testing.T) {
 }
 
 // The wording must say that the bank part succeeded, so the user does not read
-// Retry as "try the bank again", and it must say what Main costs.
-func TestTokenNotSavedWording(t *testing.T) {
+// Retry as "try the bank again", and it must qualify possible charges.
+func TestTokenNotSavedWordingQualifiesPossibleCharges(t *testing.T) {
 	notes := tokenNotSavedNotes("TD Canada Trust", "item-new",
 		errors.New("write tokens.json: permission denied"))
 	joined := strings.Join(notes, "\n")
+	flatNotes := strings.Join(notes, " ")
 
 	for _, want := range []string{
-		"TD Canada Trust is linked at Plaid. Plaid bills this item each month.",
+		"TD Canada Trust is active at Plaid.",
+		"On paid Production plans, subscription products can incur monthly charges under your Plaid agreement.",
 		"Item id: item-new",
 		"Reason: write tokens.json: permission denied",
 		"Retry saves the token again. It does not open the bank a second time.",
-		"Main leaves this item billed with no saved token.",
-		"Without the token you cannot sync this item or remove it.",
+		"Main leaves the active Item without a saved token.",
+		"Without the token, fourseas cannot sync or remove the Item.",
+		"Contact Plaid Support to remove an Item whose token was lost.",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("the notes do not hold %q:\n%s", want, joined)
 		}
 	}
-	// Every line has to fit the narrowest screen the interface assumes.
-	for _, line := range append(notes, tokenNotSavedMessage) {
-		if width := lipgloss.Width(line) + lipgloss.Width(blankMark) + rightPad; width > defaultWidth {
-			t.Errorf("line %q is %d cells wide, want at most %d", line, width, defaultWidth)
+	for _, unwanted := range []string{
+		"Plaid bills every live card each month",
+		"Plaid bills this item each month",
+		"Plaid created this item and bills it each month",
+		"A second link creates another Item that can also incur charges.",
+	} {
+		if strings.Contains(joined, unwanted) {
+			t.Errorf("the notes contain %q:\n%s", unwanted, joined)
 		}
+	}
+	if !strings.Contains(flatNotes, "A second link creates a second Item. On a paid Production plan, its subscription products can also incur charges under your Plaid agreement.") {
+		t.Errorf("the second-Item warning is not qualified:\n%s", joined)
 	}
 }
 
@@ -1761,16 +2821,18 @@ func TestTokenNotSavedScreenKeepsTheMeaningAtEveryWidth(t *testing.T) {
 		fake := &fakeService{linkErr: tokenNotSaved()}
 		m := ready(t, fake)
 		m.width = width
-		openHistory(t, m)
-		runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+		m.height = 60
+		runOperation(t, m, startDefaultLink(t, m))
 
 		body := content(m)
 		flat := strings.Join(strings.Fields(body), " ")
 		for _, want := range []string{
 			tokenNotSavedMessage,
 			"Retry saves the token again. It does not open the bank a second time.",
-			"Main leaves this item billed with no saved token.",
-			"Without the token you cannot sync this item or remove it.",
+			"Main leaves the active Item without a saved token.",
+			"Without the token, fourseas cannot sync or remove the Item.",
+			"Contact Plaid Support to remove an Item whose token was lost.",
+			"A second link creates a second Item. On a paid Production plan, its subscription products can also incur charges under your Plaid agreement.",
 		} {
 			if !strings.Contains(flat, want) {
 				t.Errorf("at width %d the recovery screen does not say %q:\n%s", width, want, body)
@@ -1780,6 +2842,59 @@ func TestTokenNotSavedScreenKeepsTheMeaningAtEveryWidth(t *testing.T) {
 			if lipgloss.Width(line) > width {
 				t.Errorf("at width %d the line %q is %d cells wide", width, line, lipgloss.Width(line))
 			}
+		}
+	}
+}
+
+func TestTokenNotSavedRecoveryFitsA40By24Terminal(t *testing.T) {
+	m := ready(t, &fakeService{})
+	m.width, m.height = 40, 24
+	m.screen = recoveryScreen
+	m.recovery = recoveryState{
+		message:        tokenNotSavedMessage,
+		compactMessage: tokenNotSavedCompactMessage,
+		notes: tokenNotSavedNotes("TD Canada Trust", "item-new",
+			errors.New("write tokens.json: permission denied")),
+		compactNotes: tokenNotSavedCompactNotes("item-new"),
+		retry:        func() tea.Cmd { return nil },
+	}
+
+	plain := ansi.Strip(m.View().Content)
+	lines := strings.Split(plain, "\n")
+	if len(lines) > m.height {
+		t.Errorf("rendered lines = %d, want at most %d:\n%s", len(lines), m.height, plain)
+	}
+	visible := strings.Join(lines[:min(len(lines), m.height)], "\n")
+	visibleFlat := strings.Join(strings.Fields(visible), " ")
+	for _, want := range []string{
+		"Item linked; token not saved.",
+		"Item id: item-new",
+		"No token: fourseas cannot sync/remove.",
+		"Retry saves token; it does not relink.",
+		"Main leaves the Item active.",
+		"Cannot recover token? Contact Plaid Support.",
+		"On paid Production plans, subscription products can incur charges under your Plaid agreement; a second link creates another Item whose products can incur them too.",
+		"enter select",
+	} {
+		if !strings.Contains(visibleFlat, want) {
+			t.Errorf("first %d lines do not hold %q:\n%s", m.height, want, visible)
+		}
+	}
+	for _, choice := range []string{"› Retry", "Main"} {
+		found := false
+		for _, line := range lines[:min(len(lines), m.height)] {
+			if strings.TrimSpace(line) == choice {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("first %d lines do not show the %q action:\n%s", m.height, choice, visible)
+		}
+	}
+	for _, line := range lines {
+		if width := lipgloss.Width(line); width > m.width {
+			t.Errorf("line %q is %d cells wide, want at most %d", line, width, m.width)
 		}
 	}
 }

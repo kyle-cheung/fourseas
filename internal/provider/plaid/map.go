@@ -69,6 +69,19 @@ func optionalDate(s string) (*time.Time, error) {
 	return &d, nil
 }
 
+// nullableLiabilityDate parses a liability date when Plaid supplied a valid
+// value. An invalid optional date stays absent and does not stop a sync.
+func nullableLiabilityDate(value *string, ok bool) *time.Time {
+	if !ok || value == nil || strings.TrimSpace(*value) == "" {
+		return nil
+	}
+	date, err := time.Parse(dateLayout, *value)
+	if err != nil {
+		return nil
+	}
+	return &date
+}
+
 // category prefers Plaid's personal finance category and falls back to the
 // legacy category array.
 func category(t plaidsdk.Transaction) string {
@@ -136,6 +149,31 @@ func optionalAmount(value *float64, ok bool) decimal.NullDecimal {
 		return decimal.NullDecimal{}
 	}
 	return decimal.NullDecimal{Decimal: decimal.NewFromFloat(*value), Valid: true}
+}
+
+// toCreditLiabilities converts the current credit liability snapshot. Plaid
+// can return a null account ID. Such a row cannot identify a stored account.
+func toCreditLiabilities(rows []plaidsdk.CreditCardLiability, itemID string, fetchedAt time.Time) []model.CreditLiability {
+	out := make([]model.CreditLiability, 0, len(rows))
+	for i := range rows {
+		row := &rows[i]
+		accountID := row.GetAccountId()
+		if strings.TrimSpace(accountID) == "" {
+			continue
+		}
+
+		out = append(out, model.CreditLiability{
+			Provider:             ProviderName,
+			ItemID:               itemID,
+			AccountID:            accountID,
+			PaymentDueDate:       nullableLiabilityDate(row.GetNextPaymentDueDateOk()),
+			LastPaymentDate:      nullableLiabilityDate(row.GetLastPaymentDateOk()),
+			LastPaymentAmount:    optionalAmount(row.GetLastPaymentAmountOk()),
+			LastStatementBalance: optionalAmount(row.GetLastStatementBalanceOk()),
+			FetchedAt:            fetchedAt,
+		})
+	}
+	return out
 }
 
 // toAccounts converts the account list one sync response carries.

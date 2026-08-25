@@ -25,6 +25,12 @@ var ErrItemGone = errors.New("the provider does not have this item")
 // ErrProductNotReady says Plaid is still preparing the first transaction sync.
 var ErrProductNotReady = errors.New("the transactions product is not ready")
 
+// ErrNoLiabilityAccounts says the item has no accounts that support liabilities.
+var ErrNoLiabilityAccounts = errors.New("the item has no liability accounts")
+
+// ErrAdditionalConsentRequired says the user must grant access to liabilities.
+var ErrAdditionalConsentRequired = errors.New("additional consent is required")
+
 // Batch is one page of incremental changes from a provider.
 type Batch struct {
 	Added      []model.Transaction

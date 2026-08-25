@@ -76,7 +76,7 @@ func runUnlinkWith(ctx context.Context, cfg settings, options []string,
 	if result.PlaidItemGone {
 		fmt.Fprintln(out, "Plaid does not have this item any more. Deleting the local data.")
 	} else {
-		fmt.Fprintf(out, "Removed the item at Plaid. It is no longer billed.\n")
+		fmt.Fprintln(out, "Removed the item at Plaid. Active subscriptions for this Item end.")
 	}
 
 	fmt.Fprintf(out, "Unlinked %s: %d transactions and %d accounts deleted from %s.\n",

@@ -5,16 +5,22 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"charm.land/lipgloss/v2/table"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/kyle-cheung/fourseas/providence/internal/app"
+	accountformat "github.com/kyle-cheung/fourseas/providence/internal/format"
 	"github.com/kyle-cheung/fourseas/providence/internal/model"
 )
 
 // mainChoices is the fixed order of the main screen.
 var mainChoices = []string{"Accounts", "Add account", "Sync"}
+
+const noAccountsMessage = "No accounts are linked yet."
 
 // Positions inside mainChoices.
 const (
@@ -23,13 +29,14 @@ const (
 	choiceSync
 )
 
-// detailActions is the fixed order of the account detail screen.
-var detailActions = []string{"Rename", "Unlink institution"}
+// addSetupChoices is the fixed order of the new-account setup screen.
+var addSetupChoices = []string{"Transaction history", "Enable Liabilities API?", "Continue"}
 
-// Positions inside detailActions.
+// Positions inside addSetupChoices.
 const (
-	detailRename = iota
-	detailUnlink
+	addHistory = iota
+	addLiabilities
+	addContinue
 )
 
 // unlinkActions is the fixed order of the removal confirmation. Cancel is
@@ -101,6 +108,8 @@ func (m *Model) body() string {
 		lines = m.accountLines()
 	case detailScreen:
 		lines = m.detailLines()
+	case addSetupScreen:
+		lines = m.addSetupLines()
 	case historyScreen:
 		lines = m.historyLines()
 	case customDaysScreen, nicknameScreen:
@@ -157,6 +166,12 @@ func (m *Model) runningLine() string {
 		return "Reading"
 	case unlinkOperation:
 		return "Removing"
+	case enableLiabilitiesOperation:
+		return "Enabling statement data"
+	case liabilitiesRefreshOperation:
+		return "Refreshing statement data"
+	case postEnableRefreshOperation:
+		return "Refreshing accounts"
 	}
 	return "Loading"
 }
@@ -164,18 +179,81 @@ func (m *Model) runningLine() string {
 // mainLines is the main menu, with the account count on the first choice and
 // the sync status on the third.
 func (m *Model) mainLines() []string {
-	status, tone := syncStatus(m.syncStates, m.clock())
+	now := m.clock()
+	status, tone := syncStatus(m.syncStates, now)
 	notes := map[int]string{
 		choiceAccounts: mutedStyle.Render(plural(len(m.accounts.rows), "account")),
 		choiceSync:     tone.Render(status),
 	}
 
-	lines := m.header("Main menu")
+	width := m.contentWidth()
+	lines := []string{
+		truncate(blankMark+brandStyle.Render(brandName)+" "+brandMarkStyle.Render(brandMark), width),
+		"",
+	}
+	lines = append(lines, m.accountSummaryLines(now)...)
+	lines = append(lines,
+		"",
+		truncate(blankMark+headingStyle.Render("Main menu"), width),
+		"",
+	)
 	for i, choice := range mainChoices {
 		lines = append(lines, m.menuRow(i == m.main.cursor, choice, notes[i]))
 	}
 	lines = append(lines, m.syncSummary()...)
 	return append(lines, m.footer("↑/↓ move · enter select · q quit")...)
+}
+
+// accountSummaryLines is one content-sized table row per stored account.
+func (m *Model) accountSummaryLines(now time.Time) []string {
+	if len(m.accounts.rows) == 0 {
+		return []string{truncate(blankMark+mutedStyle.Render(noAccountsMessage), m.contentWidth())}
+	}
+
+	t := table.New().
+		Headers("Account", "Cur. balance", "Stmt balance", "Due", "Last payment").
+		Wrap(false).
+		BorderTop(false).
+		BorderBottom(false).
+		BorderLeft(false).
+		BorderRight(false).
+		BorderHeader(false).
+		BorderColumn(false).
+		BorderRow(false).
+		StyleFunc(func(row, col int) lipgloss.Style {
+			style := itemStyle
+			if row == table.HeaderRow {
+				style = headingStyle
+			}
+			if col < 4 {
+				style = style.PaddingRight(2)
+			}
+			return style
+		})
+
+	for _, account := range m.accounts.rows {
+		statement, due, payment := "—", "—", "—"
+		if account.Liability != nil {
+			statement = accountformat.Money(account.Liability.LastStatementBalance, account.Currency)
+			due = accountformat.Date(account.Liability.PaymentDueDate, now)
+			payment = accountformat.LatestPayment(
+				account.Liability.LastPaymentDate,
+				account.Liability.LastPaymentAmount,
+				account.Currency,
+				now,
+			)
+		}
+		t.Row(accountName(account), accountformat.Money(account.BalanceCurrent, account.Currency), statement, due, payment)
+	}
+
+	lines := strings.Split(t.String(), "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	for i := range lines {
+		lines[i] = truncate(blankMark+lines[i], m.contentWidth())
+	}
+	return lines
 }
 
 // syncSummary is one line for every institution of the last sync, including
@@ -210,7 +288,7 @@ func syncResultParts(result app.SyncResult) (string, string, lipgloss.Style) {
 func (m *Model) accountLines() []string {
 	lines := m.header("Accounts")
 	if len(m.accounts.rows) == 0 {
-		lines = append(lines, truncate(blankMark+mutedStyle.Render("No accounts are linked yet."),
+		lines = append(lines, truncate(blankMark+mutedStyle.Render(noAccountsMessage),
 			m.contentWidth()))
 		return append(lines, m.footer("esc back · q quit")...)
 	}
@@ -231,7 +309,7 @@ func (m *Model) detailLines() []string {
 		{"Account", account.Name},
 		{"Mask", maskText(account)},
 		{"Type", strings.TrimSpace(account.Type + " " + account.Subtype)},
-		{"Balance", strings.TrimSpace(balanceText(account) + " " + account.Currency)},
+		{"Balance", accountformat.Money(account.BalanceCurrent, account.Currency)},
 		{"Account id", account.AccountID},
 	} {
 		if field[1] == "" {
@@ -240,10 +318,61 @@ func (m *Model) detailLines() []string {
 		lines = append(lines, m.fieldRow(field[0], field[1]))
 	}
 	lines = append(lines, "")
-	for i, choice := range detailActions {
-		lines = append(lines, m.menuRow(i == m.detail.cursor, choice, ""))
+	for i, action := range m.detailActions() {
+		lines = append(lines, m.menuRow(i == m.detail.cursor, detailActionLabel(action), ""))
+		if action == detailEnableLiabilities {
+			lines = append(lines, m.choiceNoteLines(
+				"This enables statement data for the whole institution.")...)
+		}
 	}
 	return append(lines, m.footer("↑/↓ move · enter select · esc back · q quit")...)
+}
+
+func detailActionLabel(action detailAction) string {
+	switch action {
+	case detailRename:
+		return "Rename"
+	case detailEnableLiabilities:
+		return "Enable statement data"
+	case detailUnlink:
+		return "Unlink institution"
+	}
+	return ""
+}
+
+// addSetupLines shows the settings that apply when the new item is created.
+func (m *Model) addSetupLines() []string {
+	liabilities := "No"
+	if m.add.liabilities {
+		liabilities = "Yes"
+	}
+	notes := map[int]string{
+		addHistory:     strconv.Itoa(m.add.days) + " days",
+		addLiabilities: liabilities,
+	}
+	lines := m.header("Add account")
+	for i, choice := range addSetupChoices {
+		lines = append(lines, m.menuRow(i == m.add.cursor, choice, notes[i]))
+		if i == addLiabilities {
+			lines = append(lines, m.choiceNoteLines(
+				"Fetch credit card statement, payment, and interest details.")...)
+		}
+	}
+	return append(lines, m.footer("↑/↓ move · enter select · esc back")...)
+}
+
+// choiceNoteLines keeps the explanation under a menu choice complete at every
+// terminal width. Repeating the indent makes wrapped lines part of the same
+// choice.
+func (m *Model) choiceNoteLines(note string) []string {
+	prefix := blankMark + "  "
+	width := max(m.contentWidth()-lipgloss.Width(prefix)-rightPad, 1)
+	wrapped := wrapText(note, width)
+	lines := make([]string, 0, len(wrapped))
+	for _, line := range wrapped {
+		lines = append(lines, truncate(prefix+mutedStyle.Render(line), m.contentWidth()))
+	}
+	return lines
 }
 
 // unlinkLines is everything one removal would delete, and the two ways out of
@@ -296,9 +425,11 @@ func (m *Model) historyLines() []string {
 // differently once the user knows that the bank is linked.
 const tokenNotSavedMessage = "The bank connected. Only the save of the access token failed."
 
+const tokenNotSavedCompactMessage = "Item linked; token not saved."
+
 // tokenNotSavedNotes explains what the user now owns and what each choice
-// does. The item is billed from now on, and the access token is the only way to
-// reach it, so both choices have a cost the user must read before choosing.
+// does. The item is active, and the access token is the only way to reach it,
+// so both choices have a cost the user must read before choosing.
 func tokenNotSavedNotes(institution, itemID string, cause error) []string {
 	name := institution
 	if name == "" {
@@ -307,26 +438,55 @@ func tokenNotSavedNotes(institution, itemID string, cause error) []string {
 	if name == "" {
 		name = "The new item"
 	}
-	notes := []string{name + " is linked at Plaid. Plaid bills this item each month."}
+	notes := []string{
+		name + " is active at Plaid.",
+		"On paid Production plans, subscription products can incur monthly charges under your Plaid agreement.",
+	}
 	if itemID != "" {
 		notes = append(notes, "Item id: "+itemID)
 	}
 	return append(notes,
 		"Reason: "+displayError(cause),
 		"Retry saves the token again. It does not open the bank a second time.",
-		"Main leaves this item billed with no saved token.",
-		"Without the token you cannot sync this item or remove it.",
+		"Main leaves the active Item without a saved token.",
+		"Without the token, fourseas cannot sync or remove the Item.",
+		"Contact Plaid Support to remove an Item whose token was lost.",
+		"A second link creates a second Item. On a paid Production plan, its subscription products can also incur charges under your Plaid agreement.",
+	)
+}
+
+// tokenNotSavedCompactNotes keeps every consequence and recovery action in a
+// short terminal. The detailed notes remain in use when they fit.
+func tokenNotSavedCompactNotes(itemID string) []string {
+	notes := make([]string, 0, 6)
+	if itemID != "" {
+		notes = append(notes, "Item id: "+itemID)
+	}
+	return append(notes,
+		"No token: fourseas cannot sync/remove.",
+		"Retry saves token; it does not relink.",
+		"Main leaves the Item active.",
+		"Cannot recover token? Contact Plaid Support.",
+		"On paid Production plans, subscription products can incur charges under your Plaid agreement; a second link creates another Item whose products can incur them too.",
 	)
 }
 
 // recoveryLines shows what failed and what the user can do about it.
 func (m *Model) recoveryLines() []string {
+	lines := m.recoveryLinesFor(m.recovery.message, m.recovery.notes)
+	if m.height > 0 && len(lines) > m.height && m.recovery.compactMessage != "" {
+		return m.recoveryLinesFor(m.recovery.compactMessage, m.recovery.compactNotes)
+	}
+	return lines
+}
+
+func (m *Model) recoveryLinesFor(message string, notes []string) []string {
 	lines := m.header("Something went wrong")
 	// The message is wrapped for the same reason the notes are, and the lines
 	// under the first one keep the width of the mark, so the sentence reads as
 	// one block.
 	mark := failedMark + " "
-	for i, line := range wrapText(m.recovery.message, max(m.noteWidth()-lipgloss.Width(mark), 1)) {
+	for i, line := range wrapText(message, max(m.noteWidth()-lipgloss.Width(mark), 1)) {
 		if i > 0 {
 			mark = strings.Repeat(" ", lipgloss.Width(failedMark)+1)
 		}
@@ -336,7 +496,7 @@ func (m *Model) recoveryLines() []string {
 	// choice, and truncate is a hard cut: it would turn "It does not open the
 	// bank" into "It does n", which says the opposite of what the user must
 	// read here.
-	for _, note := range m.recovery.notes {
+	for _, note := range notes {
 		for _, line := range wrapText(note, m.noteWidth()) {
 			lines = append(lines, truncate(blankMark+mutedStyle.Render(line), m.contentWidth()))
 		}
@@ -422,16 +582,39 @@ func (m *Model) fieldRow(name, value string) string {
 	return columns(blankMark+mutedStyle.Render(name), value, m.contentWidth())
 }
 
-// accountName is the nickname, then the provider's name, then the raw account
-// id when neither is known yet.
+// accountName is a safe nickname, provider name, or account id. A candidate
+// that has no text after sanitizing does not block the next fallback.
 func accountName(view model.AccountView) string {
-	if view.Nickname != "" {
-		return view.Nickname
+	for _, candidate := range []string{view.Nickname, view.Name, view.AccountID} {
+		if name := displayText(candidate); name != "" {
+			return name
+		}
 	}
-	if view.Name != "" {
-		return view.Name
+	return ""
+}
+
+// displayText makes stored provider text safe for one terminal line. It
+// removes terminal commands and controls, then reduces whitespace to one
+// printable space.
+func displayText(value string) string {
+	value = ansi.Strip(value)
+	var clean strings.Builder
+	space := false
+	for _, r := range value {
+		switch {
+		case unicode.IsSpace(r):
+			space = clean.Len() > 0
+		case r < ' ' || r >= '\x7f' && r <= '\u009f':
+			continue
+		default:
+			if space {
+				clean.WriteByte(' ')
+				space = false
+			}
+			clean.WriteRune(r)
+		}
 	}
-	return view.AccountID
+	return clean.String()
 }
 
 // accountRow is one line of the account list, written in the two columns of
@@ -441,7 +624,8 @@ func accountName(view model.AccountView) string {
 func accountRow(view model.AccountView, isNew bool, label lipgloss.Style, width int) string {
 	name := label.Render(accountName(view))
 	extras := []string{}
-	for _, extra := range []string{maskText(view), view.InstitutionName, view.Currency, balanceText(view)} {
+	for _, extra := range []string{maskText(view), view.InstitutionName,
+		accountformat.Money(view.BalanceCurrent, view.Currency)} {
 		if extra != "" {
 			extras = append(extras, mutedStyle.Render(extra))
 		}
@@ -479,14 +663,6 @@ func maskText(view model.AccountView) string {
 		return ""
 	}
 	return "••" + view.Mask
-}
-
-// balanceText is the current balance, or empty when no sync has returned one.
-func balanceText(view model.AccountView) string {
-	if !view.BalanceCurrent.Valid {
-		return ""
-	}
-	return view.BalanceCurrent.Decimal.StringFixed(2)
 }
 
 // syncStatus is the marked state of the last sync of every linked

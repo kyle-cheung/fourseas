@@ -22,9 +22,12 @@ text.
 
 ## The internal/app contract
 
-`*app.App` has eight operations: `Accounts`, `Link`, `CompleteLinkSave`,
-`SyncItem`, `SyncAll`, `SetNickname`, `UnlinkPreview`, and `Unlink`. The
-`service` interface in `internal/tui/model.go` lists the same eight.
+`*app.App` has nine presenter operations: `Accounts`, `Link`,
+`EnableLiabilities`, `RefreshLiabilities`, `SyncItem`, `SyncAll`, `SetNickname`,
+`UnlinkPreview`, and `Unlink`. `CompleteLinkSave` is the recovery helper for a
+failed Link save. The TUI `service` interface has these ten calls. The model has
+nine screens. Its internal operation states also distinguish Link-save recovery,
+snapshot-only recovery, and the account reload after Liabilities succeeds.
 
 Rules that the code depends on:
 
@@ -40,26 +43,45 @@ Rules that the code depends on:
 - Cancellation crosses the boundary as the returned error. The caller passes a
   context and reads `context.Canceled` from the error.
 - A failed token save is the one failure a presenter must classify.
-  `App.Link` saves the access token before it returns, because Plaid bills the
-  item it has created and the token is the only handle to it. When that save
-  fails, `Link` returns a `*app.TokenNotSavedError`, which a caller reads with
-  `errors.As`. Its `Pending` field is an opaque `app.PendingSave`: every field
-  is unexported, so the token stays inside `internal/app`. A presenter reads
+  `App.Link` saves the access token before it returns. The Item can count
+  against a plan limit or carry a paid subscription, and the token is the only
+  local handle to it. When that save fails, `Link` returns a
+  `*app.TokenNotSavedError`, which a caller reads with `errors.As`. Its
+  `Pending` field is an opaque `app.PendingSave`: every field is unexported, so
+  the token stays inside `internal/app`. A presenter reads
   `Pending.Institution()` and `Pending.ItemID()` only, and `PendingSave.String`
   redacts the token so a stray `%v` cannot print it.
 - `App.CompleteLinkSave(pending)` is the retry of that save. It calls no
-  provider and returns the same `LinkedItem` a successful `Link` returns. It
-  reads the token file again first and falls back to the snapshot of the
-  failure only when that read fails, so a file the user repaired in another
-  terminal is not overwritten. A save that fails again returns another
-  `*app.TokenNotSavedError`, so the retry is never a one-shot.
-- **Never run `Link` again after a `*app.TokenNotSavedError`.** Plaid has an
-  item and bills it. A second link creates a second billed item and leaves the
-  first one unreachable. `internal/tui` retries with `startLinkSave`, and
-  `cmd/fourseas` retries in `linkOnce`.
+  provider and returns the same `LinkedItem` as a successful `Link`. It reloads
+  the token file under the write lock and adds the pending Item to that fresh
+  state. If the load fails, the locked mutation fails without writing stale
+  state. It returns another recoverable `*app.TokenNotSavedError`.
+- **Never run `Link` again after a `*app.TokenNotSavedError`.** A second link
+  creates another Item and leaves the first one without a saved local handle.
+  `internal/tui` retries with `startLinkSave`, and `cmd/fourseas` retries in
+  `linkOnce`.
 - The local half of `Unlink` runs on `context.WithoutCancel` with the bound
   `localCleanupTimeout`, after Plaid agrees to the removal. The user cannot stop
-  the local deletes, because Plaid no longer bills the item.
+  the local deletes, because Plaid has already removed the Item.
+- `App.EnableLiabilities(accountID)` resolves a credit account to its Item. It
+  opens Plaid Link in update mode for that whole institution. Update mode keeps
+  the access token and common Link and OAuth redirect fields. It omits products
+  and transaction history, and it does not exchange a token.
+- The update completion endpoint accepts a local JSON `POST` only. It validates
+  the Host and Origin headers and a per-session nonce. After success, the app
+  reloads and changes the current token file under the write lock. This keeps
+  concurrent Items and rejects a changed target token or environment.
+- On Unix, token reads use a no-follow file descriptor and reject non-regular
+  files. An existing regular token file is changed to mode 0600 before bytes
+  are read from that descriptor. New writes use a mode-0600 temporary file,
+  atomic replacement, and a cross-process lock. The Windows implementation
+  uses protected DACLs and write-through replacement. Its runtime path was not
+  tested on Windows for this release.
+- `SyncItem` calls Liabilities once, after transaction pagination, only when the
+  Item setting is enabled. `ErrProductNotReady` preserves the old snapshot and
+  returns success. Missing consent preserves the snapshot and records an
+  actionable state. Other errors preserve the snapshot and return the account
+  views for data that already committed.
 
 ## The TUI model
 
@@ -105,8 +127,9 @@ Bubble Tea methods use pointer receivers, so `Update` returns the same model.
   `tokenNotSavedNotes`, and a retry that runs `startLinkSave` instead of
   `startLink`. The wording says that the bank connected and that only the save
   failed, so `Retry` never reads as "try the bank again", and it says what
-  `Main` costs: an item that stays billed with no saved token. Every other link
-  failure keeps its own retry.
+  `Main` leaves behind: an active Item with no saved local handle. This can use
+  a plan limit or keep a paid subscription active. Every other link failure
+  keeps its own retry.
 - `m.recovery.notes` are the lines under the failure message. They are written
   in the muted style and **wrapped**, never cut: `recoveryLines` runs both the
   message and every note through `wrapText` at `m.noteWidth()`. The notes carry
@@ -118,7 +141,38 @@ Bubble Tea methods use pointer receivers, so `Update` returns the same model.
 - `start` writes `returnTo` with the screen the operation started from.
   `cancelled` and `recoverWith` return to that screen. The exception is a
   cancelled first sync of a new link: the model shows the account list, because
-  enter on the history screen would create a second billed item.
+  enter on the history screen would create a second Item.
+- `Add account` opens `addSetupScreen`. It starts with 730 history days and
+  Liabilities set to `Yes`. Enter on the history row opens `historyScreen`.
+  Enter on the Liabilities row toggles the value. Enter on `Continue` passes
+  both values to `startLink`.
+- A credit account detail shows `Enable statement data` when its Item is off or
+  the last sync recorded missing consent. The action calls
+  `EnableLiabilities` for the account.
+- `EnableLiabilities` saves `Liabilities=true` before it requests the first
+  snapshot. A later command error is a typed partial outcome. Its message states
+  what was saved and what failed. The presenter must not interpret the error as
+  an off setting.
+- A non-consent snapshot failure or cancellation opens recovery. Retry calls
+  `RefreshLiabilities`, which requests the snapshot without Link, consent, or a
+  transaction sync. A successful snapshot retry then reloads `Accounts`.
+- `ADDITIONAL_CONSENT_REQUIRED` is the exception. Recovery says that the
+  request and flag were saved but Plaid still requires consent. The stored
+  status is the app-owned consent marker. This status-only write does not move
+  the transaction cursor or sync time. A later non-consent result clears only
+  that marker; it preserves an unrelated status. The marker makes the Enable
+  action stay visible. Retry calls `EnableLiabilities` and requests consent
+  again.
+- A snapshot can be stored before the local consent-marker cleanup fails. This
+  partial outcome also retries through `RefreshLiabilities`. It does not repeat
+  consent.
+- A nil `EnableLiabilities` or `RefreshLiabilities` result starts
+  `postEnableRefreshOperation`. If that account reload fails or is canceled,
+  recovery says that statement data succeeded. Retry reloads `Accounts` only.
+  It does not open Link or call the Liabilities endpoint again.
+- `Main` from recovery refreshes account state. Do not hide cancellation after
+  an operation that can have changed external or stored state. The recovery
+  text must state which change completed and what Retry does.
 - `m.send` is `program.Send`, and `Run` sets it. It stays nil in a test, so
   `report` checks it before use.
 - `m.now` is the clock. A test replaces it.
@@ -143,6 +197,13 @@ follows.
 - `m.header(title)` writes the brand `fourseas ≋` and the name of the screen.
   `m.footer(keys)` writes `m.stateLines()`, then the faint rule and the key
   help. Both return lines, so a screen builder appends them.
+- The main screen puts the account summary above the `Main menu` heading. The
+  summary has `Account`, `Balance`, `Due`, and `Last payment` columns. Money
+  includes its currency. Missing values display an em dash (`—`).
+  The table has no border, does not wrap cells, and keeps one account on one
+  line. Lipgloss chooses the natural table width. Each rendered line then gets
+  the normal left gutter and is cut to the TUI content width. Do not force the
+  table to fill the terminal.
 - `m.stateLines()` is the one slot every screen keeps for what the interface is
   doing now, or for what it has just done: the running line, then a leftover
   progress line, then the outcome of the last flow. It sits above the rule,
@@ -187,7 +248,9 @@ follows.
    retries. `start` clears `recovery` and writes `returnTo`, so a retry that is
    set before the call is lost. Set a retry only when the operation can run
    again as it was.
-7. Add the operation to `destructive` if it changes stored or billed state.
+7. Add the operation to `destructive` if it changes external or stored state.
+   A destructive cancellation must open truthful recovery instead of returning
+   silently to the old screen.
 
 ## How to test
 
@@ -201,6 +264,10 @@ follows.
 - `fakeService` records `completeCalls` beside `linkDays`. A test of a failed
   save asserts both: the retry must call `CompleteLinkSave` once and must not
   call `Link` a second time.
+- Enable-flow tests must check each state boundary. Non-consent partial outcomes
+  retry `RefreshLiabilities`, then `Accounts`, without another
+  `EnableLiabilities` call. Consent-required outcomes retry
+  `EnableLiabilities`. A post-success account reload retries `Accounts` only.
 - To read a screen, call the `content` helper. It returns `m.View().Content`
   with the escape sequences removed, so an assertion compares printable text.
   The `hasRow` helper checks that one line holds a label and its value in the
@@ -219,5 +286,3 @@ follows.
   accounts overflow a short terminal.
 - The default SIGTERM handling of Bubble Tea sends `QuitMsg` and ends the
   process. The active operation is not cancelled.
-- `internal/tokens` writes the token file with `os.WriteFile`, without a
-  temporary file and a rename.

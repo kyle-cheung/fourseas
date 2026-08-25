@@ -25,8 +25,10 @@ import (
 // *app.App satisfies it.
 type service interface {
 	Accounts(context.Context, string) (app.AccountData, error)
-	Link(context.Context, int, app.Progress) (app.LinkedItem, error)
+	Link(context.Context, int, bool, app.Progress) (app.LinkedItem, error)
 	CompleteLinkSave(app.PendingSave) (app.LinkedItem, error)
+	EnableLiabilities(context.Context, string, app.Progress) error
+	RefreshLiabilities(context.Context, string) error
 	SyncItem(context.Context, string, app.Progress) ([]model.AccountView, error)
 	SyncAll(context.Context, app.Progress) ([]app.SyncResult, error)
 	SetNickname(context.Context, string, string) error
@@ -40,6 +42,7 @@ const (
 	mainScreen screen = iota
 	accountsScreen
 	detailScreen
+	addSetupScreen
 	historyScreen
 	customDaysScreen
 	nicknameScreen
@@ -48,6 +51,12 @@ const (
 )
 
 type menuState struct{ cursor int }
+
+type addState struct {
+	cursor      int
+	days        int
+	liabilities bool
+}
 
 type accountsState struct {
 	cursor   int
@@ -60,6 +69,14 @@ type detailState struct {
 	cursor  int
 }
 
+type detailAction uint8
+
+const (
+	detailRename detailAction = iota
+	detailEnableLiabilities
+	detailUnlink
+)
+
 type promptState struct {
 	input textinput.Model
 	err   error
@@ -71,12 +88,14 @@ type unlinkState struct {
 }
 
 type recoveryState struct {
-	message string
+	message        string
+	compactMessage string
 	// notes are the extra lines under the message. A failure the user has to
 	// understand before choosing needs more than one line.
-	notes  []string
-	cursor int
-	retry  func() tea.Cmd
+	notes        []string
+	compactNotes []string
+	cursor       int
+	retry        func() tea.Cmd
 }
 
 // Model is the one owner of every screen's state.
@@ -92,30 +111,35 @@ type Model struct {
 	status        string
 	// success is the confirmed outcome of the last finished flow. It stays on
 	// the screen until the next navigation or the next operation.
-	success       string
-	main          menuState
-	history       menuState
-	syncStates    []app.SyncState
-	syncResults   []app.SyncResult
-	accounts      accountsState
-	detail        detailState
-	prompt        promptState
-	unlink        unlinkState
-	recovery      recoveryState
-	linked        app.LinkedItem
-	nicknameQueue []model.AccountView
-	nicknameIndex int
-	send          func(tea.Msg)
-	now           func() time.Time
+	success    string
+	main       menuState
+	add        addState
+	history    menuState
+	syncStates []app.SyncState
+	// liabilitiesEnabled is copied from the application result. The model
+	// must not share a mutable map with an operation result.
+	liabilitiesEnabled map[string]bool
+	syncResults        []app.SyncResult
+	accounts           accountsState
+	detail             detailState
+	prompt             promptState
+	unlink             unlinkState
+	recovery           recoveryState
+	linked             app.LinkedItem
+	nicknameQueue      []model.AccountView
+	nicknameIndex      int
+	send               func(tea.Msg)
+	now                func() time.Time
 }
 
 // New builds the root model over one application façade.
 func New(client service) *Model {
 	return &Model{
-		app:      client,
-		accounts: accountsState{newItems: map[string]bool{}},
-		spinner:  spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(spinnerStyle)),
-		now:      time.Now,
+		app:                client,
+		accounts:           accountsState{newItems: map[string]bool{}},
+		liabilitiesEnabled: map[string]bool{},
+		spinner:            spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(spinnerStyle)),
+		now:                time.Now,
 	}
 }
 
@@ -142,6 +166,9 @@ const (
 	nicknameOperation
 	unlinkPreviewOperation
 	unlinkOperation
+	enableLiabilitiesOperation
+	liabilitiesRefreshOperation
+	postEnableRefreshOperation
 )
 
 // progressMsg is one step of a long operation, sent from the operation's own
@@ -200,13 +227,13 @@ func (m *Model) refreshAccounts() tea.Cmd {
 	})
 }
 
-// startLink opens the provider's link flow for one history length. A failure
-// can be run again with the same length.
-func (m *Model) startLink(days int) tea.Cmd {
+// startLink opens the provider's link flow with the selected settings. A
+// failure can be run again with the same settings.
+func (m *Model) startLink(days int, liabilities bool) tea.Cmd {
 	cmd := m.start(linkOperation, func(ctx context.Context) (any, error) {
-		return m.app.Link(ctx, days, m.report)
+		return m.app.Link(ctx, days, liabilities, m.report)
 	})
-	m.recovery.retry = func() tea.Cmd { return m.startLink(days) }
+	m.recovery.retry = func() tea.Cmd { return m.startLink(days, liabilities) }
 	return cmd
 }
 
@@ -268,6 +295,38 @@ func (m *Model) startUnlink(itemID string) tea.Cmd {
 		return m.app.Unlink(ctx, itemID, m.report)
 	})
 	m.recovery.retry = func() tea.Cmd { return m.startUnlink(itemID) }
+	return cmd
+}
+
+// startEnableLiabilities requests statement-data consent for the institution
+// that owns one account. A retry uses the same account id.
+func (m *Model) startEnableLiabilities(accountID string) tea.Cmd {
+	itemID := m.detail.account.ItemID
+	cmd := m.start(enableLiabilitiesOperation, func(ctx context.Context) (any, error) {
+		err := m.app.EnableLiabilities(ctx, accountID, m.report)
+		return itemID, err
+	})
+	m.recovery.retry = func() tea.Cmd { return m.startEnableLiabilities(accountID) }
+	return cmd
+}
+
+// startLiabilitiesRefresh retries only the first statement snapshot. A retry
+// never opens update consent or starts transaction sync.
+func (m *Model) startLiabilitiesRefresh(accountID string) tea.Cmd {
+	cmd := m.start(liabilitiesRefreshOperation, func(ctx context.Context) (any, error) {
+		return accountID, m.app.RefreshLiabilities(ctx, accountID)
+	})
+	m.recovery.retry = func() tea.Cmd { return m.startLiabilitiesRefresh(accountID) }
+	return cmd
+}
+
+// startPostEnableRefresh reads the account state after consent succeeded. Its
+// retry repeats only this read. It must never request consent a second time.
+func (m *Model) startPostEnableRefresh() tea.Cmd {
+	cmd := m.start(postEnableRefreshOperation, func(ctx context.Context) (any, error) {
+		return m.app.Accounts(ctx, "")
+	})
+	m.recovery.retry = m.startPostEnableRefresh
 	return cmd
 }
 
@@ -343,12 +402,12 @@ func (m *Model) finish(msg operationMsg) tea.Cmd {
 	}
 
 	switch msg.kind {
-	case accountsOperation:
+	case accountsOperation, postEnableRefreshOperation:
 		data, _ := msg.value.(app.AccountData)
-		m.accounts.rows = data.Accounts
-		m.accounts.cursor = clampCursor(m.accounts.cursor, len(data.Accounts))
-		m.syncStates = data.States
-		m.refreshDetail()
+		m.applyAccountData(data)
+		if msg.kind == postEnableRefreshOperation {
+			m.success = "Statement data is enabled for the whole institution."
+		}
 	case linkOperation, linkSaveOperation:
 		// A completed save ends where a successful link ends, because both
 		// leave the same saved item behind.
@@ -373,13 +432,25 @@ func (m *Model) finish(msg operationMsg) tea.Cmd {
 		m.screen = unlinkScreen
 	case unlinkOperation:
 		return m.finishUnlink()
+	case enableLiabilitiesOperation:
+		itemID, _ := msg.value.(string)
+		m.markLiabilitiesEnabled(itemID)
+		m.screen = detailScreen
+		return m.startPostEnableRefresh()
+	case liabilitiesRefreshOperation:
+		m.markLiabilitiesEnabled(m.detail.account.ItemID)
+		m.screen = detailScreen
+		return m.startPostEnableRefresh()
 	}
 	return nil
 }
 
 // destructive says whether the operation changes stored or billed state. Such
 // an operation cannot be treated as if nothing happened.
-func destructive(kind operation) bool { return kind == unlinkOperation }
+func destructive(kind operation) bool {
+	return kind == unlinkOperation || kind == enableLiabilitiesOperation ||
+		kind == liabilitiesRefreshOperation || kind == postEnableRefreshOperation
+}
 
 // cancelled leaves one cancelled operation behind.
 //
@@ -476,6 +547,20 @@ func (m *Model) finishUnlink() tea.Cmd {
 	return m.refreshAccounts()
 }
 
+// applyAccountData replaces every part of the account snapshot. The enabled
+// map is copied because operation results can hold mutable test or caller data.
+func (m *Model) applyAccountData(data app.AccountData) {
+	m.accounts.rows = data.Accounts
+	m.accounts.cursor = clampCursor(m.accounts.cursor, len(data.Accounts))
+	m.syncStates = data.States
+	m.liabilitiesEnabled = make(map[string]bool, len(data.LiabilitiesEnabled))
+	for itemID, enabled := range data.LiabilitiesEnabled {
+		m.liabilitiesEnabled[itemID] = enabled
+	}
+	m.refreshDetail()
+	m.detail.cursor = clampCursor(m.detail.cursor, len(m.detailActions()))
+}
+
 // refreshDetail points the detail screen at the row the last refresh returned,
 // so a saved change is shown instead of the copy the screen was opened with.
 func (m *Model) refreshDetail() {
@@ -487,6 +572,10 @@ func (m *Model) refreshDetail() {
 			m.detail.account = row
 			return
 		}
+	}
+	m.detail = detailState{}
+	if m.screen == detailScreen {
+		m.screen = accountsScreen
 	}
 }
 
@@ -501,6 +590,20 @@ func (m *Model) failed(msg operationMsg) tea.Cmd {
 	}
 	// The summary of an older sync does not describe this failure.
 	m.syncResults = nil
+	if msg.kind == postEnableRefreshOperation {
+		return m.showPostEnableRefreshFailure(msg.err)
+	}
+	if msg.kind == enableLiabilitiesOperation {
+		var enabledErr *app.LiabilitiesEnabledError
+		if errors.As(msg.err, &enabledErr) {
+			itemID, _ := msg.value.(string)
+			return m.showLiabilitiesEnabledFailure(itemID, m.detail.account.AccountID, enabledErr)
+		}
+	}
+	if msg.kind == liabilitiesRefreshOperation {
+		accountID, _ := msg.value.(string)
+		return m.showLiabilitiesRefreshFailure(accountID, msg.err)
+	}
 	var notSaved *app.TokenNotSavedError
 	if errors.As(msg.err, &notSaved) {
 		return m.showTokenNotSaved(notSaved)
@@ -508,15 +611,96 @@ func (m *Model) failed(msg operationMsg) tea.Cmd {
 	return m.showFailure(msg.err)
 }
 
+// showLiabilitiesEnabledFailure reports that consent was saved before the
+// first refresh failed. Retry requests only the statement snapshot.
+func (m *Model) showLiabilitiesEnabledFailure(
+	itemID string,
+	accountID string,
+	err *app.LiabilitiesEnabledError,
+) tea.Cmd {
+	if errors.Is(err, app.ErrAdditionalConsentRequired) {
+		return m.showLiabilitiesConsentRequired(itemID, accountID, err.Cause())
+	}
+	m.markLiabilitiesEnabled(itemID)
+	m.showFailure(err)
+	if err.StatusCleanupFailed() {
+		if err.SnapshotStored() {
+			m.recovery.message = "Statement data is enabled for the whole institution, and the first snapshot was stored, but its consent status could not be updated."
+		} else {
+			m.recovery.message = "Statement data is enabled for the whole institution, but the first snapshot is not ready, and its consent status could not be updated."
+		}
+	} else if errors.Is(err, context.Canceled) {
+		m.recovery.message = "Statement data is enabled for the whole institution, but the first refresh was canceled."
+	} else {
+		m.recovery.message = "Statement data is enabled for the whole institution, but the first refresh failed."
+	}
+	m.recovery.notes = []string{
+		"Reason: " + displayError(err.Cause()),
+		"Retry requests the statement snapshot. It does not request consent again.",
+	}
+	m.recovery.retry = func() tea.Cmd { return m.startLiabilitiesRefresh(accountID) }
+	return nil
+}
+
+func (m *Model) showLiabilitiesRefreshFailure(accountID string, err error) tea.Cmd {
+	itemID := m.detail.account.ItemID
+	if errors.Is(err, app.ErrAdditionalConsentRequired) {
+		return m.showLiabilitiesConsentRequired(itemID, accountID, err)
+	}
+	m.markLiabilitiesEnabled(itemID)
+	m.showFailure(err)
+	if errors.Is(err, context.Canceled) {
+		m.recovery.message = "Statement data is enabled for the whole institution, but the refresh was canceled."
+	} else {
+		m.recovery.message = "Statement data is enabled for the whole institution, but the refresh failed."
+	}
+	m.recovery.notes = []string{
+		"Reason: " + displayError(err),
+		"Retry requests the statement snapshot. It does not request consent again.",
+	}
+	m.recovery.retry = func() tea.Cmd { return m.startLiabilitiesRefresh(accountID) }
+	return nil
+}
+
+func (m *Model) showLiabilitiesConsentRequired(itemID, accountID string, cause error) tea.Cmd {
+	m.markLiabilitiesConsentRequired(itemID)
+	m.showFailure(cause)
+	m.recovery.message = "The statement data request was saved, but Plaid still requires consent."
+	m.recovery.notes = []string{
+		"Reason: " + displayError(cause),
+		"Retry requests consent again.",
+	}
+	m.recovery.retry = func() tea.Cmd { return m.startEnableLiabilities(accountID) }
+	return nil
+}
+
+// showPostEnableRefreshFailure says what succeeded before the read failed.
+// Retry reads accounts only, so it cannot open consent or bill an endpoint a
+// second time.
+func (m *Model) showPostEnableRefreshFailure(err error) tea.Cmd {
+	m.showFailure(err)
+	if errors.Is(err, context.Canceled) {
+		m.recovery.message = "Statement data was enabled, but the account refresh was canceled."
+	} else {
+		m.recovery.message = "Statement data was enabled, but the account refresh failed."
+	}
+	m.recovery.notes = []string{
+		"Reason: " + displayError(err),
+		"Retry refreshes accounts. It does not request consent again.",
+	}
+	return nil
+}
+
 // showTokenNotSaved opens the recovery screen of a link whose item Plaid has
-// already created and already bills. The retry saves the token again, and the
-// notes say that the bank part is done, so the user does not read Retry as
-// "try the bank again".
+// already created. The retry saves the token again, and the notes say that the
+// bank part is done, so the user does not read Retry as "try the bank again".
 func (m *Model) showTokenNotSaved(err *app.TokenNotSavedError) tea.Cmd {
 	pending := err.Pending
 	m.showFailure(err)
 	m.recovery.message = tokenNotSavedMessage
 	m.recovery.notes = tokenNotSavedNotes(pending.Institution(), pending.ItemID(), err.Err)
+	m.recovery.compactMessage = tokenNotSavedCompactMessage
+	m.recovery.compactNotes = tokenNotSavedCompactNotes(pending.ItemID())
 	m.recovery.retry = func() tea.Cmd { return m.startLinkSave(pending) }
 	return nil
 }
@@ -525,6 +709,8 @@ func (m *Model) showTokenNotSaved(err *app.TokenNotSavedError) tea.Cmd {
 // failed operation left.
 func (m *Model) showFailure(err error) tea.Cmd {
 	m.recovery.message = displayError(err)
+	m.recovery.compactMessage = ""
+	m.recovery.compactNotes = nil
 	m.recovery.cursor = 0
 	m.screen = recoveryScreen
 	return nil
@@ -598,8 +784,9 @@ func (m *Model) submitCustomDays() tea.Cmd {
 	}
 	m.prompt.input.Blur()
 	m.prompt = promptState{}
-	m.screen = historyScreen
-	return m.startLink(days)
+	m.add.days = days
+	m.screen = addSetupScreen
+	return nil
 }
 
 // naming says whether the add flow is still offering a name for a queued
@@ -691,7 +878,9 @@ func (m *Model) moveCursor(delta int) {
 	case accountsScreen:
 		m.accounts.cursor = clampCursor(m.accounts.cursor+delta, len(m.accounts.rows))
 	case detailScreen:
-		m.detail.cursor = clampCursor(m.detail.cursor+delta, len(detailActions))
+		m.detail.cursor = clampCursor(m.detail.cursor+delta, len(m.detailActions()))
+	case addSetupScreen:
+		m.add.cursor = clampCursor(m.add.cursor+delta, len(addSetupChoices))
 	case unlinkScreen:
 		m.unlink.cursor = clampCursor(m.unlink.cursor+delta, len(unlinkActions))
 	case historyScreen:
@@ -710,10 +899,11 @@ func (m *Model) activate() tea.Cmd {
 			m.accounts.cursor = clampCursor(m.accounts.cursor, len(m.accounts.rows))
 			m.screen = accountsScreen
 		case choiceAdd:
-			// The longest history is the default, because Plaid fixes the
-			// amount when the item is created.
+			// Plaid fixes history when it creates the item. Statement data is
+			// the approved default for a new link.
+			m.add = addState{days: app.MaxLinkDays, liabilities: true}
 			m.history = menuState{}
-			m.screen = historyScreen
+			m.screen = addSetupScreen
 		case choiceSync:
 			return m.startSyncAll()
 		}
@@ -724,6 +914,15 @@ func (m *Model) activate() tea.Cmd {
 		}
 	case detailScreen:
 		return m.activateDetail()
+	case addSetupScreen:
+		switch m.add.cursor {
+		case addHistory:
+			m.screen = historyScreen
+		case addLiabilities:
+			m.add.liabilities = !m.add.liabilities
+		case addContinue:
+			return m.startLink(m.add.days, m.add.liabilities)
+		}
 	case unlinkScreen:
 		if m.unlink.cursor == unlinkConfirm {
 			return m.startUnlink(m.unlink.preview.ItemID)
@@ -734,7 +933,8 @@ func (m *Model) activate() tea.Cmd {
 		if m.history.cursor >= len(historyDays) {
 			return m.openPrompt(customDaysScreen, "days", "")
 		}
-		return m.startLink(historyDays[m.history.cursor])
+		m.add.days = historyDays[m.history.cursor]
+		m.screen = addSetupScreen
 	case recoveryScreen:
 		return m.recoverWith(m.recovery.choices()[m.recovery.cursor])
 	}
@@ -746,10 +946,73 @@ func (m *Model) activate() tea.Cmd {
 // that name.
 func (m *Model) activateDetail() tea.Cmd {
 	account := m.detail.account
-	if m.detail.cursor == detailUnlink {
+	actions := m.detailActions()
+	m.detail.cursor = clampCursor(m.detail.cursor, len(actions))
+	switch actions[m.detail.cursor] {
+	case detailEnableLiabilities:
+		return m.startEnableLiabilities(account.AccountID)
+	case detailUnlink:
 		return m.startUnlinkPreview(account.ItemID)
+	default:
+		return m.openPrompt(nicknameScreen, accountName(account), account.Nickname)
 	}
-	return m.openPrompt(nicknameScreen, accountName(account), account.Nickname)
+}
+
+// detailActions returns the actions that apply to the open account. Statement
+// data is an institution setting, but only a credit account can start it.
+func (m *Model) detailActions() []detailAction {
+	actions := []detailAction{detailRename}
+	account := m.detail.account
+	if account.Type == "credit" &&
+		(!m.liabilitiesEnabled[account.ItemID] || m.liabilitiesConsentRequired(account.ItemID)) {
+		actions = append(actions, detailEnableLiabilities)
+	}
+	return append(actions, detailUnlink)
+}
+
+func (m *Model) liabilitiesConsentRequired(itemID string) bool {
+	for _, state := range m.syncStates {
+		if state.ItemID == itemID && state.LiabilitiesConsentRequired {
+			return true
+		}
+	}
+	return false
+}
+
+// markLiabilitiesEnabled applies the saved institution state before an
+// account refresh confirms it. A successful update makes an older consent
+// warning stale.
+func (m *Model) markLiabilitiesEnabled(itemID string) {
+	if itemID == "" {
+		return
+	}
+	m.liabilitiesEnabled[itemID] = true
+	for i := range m.syncStates {
+		if m.syncStates[i].ItemID == itemID {
+			m.syncStates[i].LiabilitiesConsentRequired = false
+		}
+	}
+	m.detail.cursor = clampCursor(m.detail.cursor, len(m.detailActions()))
+}
+
+func (m *Model) markLiabilitiesConsentRequired(itemID string) {
+	if itemID == "" {
+		return
+	}
+	m.liabilitiesEnabled[itemID] = true
+	for i := range m.syncStates {
+		if m.syncStates[i].ItemID == itemID {
+			m.syncStates[i].LiabilitiesConsentRequired = true
+			m.detail.cursor = clampCursor(m.detail.cursor, len(m.detailActions()))
+			return
+		}
+	}
+	m.syncStates = append(m.syncStates, app.SyncState{
+		ItemID:                     itemID,
+		Institution:                m.detail.account.InstitutionName,
+		LiabilitiesConsentRequired: true,
+	})
+	m.detail.cursor = clampCursor(m.detail.cursor, len(m.detailActions()))
 }
 
 // recoverWith runs the way out of a failure the user chose. Main always leaves
@@ -802,6 +1065,8 @@ func parent(s screen) screen {
 	switch s {
 	case detailScreen, unlinkScreen:
 		return accountsScreen
+	case historyScreen:
+		return addSetupScreen
 	case customDaysScreen:
 		return historyScreen
 	case nicknameScreen:

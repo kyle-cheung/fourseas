@@ -55,6 +55,8 @@ type AccountView struct {
 	Account
 	// InstitutionName is empty when the institution row is not stored yet.
 	InstitutionName string
+	// Liability is nil when no credit liability snapshot is stored.
+	Liability *CreditLiability
 }
 
 // SyncState is where the next incremental sync of one institution starts.

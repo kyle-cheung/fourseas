@@ -108,7 +108,9 @@ func (a *App) Unlink(ctx context.Context, itemID string, report Progress) (Unlin
 	if err != nil {
 		return UnlinkResult{}, fmt.Errorf("the item is gone at Plaid but the local data is not: %w", err)
 	}
-	if err := tokens.Save(a.cfg.TokensPath, saved.Delete(item.ItemID)); err != nil {
+	if _, err := tokens.Mutate(a.cfg.TokensPath, func(current tokens.File) (tokens.File, error) {
+		return current.Delete(item.ItemID), nil
+	}); err != nil {
 		return UnlinkResult{}, err
 	}
 	return UnlinkResult{Rows: rowCounts(removed), PlaidItemGone: errors.Is(removeErr, provider.ErrItemGone)}, nil

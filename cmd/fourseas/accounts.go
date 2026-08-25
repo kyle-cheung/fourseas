@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/kyle-cheung/fourseas/providence/internal/app"
 	"github.com/kyle-cheung/fourseas/providence/internal/model"
 	"github.com/kyle-cheung/fourseas/providence/internal/store"
 )
@@ -12,6 +13,8 @@ import (
 // nicknameUsage says how the one subcommand of `fourseas accounts` is called.
 const nicknameUsage = "usage: fourseas accounts nickname <account-id> \"<name>\", " +
 	"with an empty name to clear it"
+
+const liabilitiesEnableUsage = "usage: fourseas accounts liabilities enable <account-id>"
 
 // runAccounts prints every stored account with its balance. It reads the
 // database only: balances arrive with a sync.
@@ -21,8 +24,11 @@ func runAccounts(ctx context.Context, cfg settings, args []string) error {
 	if len(args) > 0 && args[0] == "nickname" {
 		return runNickname(ctx, cfg, args[1:])
 	}
+	if len(args) > 0 && args[0] == "liabilities" {
+		return runAccountLiabilities(ctx, cfg, args[1:])
+	}
 	if len(args) > 0 {
-		return fmt.Errorf("unknown option %q: `fourseas accounts` takes nothing, or `nickname`", args[0])
+		return fmt.Errorf("unknown option %q: `fourseas accounts` takes nothing, `nickname`, or `liabilities`", args[0])
 	}
 
 	db, err := store.Open(cfg.dbPath)
@@ -43,6 +49,38 @@ func runAccounts(ctx context.Context, cfg settings, args []string) error {
 	fmt.Printf("\n%d accounts:\n\n", len(accounts))
 	printAccounts(accounts)
 	return nil
+}
+
+type enableLiabilitiesCommand func(context.Context, string, app.Progress) error
+
+func runAccountLiabilities(ctx context.Context, cfg settings, args []string) error {
+	return runAccountLiabilitiesWith(ctx, args, func(ctx context.Context, accountID string, report app.Progress) error {
+		return app.New(cfg.appConfig()).EnableLiabilities(ctx, accountID, report)
+	})
+}
+
+func runAccountLiabilitiesWith(ctx context.Context, args []string, enable enableLiabilitiesCommand) error {
+	accountID, err := liabilitiesEnableArgs(args)
+	if err != nil {
+		return err
+	}
+	if err := enable(ctx, accountID, signInLine); err != nil {
+		return err
+	}
+	fmt.Println("Statement data is enabled for the whole institution. The first snapshot was requested.")
+	return nil
+}
+
+func liabilitiesEnableArgs(args []string) (string, error) {
+	if len(args) != 2 || args[0] != "enable" {
+		return "", fmt.Errorf("`fourseas accounts liabilities` accepts only `enable` and one account id: %s",
+			liabilitiesEnableUsage)
+	}
+	accountID := strings.TrimSpace(args[1])
+	if accountID == "" {
+		return "", fmt.Errorf("the account id is empty: %s", liabilitiesEnableUsage)
+	}
+	return accountID, nil
 }
 
 // runNickname stores the name the user calls one account by. The nickname is
@@ -90,23 +128,6 @@ func nicknameArgs(args []string) (accountID, nickname string, err error) {
 		return "", "", fmt.Errorf("the account id is empty: %s", nicknameUsage)
 	}
 	return accountID, nickname, nil
-}
-
-// accountBalance is one balance cell, or a dash when the provider sent none.
-func accountBalance(d model.Account) string {
-	if !d.BalanceCurrent.Valid {
-		return "-"
-	}
-	return d.BalanceCurrent.Decimal.StringFixed(2)
-}
-
-// accountLimit is the credit limit cell, or a dash for an account that has no
-// limit, such as a checking account.
-func accountLimit(d model.Account) string {
-	if !d.BalanceLimit.Valid {
-		return "-"
-	}
-	return d.BalanceLimit.Decimal.StringFixed(2)
 }
 
 // accountUpdated is when the balance was last read, or a dash before the first

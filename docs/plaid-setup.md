@@ -8,8 +8,8 @@ Every step here was found by hitting the failure it prevents.
 
 ## 1. Account and keys
 
-Make an account at <https://dashboard.plaid.com>. The entry tier is free and
-gives live production data at a small scale. You do not talk to sales for it.
+Make an account at <https://dashboard.plaid.com>. Sandbox is free. Plaid's Trial
+plan gives free Production access within its plan limits.
 
 Get the client id and the secrets from **Developers > Keys**. The sandbox secret
 and the production secret are different values. Using the sandbox secret against
@@ -77,6 +77,36 @@ after moving to production, they are left over from a sandbox run.
 3. Link each card again. A sandbox access token does not work in production, and
    the CLI skips tokens that were linked in a different environment.
 
+## 6. Liabilities consent and billing
+
+New links request Plaid Liabilities consent by default. Use
+`fourseas link --liabilities=false` to opt out before Plaid creates the Item.
+Liabilities is a separate Plaid product.
+
+To request consent for an existing credit account, run:
+
+```sh
+fourseas accounts liabilities enable <account-id>
+```
+
+The account selects an Item. Plaid Link update mode applies consent to the whole
+institution, not to one account. It keeps the Item and its access token. See
+[the TUI maintainer guide](tui.md#the-internalapp-contract) for callback,
+recovery, and token-storage details.
+
+[Plaid's billing guide](https://plaid.com/docs/account/billing/) states that
+Sandbox is free and the Trial plan includes free Production use within its
+limits. On paid Production plans, Transactions and Liabilities use subscription
+pricing. Your agreement with Plaid controls the actual charges. After a
+subscription product is added, Plaid can charge while the Item has a valid
+access token even if fourseas makes no more API calls or calls fail.
+`/item/remove` ends the subscription.
+
+Fourseas cannot disable Liabilities on an active Item. To stop the subscription,
+unlink the Item and link it again with `--liabilities=false`. Issue
+[#24](https://github.com/kyle-cheung/fourseas/issues/24) tracks a replace-Item
+workflow.
+
 ## Limits worth knowing
 
 **History is chosen once, at link time.** `fourseas link` sends
@@ -89,15 +119,11 @@ cannot be raised for the life of the item: `days_requested` in a later
 already linked, run `fourseas unlink <item-id>` and link the card again. Use
 `fourseas link --days <n>` (30 to 730) to ask for less.
 
-**Plaid bills every live item, each month.** The Transactions product is charged
-for each item you hold, whether or not you sync it. Deleting the local access
-token does not stop that charge: the item stays alive at Plaid, and the token
-that could have removed it is gone.
-
-`fourseas unlink <item-id>` calls `/item/remove` first, and only then deletes the
-local rows and the token. That is what stops the cost. `fourseas unlink --list`
-shows the item ids. An item Plaid already dropped answers `ITEM_NOT_FOUND`, which
-unlink treats as a success and carries on with the local delete.
+**Use `/item/remove` to end a paid subscription.** Deleting the local token does
+not remove the Item at Plaid. `fourseas unlink <item-id>` calls `/item/remove`
+first, then deletes local rows and the token. `fourseas unlink --list` shows the
+Item IDs. An Item Plaid already dropped returns `ITEM_NOT_FOUND`; unlink treats
+that response as success and continues with the local delete.
 
 **A long first sync can be interrupted by the bank.** When the transaction data
 of an item changes while the pages are read, Plaid fails the call with
@@ -113,6 +139,13 @@ an intermediate cursor saved by an older version and performs one full sync.
 **One cursor for each institution, not for each account.** `/transactions/sync`
 works on an access token, and one access token covers every account in that
 institution. A single card cannot be synced alone.
+
+**Liabilities refreshes only when enabled.** Each Item stores its local enabled
+setting. Fourseas calls `/liabilities/get` once after all transaction pages
+complete. `PRODUCT_NOT_READY` is a temporary success: fourseas keeps the old
+snapshot and tries again on the next sync. Missing consent keeps the snapshot
+and exposes the enable action in account details. Other failures also keep the
+snapshot and return the account values from committed transaction pages.
 
 **Pending and posted are separate transactions.** Plaid gives them different
 transaction ids, and the posted one carries `pending_transaction_id` pointing at

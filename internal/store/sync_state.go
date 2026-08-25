@@ -77,6 +77,21 @@ func (s *Store) SetStatus(ctx context.Context, provider, itemID, status string) 
 	return nil
 }
 
+// SetStatusOnly changes the current status without changing the cursor or the
+// time of the last sync. An empty status clears it.
+func (s *Store) SetStatusOnly(ctx context.Context, provider, itemID, status string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO sync_state (provider, item_id, cursor, last_synced_at, last_status)
+		VALUES (?, ?, NULL, NULL, ?)
+		ON CONFLICT (provider, item_id) DO UPDATE SET
+			last_status = excluded.last_status`,
+		provider, itemID, textArg(status))
+	if err != nil {
+		return fmt.Errorf("change status for %s/%s: %w", provider, itemID, err)
+	}
+	return nil
+}
+
 // SyncStates returns where every institution's next sync starts, and how the
 // last one ended.
 func (s *Store) SyncStates(ctx context.Context) ([]model.SyncState, error) {

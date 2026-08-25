@@ -5,6 +5,7 @@ package tokens
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,6 +22,7 @@ type Item struct {
 	AccessToken string    `json:"access_token"`
 	Institution string    `json:"institution"`
 	Env         string    `json:"env"`
+	Liabilities bool      `json:"liabilities"`
 	LinkedAt    time.Time `json:"linked_at"`
 }
 
@@ -38,7 +40,7 @@ type File struct {
 // Load reads the token file. A file that does not exist is an empty file, not
 // an error: the user has simply not linked anything yet.
 func Load(path string) (File, error) {
-	data, err := os.ReadFile(path)
+	data, err := readProtectedTokenFile(path)
 	if os.IsNotExist(err) {
 		return File{}, nil
 	}
@@ -96,18 +98,55 @@ func (f File) Find(itemID string) (Item, bool) {
 
 // Save writes the file with owner-only permissions.
 func Save(path string, f File) error {
-	if dir := filepath.Dir(path); dir != "." {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return fmt.Errorf("create %s: %w", dir, err)
+	_, err := Mutate(path, func(File) (File, error) { return f, nil })
+	return err
+}
+
+// Mutate reloads and replaces the token file while it holds an exclusive
+// cross-process lock. The callback must derive its result from current.
+func Mutate(path string, mutate func(current File) (File, error)) (saved File, err error) {
+	dir := filepath.Dir(path)
+	if dir != "." {
+		if err := ensureTokenDirectory(dir); err != nil {
+			return File{}, fmt.Errorf("create %s: %w", dir, err)
 		}
 	}
 
-	data, err := json.MarshalIndent(f, "", "  ")
+	lock, err := openTokenLock(path + ".lock")
 	if err != nil {
-		return fmt.Errorf("encode tokens: %w", err)
+		return File{}, fmt.Errorf("open token lock: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
+	unlock, err := acquireFileLock(lock)
+	if err != nil {
+		lock.Close()
+		return File{}, fmt.Errorf("lock token file: %w", err)
 	}
-	return nil
+	defer func() {
+		if unlockErr := unlock(); unlockErr != nil {
+			err = errors.Join(err, fmt.Errorf("unlock token file: %w", unlockErr))
+		}
+		if closeErr := lock.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close token lock: %w", closeErr))
+		}
+	}()
+
+	current, err := Load(path)
+	if err != nil {
+		return File{}, err
+	}
+	updated, err := mutate(current)
+	if err != nil {
+		return File{}, err
+	}
+	if err := writeAtomic(path, updated); err != nil {
+		return File{}, err
+	}
+	return updated, nil
 }
+
+var writeTokenTemp = func(file *os.File, data []byte) error {
+	_, err := file.Write(data)
+	return err
+}
+
+var tokenFileOpened = func() {}

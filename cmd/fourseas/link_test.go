@@ -3,12 +3,16 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/kyle-cheung/fourseas/providence/internal/app"
+	"github.com/kyle-cheung/fourseas/providence/internal/provider/plaid"
 )
 
 // captureStdout returns everything print writes while fn runs.
@@ -46,16 +50,42 @@ func TestSignInLineKeepsTheWording(t *testing.T) {
 	}
 }
 
+func TestUsageExplainsDefaultLiabilitiesAndTheOptOut(t *testing.T) {
+	for _, want := range []string{
+		"New links enable statement data through Plaid Liabilities by default.",
+		"On paid Production plans, Liabilities can incur subscription charges under your Plaid agreement.",
+		"--liabilities=false opts out before linking.",
+	} {
+		if !strings.Contains(usage, want) {
+			t.Errorf("usage does not contain %q:\n%s", want, usage)
+		}
+	}
+	for _, unwanted := range []string{
+		"Plaid Liabilities can have separate billing.",
+		"Plaid bills every live card each month",
+		"Plaid bills this item each month",
+		"Plaid created this item and bills it each month",
+	} {
+		if strings.Contains(usage, unwanted) {
+			t.Errorf("usage contains %q:\n%s", unwanted, usage)
+		}
+	}
+}
+
 func TestParseLinkOptions(t *testing.T) {
 	tests := []struct {
 		name    string
 		options []string
-		want    int
+		want    linkOptions
 	}{
-		{"no options asks for everything Plaid permits", nil, 730},
-		{"days with a space", []string{"--days", "180"}, 180},
-		{"days with an equals sign", []string{"--days=90"}, 90},
-		{"the smallest amount Plaid honours", []string{"--days", "30"}, 30},
+		{"no options asks for all history and liabilities", nil, linkOptions{days: 730, liabilities: true}},
+		{"days with a space", []string{"--days", "180"}, linkOptions{days: 180, liabilities: true}},
+		{"days with an equals sign", []string{"--days=90"}, linkOptions{days: 90, liabilities: true}},
+		{"the smallest amount Plaid honours", []string{"--days", "30"}, linkOptions{days: 30, liabilities: true}},
+		{"liabilities true with equals", []string{"--liabilities=true"}, linkOptions{days: 730, liabilities: true}},
+		{"liabilities false with equals", []string{"--liabilities=false"}, linkOptions{days: 730, liabilities: false}},
+		{"liabilities false with a space", []string{"--liabilities", "false"}, linkOptions{days: 730, liabilities: false}},
+		{"both choices", []string{"--days=365", "--liabilities=false"}, linkOptions{days: 365, liabilities: false}},
 	}
 
 	for _, tt := range tests {
@@ -65,7 +95,7 @@ func TestParseLinkOptions(t *testing.T) {
 				t.Fatalf("parseLinkOptions(%q) error = %v", tt.options, err)
 			}
 			if got != tt.want {
-				t.Errorf("parseLinkOptions(%q) = %d, want %d", tt.options, got, tt.want)
+				t.Errorf("parseLinkOptions(%q) = %+v, want %+v", tt.options, got, tt.want)
 			}
 		})
 	}
@@ -79,6 +109,10 @@ func TestParseLinkOptionsRejectsBadInput(t *testing.T) {
 		{"--days", "29"},
 		{"--days", "731"},
 		{"--days", "many"},
+		{"--liabilities"},
+		{"--liabilities", "not-a-boolean"},
+		{"--liabilities=not-a-boolean"},
+		{"--liabilities=true", "unexpected"},
 		{"--fx"},
 	} {
 		if _, err := parseLinkOptions(options); err == nil {
@@ -87,9 +121,31 @@ func TestParseLinkOptionsRejectsBadInput(t *testing.T) {
 	}
 }
 
+func TestRunLinkRejectsInvalidLiabilitiesBeforeConfigurationAndOutput(t *testing.T) {
+	var runErr error
+	out := captureStdout(t, func() {
+		runErr = runLink(context.Background(), settings{}, []string{"--liabilities", "not-a-boolean"})
+	})
+	if runErr == nil {
+		t.Fatal("runLink error = nil, want the Boolean failure")
+	}
+	if !strings.Contains(runErr.Error(), "--liabilities") {
+		t.Errorf("runLink error = %q, want the Boolean option named", runErr)
+	}
+	if strings.Contains(runErr.Error(), "PLAID_CLIENT_ID") {
+		t.Errorf("runLink error = %q, want parsing before Plaid configuration", runErr)
+	}
+	if out != "" {
+		t.Errorf("runLink printed %q before rejecting the Boolean option", out)
+	}
+}
+
 // fakeLinker records what the link command asked of the façade.
 type fakeLinker struct {
 	linkCalls     int
+	linkDays      []int
+	liabilities   []bool
+	onLink        func()
 	linkItem      app.LinkedItem
 	linkErr       error
 	completeCalls int
@@ -97,8 +153,13 @@ type fakeLinker struct {
 	completeErr   error
 }
 
-func (f *fakeLinker) Link(context.Context, int, app.Progress) (app.LinkedItem, error) {
+func (f *fakeLinker) Link(_ context.Context, days int, liabilities bool, _ app.Progress) (app.LinkedItem, error) {
 	f.linkCalls++
+	f.linkDays = append(f.linkDays, days)
+	f.liabilities = append(f.liabilities, liabilities)
+	if f.onLink != nil {
+		f.onLink()
+	}
 	return f.linkItem, f.linkErr
 }
 
@@ -120,7 +181,7 @@ func TestLinkOnceSavesAgainInsteadOfLinkingAgain(t *testing.T) {
 		completeItem: app.LinkedItem{ItemID: "item-new", Institution: "TD Canada Trust"},
 	}
 
-	linked, err := linkOnce(context.Background(), fake, 730, nil)
+	linked, err := linkOnce(context.Background(), fake, 730, false, nil)
 	if err != nil {
 		t.Fatalf("linkOnce: %v", err)
 	}
@@ -129,6 +190,12 @@ func TestLinkOnceSavesAgainInsteadOfLinkingAgain(t *testing.T) {
 	}
 	if fake.linkCalls != 1 {
 		t.Errorf("Link ran %d times, want the one link Plaid already billed", fake.linkCalls)
+	}
+	if len(fake.linkDays) != 1 || fake.linkDays[0] != 730 {
+		t.Errorf("Link days = %v, want [730]", fake.linkDays)
+	}
+	if len(fake.liabilities) != 1 || fake.liabilities[0] {
+		t.Errorf("Link liabilities = %v, want [false]", fake.liabilities)
 	}
 	if fake.completeCalls != 1 {
 		t.Errorf("CompleteLinkSave ran %d times, want once", fake.completeCalls)
@@ -140,7 +207,7 @@ func TestLinkOnceSavesAgainInsteadOfLinkingAgain(t *testing.T) {
 func TestLinkOnceReportsTheUnsavedTokenWithoutASecondLink(t *testing.T) {
 	fake := &fakeLinker{linkErr: tokenNotSaved(), completeErr: tokenNotSaved()}
 
-	_, err := linkOnce(context.Background(), fake, 730, nil)
+	_, err := linkOnce(context.Background(), fake, 730, true, nil)
 	if err == nil {
 		t.Fatal("error = nil, want the unsaved token to end the command")
 	}
@@ -150,8 +217,8 @@ func TestLinkOnceReportsTheUnsavedTokenWithoutASecondLink(t *testing.T) {
 	if fake.completeCalls != 1 {
 		t.Errorf("CompleteLinkSave ran %d times, want the one retry", fake.completeCalls)
 	}
-	if !strings.Contains(err.Error(), "SECOND") {
-		t.Errorf("error = %q, want the warning about a second billed item", err)
+	if !strings.Contains(err.Error(), "another Item") {
+		t.Errorf("error = %q, want the warning about another Item", err)
 	}
 }
 
@@ -163,7 +230,7 @@ func TestLinkOnceReportsWhyTheRetryFailed(t *testing.T) {
 		completeErr: errors.New("no unsaved link to complete"),
 	}
 
-	_, err := linkOnce(context.Background(), fake, 730, nil)
+	_, err := linkOnce(context.Background(), fake, 730, true, nil)
 	if err == nil {
 		t.Fatal("error = nil, want the failed retry to end the command")
 	}
@@ -179,7 +246,7 @@ func TestLinkOnceReportsWhyTheRetryFailed(t *testing.T) {
 func TestLinkOnceLeavesAnOrdinaryFailureAlone(t *testing.T) {
 	fake := &fakeLinker{linkErr: errors.New("plaid is unavailable")}
 
-	if _, err := linkOnce(context.Background(), fake, 730, nil); err != fake.linkErr {
+	if _, err := linkOnce(context.Background(), fake, 730, true, nil); err != fake.linkErr {
 		t.Errorf("error = %v, want the error Link returned", err)
 	}
 	if fake.completeCalls != 0 {
@@ -187,9 +254,48 @@ func TestLinkOnceLeavesAnOrdinaryFailureAlone(t *testing.T) {
 	}
 }
 
-// The message must name the item the user now pays for, and must not offer a
-// new link as the way out.
-func TestTokenNotSavedMessageNamesTheBilledItem(t *testing.T) {
+func TestRunLinkPrintsTheLiabilitiesNoticeOnlyBeforeAnEnabledLink(t *testing.T) {
+	const notice = "Statement data: enabled. On paid Production plans, Liabilities can incur subscription charges under your Plaid agreement."
+	for _, liabilities := range []bool{true, false} {
+		t.Run(strconv.FormatBool(liabilities), func(t *testing.T) {
+			fake := &fakeLinker{
+				linkItem: app.LinkedItem{ItemID: "item-new", Institution: "Test Bank"},
+				onLink:   func() { fmt.Println("browser started") },
+			}
+			cfg := settings{
+				plaid:      plaid.Config{ClientID: "test-client", Secret: "test-secret", Env: "sandbox", LinkPort: 8080},
+				tokensPath: filepath.Join(t.TempDir(), "tokens.json"),
+			}
+			var runErr error
+			out := captureStdout(t, func() {
+				runErr = runLinkWith(context.Background(), cfg, linkOptions{days: 730, liabilities: liabilities}, fake)
+			})
+			if runErr != nil {
+				t.Fatalf("runLinkWith: %v", runErr)
+			}
+
+			noticeAt := strings.Index(out, notice)
+			browserAt := strings.Index(out, "browser started")
+			if browserAt < 0 {
+				t.Fatalf("output = %q, want the fake browser marker", out)
+			}
+			if liabilities {
+				if noticeAt < 0 || noticeAt > browserAt {
+					t.Errorf("output = %q, want the notice before the browser", out)
+				}
+			} else if noticeAt >= 0 {
+				t.Errorf("output = %q, want no liabilities notice", out)
+			}
+			if strings.Contains(out, "Plaid Liabilities can have separate billing.") {
+				t.Errorf("output contains the unqualified liabilities warning:\n%s", out)
+			}
+		})
+	}
+}
+
+// The message must name the active item and must not offer a new link as the
+// way out.
+func TestTokenNotSavedMessageQualifiesPossibleCharges(t *testing.T) {
 	err := tokenNotSavedMessage("TD Canada Trust", "item-new",
 		errors.New("write tokens.json: permission denied"))
 
@@ -197,11 +303,25 @@ func TestTokenNotSavedMessageNamesTheBilledItem(t *testing.T) {
 		"TD Canada Trust",
 		"item-new",
 		"write tokens.json: permission denied",
-		"SECOND",
+		"This Item is active at Plaid.",
+		"On paid Production plans, subscription products can incur monthly charges under your Plaid agreement.",
+		"Without the token, fourseas cannot sync or remove the Item.",
+		"Contact Plaid Support to remove an Item whose token was lost.",
+		"A second link creates a second Item. On a paid Production plan, its subscription products can also incur charges under your Plaid agreement.",
 		"fourseas link",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("message does not hold %q:\n%s", want, err)
+		}
+	}
+	for _, unwanted := range []string{
+		"Plaid bills every live card each month",
+		"Plaid bills this item each month",
+		"Plaid created this item and bills it each month",
+		"A second link creates another Item that can also incur charges.",
+	} {
+		if strings.Contains(err.Error(), unwanted) {
+			t.Errorf("message contains %q:\n%s", unwanted, err)
 		}
 	}
 }

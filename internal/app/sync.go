@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"strings"
 
 	"github.com/kyle-cheung/fourseas/providence/internal/model"
 	"github.com/kyle-cheung/fourseas/providence/internal/provider"
@@ -25,6 +27,53 @@ const legacyCursorFailures = 2
 
 // labelWidth keeps the item name of every reported line in one column.
 const labelWidth = 28
+
+const redactedAccessToken = "[REDACTED]"
+
+type accessTokenError struct {
+	err  error
+	text string
+}
+
+func (e *accessTokenError) Error() string {
+	if e == nil {
+		return "redacted error"
+	}
+	return e.text
+}
+
+func (e *accessTokenError) Is(target error) bool {
+	return e != nil && errors.Is(e.err, target)
+}
+
+func (e *accessTokenError) Format(state fmt.State, verb rune) {
+	if e == nil {
+		io.WriteString(state, "<nil>")
+		return
+	}
+	if verb == 'q' {
+		fmt.Fprintf(state, "%q", e.text)
+		return
+	}
+	io.WriteString(state, e.text)
+}
+
+// redactAccessToken removes the known Item token from displayed and stored
+// error text. Is keeps sentinel classification without exposing the raw
+// provider error.
+func redactAccessToken(err error, accessToken string) error {
+	if err == nil {
+		return err
+	}
+	text := err.Error()
+	if accessToken != "" {
+		text = strings.ReplaceAll(text, accessToken, redactedAccessToken)
+	}
+	return &accessTokenError{
+		err:  err,
+		text: text,
+	}
+}
 
 // SyncItem fetches the new transactions of one linked institution and returns
 // the accounts that item holds afterwards.
@@ -107,14 +156,19 @@ func (a *App) syncItem(ctx context.Context, db *store.Store, item tokens.Item, r
 	if err == nil {
 		return views, nil
 	}
+	err = redactAccessToken(err, item.AccessToken)
 	if ctx.Err() != nil {
-		return nil, err
+		return views, err
 	}
-	statusErr := db.SetStatus(ctx, plaid.ProviderName, item.ItemID, err.Error())
+	status := err.Error()
+	if errors.Is(err, provider.ErrAdditionalConsentRequired) {
+		status = liabilitiesConsentRequiredStatus + status
+	}
+	statusErr := db.SetStatus(ctx, plaid.ProviderName, item.ItemID, status)
 	if statusErr != nil {
-		return nil, errors.Join(err, statusErr)
+		return views, errors.Join(err, statusErr)
 	}
-	return nil, err
+	return views, err
 }
 
 // readItem pages through one item's changes and writes them to the store.
@@ -134,6 +188,17 @@ func (a *App) readItem(ctx context.Context, db *store.Store, item tokens.Item, r
 	if err != nil {
 		return nil, err
 	}
+	if item.Liabilities {
+		if liabilityErr := a.refreshLiabilities(ctx, db, item); liabilityErr != nil {
+			views, viewErr := db.AccountViews(ctx)
+			if viewErr != nil {
+				return nil, errors.Join(liabilityErr, viewErr)
+			}
+			progress(report, itemLine(item, "%d added, %d modified, %d removed",
+				counts.added, counts.modified, counts.removed))
+			return filterAccounts(views, item.ItemID), liabilityErr
+		}
+	}
 	views, err := db.AccountViews(ctx)
 	if err != nil {
 		return nil, err
@@ -142,6 +207,42 @@ func (a *App) readItem(ctx context.Context, db *store.Store, item tokens.Item, r
 	progress(report, itemLine(item, "%d added, %d modified, %d removed",
 		counts.added, counts.modified, counts.removed))
 	return filterAccounts(views, item.ItemID), nil
+}
+
+// refreshLiabilities applies the result policy for one complete Item snapshot.
+func (a *App) refreshLiabilities(ctx context.Context, db *store.Store, item tokens.Item) error {
+	return a.refreshLiabilitiesResult(ctx, db, item).err
+}
+
+type liabilityRefreshResult struct {
+	snapshotStored bool
+	err            error
+}
+
+// refreshLiabilitiesResult keeps PRODUCT_NOT_READY distinct from a stored or
+// cleared snapshot for the enable flow. Sync callers use refreshLiabilities
+// and keep the existing error-only policy.
+func (a *App) refreshLiabilitiesResult(
+	ctx context.Context,
+	db *store.Store,
+	item tokens.Item,
+) liabilityRefreshResult {
+	if a.liabilities == nil {
+		return liabilityRefreshResult{err: errors.New("liability fetch is not configured")}
+	}
+	rows, err := a.liabilities(ctx, a.cfg.Plaid, item.AccessToken)
+	switch {
+	case err == nil:
+		err = db.ReplaceLiabilities(ctx, plaid.ProviderName, item.ItemID, rows)
+		return liabilityRefreshResult{snapshotStored: err == nil, err: err}
+	case errors.Is(err, provider.ErrNoLiabilityAccounts):
+		err = db.ReplaceLiabilities(ctx, plaid.ProviderName, item.ItemID, nil)
+		return liabilityRefreshResult{snapshotStored: err == nil, err: err}
+	case errors.Is(err, provider.ErrProductNotReady):
+		return liabilityRefreshResult{}
+	default:
+		return liabilityRefreshResult{err: err}
+	}
 }
 
 // itemLine is one reported line about one item, in the shared name column.

@@ -28,9 +28,11 @@ Plaid needs setup in its dashboard before `link` works. See
 | `fourseas link` | Link one institution through Plaid Link in the browser |
 | `fourseas sync` | Fetch what changed from Plaid, refresh FX rates, and print the newest rows |
 | `fourseas link --days <n>` | Link with `n` days of history. 30 to 730, 730 by default |
+| `fourseas link --liabilities=false` | Opt out of Plaid Liabilities before the Item is created |
 | `fourseas sync --fx` | Refresh FX rates only |
-| `fourseas accounts` | List accounts with ids, balances, and nicknames |
+| `fourseas accounts` | List accounts with balances, limits, due dates, payment data, and ids |
 | `fourseas accounts nickname <id> "<name>"` | Name an account. An empty name clears it |
+| `fourseas accounts liabilities enable <id>` | Request Liabilities consent for the account's institution |
 | `fourseas show` | Print the newest stored rows without calling Plaid |
 | `fourseas unlink <item-id>` | Remove one institution at Plaid, then delete its local token and data. Asks first |
 | `fourseas unlink --list` | List the linked institutions with the item ids `unlink` takes |
@@ -76,6 +78,59 @@ Two more points:
 - **The bank sets the real limit.** 730 days is what Plaid permits, not what
   every institution holds. You get what the bank provides.
 
+### Statement and payment data
+
+New links request consent for Plaid Liabilities by default. This product can
+supply a credit card due date and its latest payment. Use
+`fourseas link --liabilities=false` to opt out before Plaid creates the Item.
+
+An existing credit account can request consent later:
+
+```bash
+bin/fourseas accounts liabilities enable <account-id>
+```
+
+The command opens Plaid Link in update mode for the whole institution. It keeps
+the existing Item and access token. A successful update does not exchange a
+new token. Fourseas then records the setting and requests the first snapshot.
+
+An error after consent can mean that fourseas saved `Liabilities=true`. The
+error states what was saved and what failed. Do not treat the Item as disabled
+only because the command returned an error.
+
+In the terminal interface, Retry after a failed or canceled first snapshot uses
+a snapshot-only request and then reloads accounts. It does not repeat consent.
+If Plaid returns `ADDITIONAL_CONSENT_REQUIRED`, the interface says that the
+request and local flag were saved but Plaid still requires consent. The Enable
+action stays visible, and Retry requests consent again. If the snapshot was
+stored but the local consent-status update failed, Retry also uses the
+snapshot-only path.
+
+Each normal sync refreshes Liabilities only for Items that have the setting
+enabled. `PRODUCT_NOT_READY` is temporary: the sync succeeds, keeps any stored
+snapshot, and tries again next time. Missing consent also keeps the snapshot
+and makes the enable action available in account details. Other Liabilities
+failures keep the snapshot and the transaction pages that already committed.
+The account result still contains those committed values.
+
+`fourseas accounts` puts the currency in each balance and limit cell. It does
+not use a separate currency column. The terminal interface shows account,
+balance, due date, and latest payment in a summary table above the main menu.
+Missing values use `—`.
+
+Fourseas cannot disable an active Liabilities subscription in place. Unlink
+the Item and link it again with `--liabilities=false`. Issue
+[#24](https://github.com/kyle-cheung/fourseas/issues/24) tracks a replace-Item
+workflow.
+
+[Plaid pricing and billing](https://plaid.com/docs/account/billing/) depends on
+the environment and plan. Sandbox is free. Trial Production access is free
+within its plan limits. On paid Production plans, Transactions and Liabilities
+use subscription pricing under your Plaid agreement. After a subscription
+product is added, Plaid can charge while the Item has a valid access token,
+even if fourseas makes no more API calls or calls fail. `/item/remove` ends the
+subscription.
+
 ### Remove a card
 
 ```bash
@@ -90,14 +145,16 @@ earlier state, so the command can be run again.
 
 Two reasons to use it:
 
-- **Plaid bills each live item, each month.** Deleting the token on its own
-  leaves the item alive at Plaid, and removes the only way to reach it.
+- **Paid Production subscriptions can continue while the Item has a valid
+  access token.** Deleting the local token does not remove the Item at Plaid.
+  It also removes the handle that fourseas needs to call `/item/remove`.
 - **A re-link is the only way to get more history.** The history window is
   fixed when the item is created. `unlink` then `link` builds a new one.
 
 An access token only works in the environment that issued it, so `unlink`
 refuses an item that was linked in another `PLAID_ENV` and says which one to
-set. Without that the removal would fail at Plaid and leave the item billed.
+set. Without that the removal would fail at Plaid and could leave a paid
+subscription active.
 
 The transactions go too. A re-link gives new transaction ids to the same
 charges, so rows that were kept would count every charge twice. There is no
@@ -315,8 +372,13 @@ that window until you remove the item and link it again.
 the two can never disagree. Deleting the file fetches everything again, which is
 cheap and safe.
 
-**Access tokens sit in a plain file.** `.secrets/tokens.json`, mode 0600, not in
-git. This is good enough for one local user, and not for anything shared.
+**Access tokens sit in a plain file.** `.secrets/tokens.json` is not in git. On
+Unix, fourseas upgrades an existing regular token file to mode 0600 before it
+reads from the opened file descriptor. New writes use a mode-0600 temporary
+file, atomic replacement, and a cross-process lock. The Windows implementation
+uses protected DACLs and write-through replacement, but it has not had runtime
+verification on Windows in this release. This design is for one local user,
+not for a shared machine.
 
 **One user, one machine.** No accounts, no sharing, no sync between machines.
 
@@ -329,11 +391,15 @@ sum of money is wrong.
 | ----- | ----- |
 | `institutions` | One row for each linked Plaid Item |
 | `accounts` | One row for each card, with balances and the nickname |
+| `account_liabilities` | Local Plaid Liabilities data for each credit account |
 | `transactions` | Every transaction, including the superseded ones |
 | `fx_rates` | Daily exchange rates from each currency to USD |
 | `sync_state` | The cursor for each institution |
 | `schema_version` | One integer |
 | `v_transactions` | The view above: joined, and without superseded rows |
+
+`AccountViews` left-joins `account_liabilities`. An account stays visible when
+it has no Liabilities row.
 
 There is no migration framework. When the file on disk has another version, the
 command stops and tells you to run `fourseas reset`. All of this data can be

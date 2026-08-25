@@ -13,7 +13,7 @@ type Removed struct {
 	Institutions int64
 }
 
-// itemTable is one table keyed by item, with the count its delete fills.
+// itemTable is one table keyed by item, with an optional count for its delete.
 type itemTable struct {
 	table string
 	into  *int64
@@ -24,6 +24,7 @@ type itemTable struct {
 func itemTables(counts *Removed) []itemTable {
 	return []itemTable{
 		{"transactions", &counts.Transactions},
+		{"account_liabilities", nil},
 		{"accounts", &counts.Accounts},
 		{"sync_state", &counts.SyncState},
 		{"institutions", &counts.Institutions},
@@ -77,7 +78,9 @@ func deleteItemRows(ctx context.Context, db execer, provider, itemID string) (Re
 		if err != nil {
 			return Removed{}, err
 		}
-		*t.into = n
+		if t.into != nil {
+			*t.into = n
+		}
 	}
 	return removed, nil
 }

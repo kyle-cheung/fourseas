@@ -17,18 +17,30 @@ import (
 // is asked for.
 const defaultLinkDays = app.MaxLinkDays
 
+type linkOptions struct {
+	days        int
+	liabilities bool
+}
+
 // runLink links one card and saves its access token. Run it once for each card.
-func runLink(ctx context.Context, cfg settings, options []string) error {
-	days, err := parseLinkOptions(options)
+func runLink(ctx context.Context, cfg settings, arguments []string) error {
+	options, err := parseLinkOptions(arguments)
 	if err != nil {
 		return err
 	}
+	return runLinkWith(ctx, cfg, options, app.New(cfg.appConfig()))
+}
+
+func runLinkWith(ctx context.Context, cfg settings, options linkOptions, svc linkService) error {
 	if err := cfg.plaid.Validate(); err != nil {
 		return err
 	}
 
 	fmt.Printf("Plaid environment: %s\n", cfg.plaid.Env)
-	fmt.Printf("History requested: %d days. Plaid fixes this now and cannot change it later.\n", days)
+	fmt.Printf("History requested: %d days. Plaid fixes this now and cannot change it later.\n", options.days)
+	if options.liabilities {
+		fmt.Println("Statement data: enabled. On paid Production plans, Liabilities can incur subscription charges under your Plaid agreement.")
+	}
 	if cfg.plaid.RedirectURI == "" {
 		fmt.Printf("No PLAID_REDIRECT_URI is set. Banks that use OAuth, such as Scotiabank,\n" +
 			"will not finish. To use one, register this URI in the Plaid dashboard\n" +
@@ -39,7 +51,7 @@ func runLink(ctx context.Context, cfg settings, options []string) error {
 	// app.Link reads the token file before the browser opens, so an unreadable
 	// one fails before Plaid creates an item it would bill. Doing it here in
 	// the other order would drop the only handle to that item.
-	linked, err := linkOnce(ctx, app.New(cfg.appConfig()), days, signInLine)
+	linked, err := linkOnce(ctx, svc, options.days, options.liabilities, signInLine)
 	if err != nil {
 		return err
 	}
@@ -62,18 +74,18 @@ func runLink(ctx context.Context, cfg settings, options []string) error {
 // linkService is the part of the façade the link command uses. *app.App
 // satisfies it.
 type linkService interface {
-	Link(context.Context, int, app.Progress) (app.LinkedItem, error)
+	Link(context.Context, int, bool, app.Progress) (app.LinkedItem, error)
 	CompleteLinkSave(app.PendingSave) (app.LinkedItem, error)
 }
 
 // linkOnce links one card and makes sure its access token reaches the disk.
 //
-// Plaid bills the item it creates, and the access token is the only handle to
-// that item. A save that fails is therefore tried once more from the handle the
-// failure carries. The browser step never runs a second time: a new link
-// creates a second billed item at the same bank.
-func linkOnce(ctx context.Context, svc linkService, days int, report app.Progress) (app.LinkedItem, error) {
-	linked, err := svc.Link(ctx, days, report)
+// Plaid creates the item before the access token is saved. A save that fails is
+// therefore tried once more from the handle the failure carries. The browser
+// step never runs a second time: a new link creates another item at the same
+// bank.
+func linkOnce(ctx context.Context, svc linkService, days int, liabilities bool, report app.Progress) (app.LinkedItem, error) {
+	linked, err := svc.Link(ctx, days, liabilities, report)
 	var notSaved *app.TokenNotSavedError
 	if !errors.As(err, &notSaved) {
 		return linked, err
@@ -96,28 +108,27 @@ func linkOnce(ctx context.Context, svc linkService, days int, report app.Progres
 		notSaved.Pending.Institution(), notSaved.Pending.ItemID(), cause)
 }
 
-// tokenNotSavedMessage is what the user reads when the token of a billed item
-// stays unsaved. It names the item, because the Plaid dashboard is the only
-// place left to act on it, and it refuses the one recovery the user would try
-// first.
+// tokenNotSavedMessage is what the user reads when the token of an active item
+// stays unsaved. It names the item and refuses the one recovery the user would
+// try first.
 func tokenNotSavedMessage(institution, itemID string, cause error) error {
 	name := institution
 	if name == "" {
 		name = itemID
 	}
-	return fmt.Errorf(`the access token of a billed item was not saved: %w
+	return fmt.Errorf(`the access token of an active Item was not saved: %w
 
   Institution: %s
   Item id:     %s
 
-Plaid created this item and bills it each month. The access token is the only
-way to reach it, and fourseas did not write it to disk.
+This Item is active at Plaid. On paid Production plans, subscription products can incur monthly charges under your Plaid agreement.
 
-Do NOT run `+"`fourseas link`"+` to recover this item. A new link creates a SECOND
-billed item at the same bank, and this item stays billed.
+Without the token, fourseas cannot sync or remove the Item.
+Contact Plaid Support to remove an Item whose token was lost.
 
-Make the token file writable, then link again only if you accept a second item.
-To stop the charge for this item, remove it in the Plaid dashboard.`,
+Do NOT run `+"`fourseas link`"+` to recover this Item. A second link creates a second Item. On a paid Production plan, its subscription products can also incur charges under your Plaid agreement.
+
+Make the token file writable, then link again only if you accept another Item.`,
 		cause, name, itemID)
 }
 
@@ -134,36 +145,60 @@ func signInLine(line string) {
 	}
 }
 
-// parseLinkOptions reads the link command line. It accepts --days N and
-// --days=N, and returns the amount of history to request.
-func parseLinkOptions(options []string) (int, error) {
-	days := defaultLinkDays
+// parseLinkOptions reads the link command line. Both options accept a separate
+// value or an equals sign.
+func parseLinkOptions(arguments []string) (linkOptions, error) {
+	options := linkOptions{days: defaultLinkDays, liabilities: true}
 
-	for i := 0; i < len(options); i++ {
-		option := options[i]
+	for i := 0; i < len(arguments); i++ {
+		option := arguments[i]
 		switch {
 		case option == "--days":
-			if i+1 >= len(options) {
-				return 0, fmt.Errorf("--days needs a number of days, for example `--days 730`")
+			if i+1 >= len(arguments) {
+				return linkOptions{}, fmt.Errorf("--days needs a number of days, for example `--days 730`")
 			}
 			i++
-			parsed, err := parseLinkDays(options[i])
+			parsed, err := parseLinkDays(arguments[i])
 			if err != nil {
-				return 0, err
+				return linkOptions{}, err
 			}
-			days = parsed
+			options.days = parsed
 		case strings.HasPrefix(option, "--days="):
 			parsed, err := parseLinkDays(strings.TrimPrefix(option, "--days="))
 			if err != nil {
-				return 0, err
+				return linkOptions{}, err
 			}
-			days = parsed
+			options.days = parsed
+		case option == "--liabilities":
+			if i+1 >= len(arguments) {
+				return linkOptions{}, fmt.Errorf("--liabilities needs true or false, for example `--liabilities false`")
+			}
+			i++
+			parsed, err := parseLinkLiabilities(arguments[i])
+			if err != nil {
+				return linkOptions{}, err
+			}
+			options.liabilities = parsed
+		case strings.HasPrefix(option, "--liabilities="):
+			parsed, err := parseLinkLiabilities(strings.TrimPrefix(option, "--liabilities="))
+			if err != nil {
+				return linkOptions{}, err
+			}
+			options.liabilities = parsed
 		default:
-			return 0, fmt.Errorf("unknown option %q: `fourseas link` takes --days <n> or nothing", option)
+			return linkOptions{}, fmt.Errorf("unknown option %q: `fourseas link` takes --days <n> and --liabilities <bool>", option)
 		}
 	}
 
-	return days, nil
+	return options, nil
+}
+
+func parseLinkLiabilities(value string) (bool, error) {
+	liabilities, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("--liabilities wants true or false, got %q", value)
+	}
+	return liabilities, nil
 }
 
 // parseLinkDays reads one --days value. The bounds are the ones Plaid honours,

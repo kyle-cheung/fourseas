@@ -10,10 +10,11 @@ import (
 	"testing"
 
 	"github.com/kyle-cheung/fourseas/providence/internal/provider/plaid"
+	"github.com/kyle-cheung/fourseas/providence/internal/tokens"
 )
 
 // linkOK is a browser step that always completes.
-func linkOK(context.Context, plaid.Config, int) (plaid.LinkResult, error) {
+func linkOK(context.Context, plaid.Config, int, bool) (plaid.LinkResult, error) {
 	return plaid.LinkResult{
 		ItemID: "item-new", AccessToken: "secret", Institution: "TD Canada Trust",
 	}, nil
@@ -21,7 +22,7 @@ func linkOK(context.Context, plaid.Config, int) (plaid.LinkResult, error) {
 
 // linkNever fails the test when the browser step is reached.
 func linkNever(t *testing.T) linkFunc {
-	return func(context.Context, plaid.Config, int) (plaid.LinkResult, error) {
+	return func(context.Context, plaid.Config, int, bool) (plaid.LinkResult, error) {
 		t.Error("the browser step ran although the settings are not usable")
 		return plaid.LinkResult{}, nil
 	}
@@ -30,35 +31,70 @@ func linkNever(t *testing.T) linkFunc {
 // The token is what names a live item at Plaid, so it must be on disk before
 // Link returns.
 func TestLinkSavesCompletedItem(t *testing.T) {
+	for _, liabilities := range []bool{true, false} {
+		t.Run(fmt.Sprintf("liabilities %t", liabilities), func(t *testing.T) {
+			cfg := tempConfig(t, "sandbox")
+			link := func(_ context.Context, _ plaid.Config, _ int, gotLiabilities bool) (plaid.LinkResult, error) {
+				if gotLiabilities != liabilities {
+					t.Errorf("provider liabilities = %t, want %t", gotLiabilities, liabilities)
+				}
+				return plaid.LinkResult{
+					ItemID: "item-new", AccessToken: "secret", Institution: "TD Canada Trust",
+				}, nil
+			}
+			var reported []string
+
+			linked, err := newWith(cfg, link, nil, nil, nil, nil).Link(context.Background(), 730, liabilities,
+				func(text string) { reported = append(reported, text) })
+			if err != nil {
+				t.Fatalf("Link: %v", err)
+			}
+
+			if linked.ItemID != "item-new" || linked.Institution != "TD Canada Trust" {
+				t.Errorf("linked = %+v, want item-new at TD Canada Trust", linked)
+			}
+			saved, found := loadTokens(t, cfg.TokensPath).Find("item-new")
+			if !found {
+				t.Fatal("the token file has no item-new after Link returned")
+			}
+			if saved.AccessToken != "secret" || saved.Env != "sandbox" {
+				t.Errorf("saved = %+v, want the secret token in sandbox", saved)
+			}
+			if saved.Liabilities != liabilities {
+				t.Errorf("saved liabilities = %t, want %t", saved.Liabilities, liabilities)
+			}
+			if saved.LinkedAt.IsZero() {
+				t.Error("the saved item has no link time")
+			}
+			if len(reported) == 0 {
+				t.Error("Link reported no progress")
+			}
+		})
+	}
+}
+
+func TestLinkPreservesAnItemAddedDuringTheBrowserWait(t *testing.T) {
 	cfg := tempConfig(t, "sandbox")
-	link := func(context.Context, plaid.Config, int) (plaid.LinkResult, error) {
+	first := item("item-first", "First Bank", "sandbox")
+	seedTokens(t, cfg.TokensPath, first)
+	concurrent := item("item-concurrent", "Concurrent Bank", "sandbox")
+	link := func(context.Context, plaid.Config, int, bool) (plaid.LinkResult, error) {
+		if err := tokens.Save(cfg.TokensPath, loadTokens(t, cfg.TokensPath).Upsert(concurrent)); err != nil {
+			t.Fatalf("save concurrent Item: %v", err)
+		}
 		return plaid.LinkResult{
-			ItemID: "item-new", AccessToken: "secret", Institution: "TD Canada Trust",
+			ItemID: "item-new", AccessToken: "item-new-token", Institution: "New Bank",
 		}, nil
 	}
-	var reported []string
 
-	linked, err := newWith(cfg, link, nil, nil).Link(context.Background(), 730,
-		func(text string) { reported = append(reported, text) })
-	if err != nil {
+	if _, err := newWith(cfg, link, nil, nil, nil, nil).Link(context.Background(), 730, true, nil); err != nil {
 		t.Fatalf("Link: %v", err)
 	}
-
-	if linked.ItemID != "item-new" || linked.Institution != "TD Canada Trust" {
-		t.Errorf("linked = %+v, want item-new at TD Canada Trust", linked)
-	}
-	saved, found := loadTokens(t, cfg.TokensPath).Find("item-new")
-	if !found {
-		t.Fatal("the token file has no item-new after Link returned")
-	}
-	if saved.AccessToken != "secret" || saved.Env != "sandbox" {
-		t.Errorf("saved = %+v, want the secret token in sandbox", saved)
-	}
-	if saved.LinkedAt.IsZero() {
-		t.Error("the saved item has no link time")
-	}
-	if len(reported) == 0 {
-		t.Error("Link reported no progress")
+	saved := loadTokens(t, cfg.TokensPath)
+	for _, itemID := range []string{first.ItemID, concurrent.ItemID, "item-new"} {
+		if _, found := saved.Find(itemID); !found {
+			t.Errorf("token file lost %s", itemID)
+		}
 	}
 }
 
@@ -72,7 +108,7 @@ func TestLinkRefusesAnUnreadableTokenFileBeforeTheBrowserStep(t *testing.T) {
 		t.Fatalf("write %s: %v", cfg.TokensPath, err)
 	}
 
-	_, err := newWith(cfg, linkNever(t), nil, nil).Link(context.Background(), 730, nil)
+	_, err := newWith(cfg, linkNever(t), nil, nil, nil, nil).Link(context.Background(), 730, true, nil)
 	if err == nil {
 		t.Fatal("error = nil, want the unreadable token file")
 	}
@@ -87,14 +123,14 @@ func TestLinkRefusesAnUnreadableTokenFileBeforeTheBrowserStep(t *testing.T) {
 func TestLinkReportsTheSignInURLBeforeTheBrowserStep(t *testing.T) {
 	cfg := tempConfig(t, "sandbox")
 	var reported []string
-	link := func(_ context.Context, _ plaid.Config, _ int) (plaid.LinkResult, error) {
+	link := func(_ context.Context, _ plaid.Config, _ int, _ bool) (plaid.LinkResult, error) {
 		if len(reported) != 1 {
 			t.Errorf("reported %q before the browser step, want the sign-in line only", reported)
 		}
 		return plaid.LinkResult{ItemID: "item-new", AccessToken: "secret"}, nil
 	}
 
-	if _, err := newWith(cfg, link, nil, nil).Link(context.Background(), 730,
+	if _, err := newWith(cfg, link, nil, nil, nil, nil).Link(context.Background(), 730, true,
 		func(text string) { reported = append(reported, text) }); err != nil {
 		t.Fatalf("Link: %v", err)
 	}
@@ -114,7 +150,7 @@ func TestLinkValidatesBeforeLoadingTokens(t *testing.T) {
 		TokensPath: blockedPath(t),
 	}
 
-	_, err := newWith(cfg, linkNever(t), nil, nil).Link(context.Background(), 90, nil)
+	_, err := newWith(cfg, linkNever(t), nil, nil, nil, nil).Link(context.Background(), 90, true, nil)
 	if err == nil {
 		t.Fatal("error = nil, want the Plaid validation failure")
 	}
@@ -131,7 +167,7 @@ func TestLinkRejectsOutOfRangeBeforeLoadingTokens(t *testing.T) {
 	}
 
 	for _, days := range []int{MinLinkDays - 1, MaxLinkDays + 1} {
-		_, err := newWith(cfg, linkNever(t), nil, nil).Link(context.Background(), days, nil)
+		_, err := newWith(cfg, linkNever(t), nil, nil, nil, nil).Link(context.Background(), days, true, nil)
 		if err == nil {
 			t.Fatalf("Link(%d) error = nil, want the day range failure", days)
 		}
@@ -147,7 +183,7 @@ func TestLinkDoesNotOpenDuckDB(t *testing.T) {
 	cfg := tempConfig(t, "sandbox")
 	cfg.DBPath = blockedPath(t)
 
-	if _, err := newWith(cfg, linkOK, nil, nil).Link(context.Background(), 730, nil); err != nil {
+	if _, err := newWith(cfg, linkOK, nil, nil, nil, nil).Link(context.Background(), 730, true, nil); err != nil {
 		t.Fatalf("Link: %v", err)
 	}
 	if _, found := loadTokens(t, cfg.TokensPath).Find("item-new"); !found {
@@ -160,7 +196,7 @@ func TestLinkDoesNotOpenDuckDB(t *testing.T) {
 const secretToken = "access-token-DO-NOT-LEAK"
 
 // linkSecret is a browser step that returns the secret token.
-func linkSecret(context.Context, plaid.Config, int) (plaid.LinkResult, error) {
+func linkSecret(context.Context, plaid.Config, int, bool) (plaid.LinkResult, error) {
 	return plaid.LinkResult{
 		ItemID: "item-new", AccessToken: secretToken, Institution: "TD Canada Trust",
 	}, nil
@@ -197,7 +233,7 @@ func closedDirConfig(t *testing.T) (Config, func()) {
 func TestLinkKeepsTheTokenWhenTheSaveFails(t *testing.T) {
 	cfg, open := closedDirConfig(t)
 
-	_, err := newWith(cfg, linkSecret, nil, nil).Link(context.Background(), 730, nil)
+	_, err := newWith(cfg, linkSecret, nil, nil, nil, nil).Link(context.Background(), 730, true, nil)
 	if err == nil {
 		t.Fatal("error = nil, want the failed save")
 	}
@@ -213,7 +249,7 @@ func TestLinkKeepsTheTokenWhenTheSaveFails(t *testing.T) {
 	}
 
 	open()
-	linked, err := newWith(cfg, linkNever(t), nil, nil).CompleteLinkSave(notSaved.Pending)
+	linked, err := newWith(cfg, linkNever(t), nil, nil, nil, nil).CompleteLinkSave(notSaved.Pending)
 	if err != nil {
 		t.Fatalf("CompleteLinkSave: %v", err)
 	}
@@ -238,7 +274,7 @@ func TestLinkKeepsTheTokenWhenTheSaveFails(t *testing.T) {
 func TestCompleteLinkSaveKeepsWhatTheFileHoldsNow(t *testing.T) {
 	cfg, open := closedDirConfig(t)
 
-	_, err := newWith(cfg, linkSecret, nil, nil).Link(context.Background(), 730, nil)
+	_, err := newWith(cfg, linkSecret, nil, nil, nil, nil).Link(context.Background(), 730, true, nil)
 	var notSaved *TokenNotSavedError
 	if !errors.As(err, &notSaved) {
 		t.Fatalf("error = %v (%T), want a *TokenNotSavedError", err, err)
@@ -248,7 +284,7 @@ func TestCompleteLinkSaveKeepsWhatTheFileHoldsNow(t *testing.T) {
 	open()
 	seedTokens(t, cfg.TokensPath, item("item-other", "Amex", "sandbox"))
 
-	if _, err := newWith(cfg, linkNever(t), nil, nil).CompleteLinkSave(notSaved.Pending); err != nil {
+	if _, err := newWith(cfg, linkNever(t), nil, nil, nil, nil).CompleteLinkSave(notSaved.Pending); err != nil {
 		t.Fatalf("CompleteLinkSave: %v", err)
 	}
 
@@ -272,13 +308,13 @@ func TestCompleteLinkSaveKeepsWhatTheFileHoldsNow(t *testing.T) {
 func TestCompleteLinkSaveReportsTheTokenAsStillUnsaved(t *testing.T) {
 	cfg, _ := closedDirConfig(t)
 
-	_, err := newWith(cfg, linkSecret, nil, nil).Link(context.Background(), 730, nil)
+	_, err := newWith(cfg, linkSecret, nil, nil, nil, nil).Link(context.Background(), 730, true, nil)
 	var notSaved *TokenNotSavedError
 	if !errors.As(err, &notSaved) {
 		t.Fatalf("error = %v (%T), want a *TokenNotSavedError", err, err)
 	}
 
-	_, err = newWith(cfg, linkNever(t), nil, nil).CompleteLinkSave(notSaved.Pending)
+	_, err = newWith(cfg, linkNever(t), nil, nil, nil, nil).CompleteLinkSave(notSaved.Pending)
 	var again *TokenNotSavedError
 	if !errors.As(err, &again) {
 		t.Fatalf("second error = %v (%T), want a *TokenNotSavedError", err, err)
@@ -292,27 +328,56 @@ func TestCompleteLinkSaveReportsTheTokenAsStillUnsaved(t *testing.T) {
 func TestTheUnsavedTokenIsNeverWritten(t *testing.T) {
 	cfg, _ := closedDirConfig(t)
 
-	_, err := newWith(cfg, linkSecret, nil, nil).Link(context.Background(), 730, nil)
+	_, err := newWith(cfg, linkSecret, nil, nil, nil, nil).Link(context.Background(), 730, true, nil)
 	var notSaved *TokenNotSavedError
 	if !errors.As(err, &notSaved) {
 		t.Fatalf("error = %v (%T), want a *TokenNotSavedError", err, err)
 	}
 
-	written := []string{
+	const (
+		pendingPath = "pending-path-DO-NOT-LEAK"
+		savedToken  = "saved-access-token-DO-NOT-LEAK"
+		savedItem   = "saved-item-DO-NOT-LEAK"
+		itemEnv     = "item-env-DO-NOT-LEAK"
+	)
+	notSaved.Pending.path = pendingPath
+	notSaved.Pending.file = tokens.File{Items: []tokens.Item{{
+		ItemID: savedItem, AccessToken: savedToken,
+	}}}
+	notSaved.Pending.item.Env = itemEnv
+
+	pendingFormats := []string{"%v", "%s", "%+v", "%#v", "%q"}
+	var written []string
+	for _, format := range pendingFormats {
+		text := fmt.Sprintf(format, notSaved.Pending)
+		written = append(written, text)
+		if !strings.Contains(text, "item-new") || !strings.Contains(text, "TD Canada Trust") {
+			t.Errorf("format %q printed %q, want the item id and institution", format, text)
+		}
+	}
+
+	errorFormats := []string{"%v", "%s", "%+v", "%#v", "%q"}
+	for _, format := range errorFormats {
+		written = append(written, fmt.Sprintf(format, notSaved))
+	}
+	written = append(written,
 		err.Error(),
 		notSaved.Error(),
-		fmt.Sprintf("%v", err),
-		fmt.Sprintf("%s", err),
-		fmt.Sprintf("%v", notSaved.Pending),
-		fmt.Sprintf("%s", notSaved.Pending),
-		fmt.Sprintf("%+v", notSaved.Pending),
 		notSaved.Pending.String(),
-		fmt.Sprintf("%v", []PendingSave{notSaved.Pending}),
-		fmt.Sprintf("%v", struct{ P PendingSave }{notSaved.Pending}),
-	}
+		fmt.Sprintf("%#v", []PendingSave{notSaved.Pending}),
+		fmt.Sprintf("%+v", struct{ P PendingSave }{notSaved.Pending}),
+		fmt.Sprintf("%q", []PendingSave{notSaved.Pending}),
+		fmt.Sprintf("%#v", []error{notSaved}),
+		fmt.Sprintf("%+v", struct{ E error }{notSaved}),
+		fmt.Sprintf("%q", []error{notSaved}),
+	)
+
+	secrets := []string{secretToken, pendingPath, savedToken, savedItem, itemEnv}
 	for _, text := range written {
-		if strings.Contains(text, secretToken) {
-			t.Errorf("the access token appears in %q", text)
+		for _, secret := range secrets {
+			if strings.Contains(text, secret) {
+				t.Errorf("secret %q appears in %q", secret, text)
+			}
 		}
 	}
 	if !strings.Contains(notSaved.Pending.String(), "item-new") {
@@ -338,7 +403,7 @@ func TestTokenNotSavedErrorKeepsItsCause(t *testing.T) {
 func TestCompleteLinkSaveRefusesAnEmptyHandle(t *testing.T) {
 	cfg := tempConfig(t, "sandbox")
 
-	_, err := newWith(cfg, linkNever(t), nil, nil).CompleteLinkSave(PendingSave{})
+	_, err := newWith(cfg, linkNever(t), nil, nil, nil, nil).CompleteLinkSave(PendingSave{})
 	if err == nil {
 		t.Fatal("error = nil, want a refusal of the empty handle")
 	}

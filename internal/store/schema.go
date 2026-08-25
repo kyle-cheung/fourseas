@@ -28,7 +28,7 @@ func (e *VersionError) Error() string {
 }
 
 // tables is every table the schema owns, in the order they are dropped.
-var tables = []string{"transactions", "fx_rates", "accounts", "institutions", "sync_state", "schema_version"}
+var tables = []string{"transactions", "fx_rates", "account_liabilities", "accounts", "institutions", "sync_state", "schema_version"}
 
 // ddl builds the schema. Every money column is DECIMAL, never DOUBLE, because
 // a float sum of money is wrong.
@@ -93,6 +93,21 @@ CREATE TABLE IF NOT EXISTS fx_rates (
 	rate          DECIMAL(18,8) NOT NULL,
 	PRIMARY KEY (date, currency, base_currency)
 );
+
+CREATE TABLE IF NOT EXISTS account_liabilities (
+	provider            VARCHAR NOT NULL,
+	item_id             VARCHAR NOT NULL,
+	account_id          VARCHAR NOT NULL,
+	payment_due_date    DATE,
+	last_payment_date   DATE,
+	last_payment_amount     DECIMAL(18,4),
+	last_statement_balance DECIMAL(18,4),
+	fetched_at              TIMESTAMP NOT NULL,
+	PRIMARY KEY (provider, account_id)
+);
+
+ALTER TABLE account_liabilities
+	ADD COLUMN IF NOT EXISTS last_statement_balance DECIMAL(18,4);
 
 CREATE TABLE IF NOT EXISTS sync_state (
 	provider       VARCHAR NOT NULL,

@@ -125,6 +125,17 @@ func TestUnlinkRemovesTheItemAtPlaidThenLocally(t *testing.T) {
 	if tokensRemoved != "amex-token" {
 		t.Errorf("removed the token %q at Plaid, want amex-token", tokensRemoved)
 	}
+	for _, want := range []string{
+		"Removed the item at Plaid. Active subscriptions for this Item end.",
+		"Unlinked American Express:",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output does not hold %q:\n%s", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "no longer billed") {
+		t.Errorf("output contains an unqualified billing claim:\n%s", out.String())
+	}
 	stored := storedItems(t, cfg)
 	if stored["item-amex"] != (store.Removed{}) {
 		t.Errorf("item-amex still holds %+v, want nothing", stored["item-amex"])

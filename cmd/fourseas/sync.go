@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -44,6 +45,7 @@ func runSyncWith(ctx context.Context, cfg settings, options []string, source fxS
 	if err != nil {
 		return err
 	}
+	printSyncConsentHelp(out, results)
 
 	attempted, failed := 0, 0
 	for _, result := range results {
@@ -69,6 +71,17 @@ func runSyncWith(ctx context.Context, cfg settings, options []string, source fxS
 		return err
 	}
 	return printNewest(ctx, db, rowsToShow)
+}
+
+// printSyncConsentHelp explains how to grant the consent required by a live
+// liability error. One command is enough when more than one item needs it.
+func printSyncConsentHelp(out io.Writer, results []app.SyncResult) {
+	for _, result := range results {
+		if errors.Is(result.Err, app.ErrAdditionalConsentRequired) {
+			fmt.Fprintln(out, "Statement data needs consent. Run `fourseas accounts liabilities enable <account-id>`.")
+			return
+		}
+	}
 }
 
 func parseSyncOptions(options []string) (bool, error) {

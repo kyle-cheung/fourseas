@@ -2,11 +2,15 @@ package plaid
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -164,10 +168,10 @@ func TestWaitForOutcomeReportsAnUnfinishedLink(t *testing.T) {
 // open until the shutdown deadline and delays every caller behind it.
 func TestExitHandlerDropsADuplicatePost(t *testing.T) {
 	failures := make(chan error, 1)
-	handler := exitHandler(failures)
+	handler := exitHandler("test-session-nonce", failures)
 
 	post := func() {
-		body := strings.NewReader(`{"error_code":"","error_message":""}`)
+		body := strings.NewReader(`{"nonce":"test-session-nonce","error_code":"","error_message":""}`)
 		req := httptest.NewRequest(http.MethodPost, "/exit", body)
 		handler(httptest.NewRecorder(), req)
 	}
@@ -189,6 +193,75 @@ func TestExitHandlerDropsADuplicatePost(t *testing.T) {
 	case <-failures:
 	default:
 		t.Error("the first post recorded no failure")
+	}
+}
+
+func TestExitHandlerAcceptsOnlyOneExactNonceBoundObject(t *testing.T) {
+	const nonce = "test-session-nonce"
+	tests := []struct {
+		name       string
+		method     string
+		body       string
+		wantStatus int
+		wantReport bool
+	}{
+		{name: "trusted body", method: http.MethodPost, body: `{"nonce":"test-session-nonce","error_code":"TEST","error_message":"closed"}`, wantStatus: http.StatusOK, wantReport: true},
+		{name: "get", method: http.MethodGet, wantStatus: http.StatusMethodNotAllowed},
+		{name: "missing nonce", method: http.MethodPost, body: `{"error_code":"TEST","error_message":"closed"}`, wantStatus: http.StatusBadRequest},
+		{name: "wrong nonce", method: http.MethodPost, body: `{"nonce":"wrong","error_code":"TEST","error_message":"closed"}`, wantStatus: http.StatusBadRequest},
+		{name: "missing error code", method: http.MethodPost, body: `{"nonce":"test-session-nonce","error_message":"closed"}`, wantStatus: http.StatusBadRequest},
+		{name: "missing error message", method: http.MethodPost, body: `{"nonce":"test-session-nonce","error_code":"TEST"}`, wantStatus: http.StatusBadRequest},
+		{name: "unknown field", method: http.MethodPost, body: `{"nonce":"test-session-nonce","error_code":"TEST","error_message":"closed","public_token":"no"}`, wantStatus: http.StatusBadRequest},
+		{name: "trailing value", method: http.MethodPost, body: `{"nonce":"test-session-nonce","error_code":"TEST","error_message":"closed"} {}`, wantStatus: http.StatusBadRequest},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			failures := make(chan error, 1)
+			handler := exitHandler(nonce, failures)
+			rec := httptest.NewRecorder()
+			handler(rec, httptest.NewRequest(tt.method, "/exit", strings.NewReader(tt.body)))
+			if rec.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d", rec.Code, tt.wantStatus)
+			}
+			if tt.method != http.MethodPost && rec.Header().Get("Allow") != http.MethodPost {
+				t.Errorf("Allow = %q, want POST", rec.Header().Get("Allow"))
+			}
+			select {
+			case <-failures:
+				if !tt.wantReport {
+					t.Error("invalid exit request reported a failure")
+				}
+			default:
+				if tt.wantReport {
+					t.Error("valid exit request reported no failure")
+				}
+			}
+		})
+	}
+}
+
+func TestExitHandlerSanitizesTerminalControlsAndCapsFields(t *testing.T) {
+	failures := make(chan error, 1)
+	handler := exitHandler("test-session-nonce", failures)
+	message := "before\n\x1b[31mred\x1b[0m\rafter" + strings.Repeat("x", 1000)
+	encodedMessage, marshalErr := json.Marshal(message)
+	if marshalErr != nil {
+		t.Fatalf("encode message: %v", marshalErr)
+	}
+	body := fmt.Sprintf(`{"nonce":"test-session-nonce","error_code":"BAD\u001b[2J\nCODE","error_message":%s}`,
+		encodedMessage)
+	rec := httptest.NewRecorder()
+	handler(rec, httptest.NewRequest(http.MethodPost, "/exit", strings.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	err := <-failures
+	if strings.ContainsAny(err.Error(), "\x1b\n\r") {
+		t.Errorf("returned error contains terminal controls: %q", err)
+	}
+	if len(err.Error()) > 2*maxLinkErrorFieldLength+40 {
+		t.Errorf("returned error has %d bytes, want a bounded error", len(err.Error()))
 	}
 }
 
@@ -217,10 +290,11 @@ func TestReportDropsASecondFailure(t *testing.T) {
 // The real exchange handler, against a Plaid backend that refuses the
 // exchange. A repeated post must report once and never wedge.
 func TestExchangeHandlerReportsAndDropsADuplicate(t *testing.T) {
+	const publicToken = "public-sandbox-1"
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
-		w.Write([]byte(`{"error_code":"INVALID_PUBLIC_TOKEN","error_type":"INVALID_INPUT","error_message":"bad token"}`))
+		w.Write([]byte(`{"error_code":"INVALID_PUBLIC_TOKEN","error_type":"INVALID_INPUT","error_message":"bad public-sandbox-1"}`))
 	}))
 	defer backend.Close()
 
@@ -233,7 +307,7 @@ func TestExchangeHandlerReportsAndDropsADuplicate(t *testing.T) {
 	handler := exchangeHandler(client, results, failures)
 
 	post := func() *httptest.ResponseRecorder {
-		body := strings.NewReader(`{"public_token":"public-sandbox-1"}`)
+		body := strings.NewReader(`{"public_token":"` + publicToken + `"}`)
 		req := httptest.NewRequest(http.MethodPost, "/exchange", body)
 		rec := httptest.NewRecorder()
 		handler(rec, req)
@@ -258,10 +332,65 @@ func TestExchangeHandlerReportsAndDropsADuplicate(t *testing.T) {
 		if !strings.Contains(err.Error(), "exchange public token") {
 			t.Errorf("failure = %q, want it to name the failed exchange", err)
 		}
+		if strings.Contains(err.Error(), publicToken) {
+			t.Error("failure contains the public token")
+		}
 	default:
 		t.Error("the first post recorded no failure")
 	}
 	drained(t, results)
+}
+
+func TestExchangeHandlerAcceptsOnlyOneExactObject(t *testing.T) {
+	var backendCalls atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"access_token":"access-sandbox-1","item_id":"item-1","request_id":"r1"}`))
+	}))
+	defer backend.Close()
+
+	cfg := plaidsdk.NewConfiguration()
+	cfg.Servers = plaidsdk.ServerConfigurations{{URL: backend.URL}}
+	client := plaidsdk.NewAPIClient(cfg)
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus int
+		wantResult bool
+	}{
+		{name: "valid public token", body: `{"public_token":"public-sandbox-1"}`, wantStatus: http.StatusOK, wantResult: true},
+		{name: "unknown field", body: `{"public_token":"public-sandbox-1","unexpected":true}`, wantStatus: http.StatusBadRequest},
+		{name: "trailing value", body: `{"public_token":"public-sandbox-1"} {}`, wantStatus: http.StatusBadRequest},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before := backendCalls.Load()
+			results := make(chan LinkResult, 1)
+			failures := make(chan error, 1)
+			rec := httptest.NewRecorder()
+			exchangeHandler(client, results, failures)(rec,
+				httptest.NewRequest(http.MethodPost, "/exchange", strings.NewReader(tt.body)))
+
+			if rec.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d", rec.Code, tt.wantStatus)
+			}
+			select {
+			case <-results:
+				if !tt.wantResult {
+					t.Error("invalid exchange delivered a result")
+				}
+			default:
+				if tt.wantResult {
+					t.Error("valid exchange delivered no result")
+				}
+			}
+			if !tt.wantResult && backendCalls.Load() != before {
+				t.Error("invalid exchange called Plaid")
+			}
+		})
+	}
 }
 
 // The grace expired with a handler still open, so the token gets one more
@@ -389,5 +518,256 @@ func TestDeliverDropsASecondResult(t *testing.T) {
 	got := <-results
 	if got.ItemID != "item-e" {
 		t.Errorf("item = %q, want the first result item-e to be kept", got.ItemID)
+	}
+}
+
+func TestNewUpdateNonceUsesThirtyTwoRandomBytes(t *testing.T) {
+	first, err := newUpdateNonce()
+	if err != nil {
+		t.Fatalf("newUpdateNonce: %v", err)
+	}
+	second, err := newUpdateNonce()
+	if err != nil {
+		t.Fatalf("newUpdateNonce: %v", err)
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(first)
+	if err != nil {
+		t.Fatalf("decode nonce: %v", err)
+	}
+	if len(decoded) != 32 {
+		t.Errorf("decoded nonce has %d bytes, want 32", len(decoded))
+	}
+	if first == second {
+		t.Error("two update sessions received the same nonce")
+	}
+}
+
+func TestUpdateCompleteHandlerAcceptsOnlyTheSessionNonce(t *testing.T) {
+	const nonce = "test-session-nonce"
+	tests := []struct {
+		name       string
+		method     string
+		body       string
+		wantStatus int
+		wantResult bool
+	}{
+		{name: "correct nonce", method: http.MethodPost, body: `{"nonce":"test-session-nonce"}`, wantStatus: http.StatusOK, wantResult: true},
+		{name: "get", method: http.MethodGet, wantStatus: http.StatusMethodNotAllowed},
+		{name: "missing nonce", method: http.MethodPost, body: `{}`, wantStatus: http.StatusBadRequest},
+		{name: "wrong nonce", method: http.MethodPost, body: `{"nonce":"wrong"}`, wantStatus: http.StatusBadRequest},
+		{name: "public token field", method: http.MethodPost, body: `{"nonce":"test-session-nonce","public_token":"must-not-be-accepted"}`, wantStatus: http.StatusBadRequest},
+		{name: "trailing value", method: http.MethodPost, body: `{"nonce":"test-session-nonce"} {}`, wantStatus: http.StatusBadRequest},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			results := make(chan LinkResult, 1)
+			handler := updateCompleteHandler(nonce, results)
+			req := httptest.NewRequest(tt.method, "/update-complete", strings.NewReader(tt.body))
+			rec := httptest.NewRecorder()
+
+			handler(rec, req)
+
+			if rec.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d", rec.Code, tt.wantStatus)
+			}
+			if tt.method != http.MethodPost && rec.Header().Get("Allow") != http.MethodPost {
+				t.Errorf("Allow = %q, want POST", rec.Header().Get("Allow"))
+			}
+			select {
+			case got := <-results:
+				if !tt.wantResult {
+					t.Error("invalid completion delivered a result")
+				}
+				if got != (LinkResult{}) {
+					t.Errorf("result = %+v, want an empty update result", got)
+				}
+			default:
+				if tt.wantResult {
+					t.Error("valid completion delivered no result")
+				}
+			}
+		})
+	}
+}
+
+func TestLinkMuxRegistersOnlyTheCompletionRouteForItsMode(t *testing.T) {
+	client := plaidsdk.NewAPIClient(plaidsdk.NewConfiguration())
+	tests := []struct {
+		name          string
+		options       linkRequest
+		path          string
+		wantStatus    int
+		forbiddenPath string
+		forbiddenBody string
+	}{
+		{
+			name:          "new mode",
+			path:          "/exchange",
+			wantStatus:    http.StatusBadRequest,
+			forbiddenPath: "/update-complete",
+			forbiddenBody: `{"nonce":"test-session-nonce"}`,
+		},
+		{
+			name:          "update mode",
+			options:       linkRequest{accessToken: "test-existing-access-token"},
+			path:          "/update-complete",
+			wantStatus:    http.StatusOK,
+			forbiddenPath: "/exchange",
+			forbiddenBody: `{"public_token":"must-not-be-exchanged"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			results := make(chan LinkResult, 1)
+			failures := make(chan error, 1)
+			cfg := Config{LinkPort: 8080}
+			mux := linkMux(client, results, failures, []byte("link page"), cfg, tt.options, "test-session-nonce")
+
+			rec := httptest.NewRecorder()
+			body := strings.NewReader(`{"nonce":"test-session-nonce"}`)
+			if tt.path == "/exchange" {
+				body = strings.NewReader(`{}`)
+			}
+			mux.ServeHTTP(rec, trustedCallbackRequest(http.MethodPost, tt.path, body))
+			if rec.Code != tt.wantStatus {
+				t.Errorf("registered route status = %d, want %d", rec.Code, tt.wantStatus)
+			}
+
+			forbidden := httptest.NewRecorder()
+			mux.ServeHTTP(forbidden, trustedCallbackRequest(http.MethodPost, tt.forbiddenPath, strings.NewReader(tt.forbiddenBody)))
+			if forbidden.Code != http.StatusNotFound {
+				t.Errorf("forbidden route status = %d, want 404", forbidden.Code)
+			}
+			select {
+			case got := <-results:
+				if tt.options.accessToken == "" {
+					t.Errorf("new mode delivered unexpected result %+v", got)
+				}
+			default:
+			}
+		})
+	}
+}
+
+func trustedCallbackRequest(method, path string, body *strings.Reader) *http.Request {
+	req := httptest.NewRequest(method, path, body)
+	req.Host = "localhost:8080"
+	req.Header.Set("Origin", "http://localhost:8080")
+	req.Header.Set("Content-Type", "application/json")
+	return req
+}
+
+func TestCallbackRoutesRejectUntrustedBrowserRequests(t *testing.T) {
+	client := plaidsdk.NewAPIClient(plaidsdk.NewConfiguration())
+	tests := []struct {
+		name       string
+		options    linkRequest
+		path       string
+		body       string
+		mutate     func(*http.Request)
+		wantStatus int
+	}{
+		{name: "update untrusted host", options: linkRequest{accessToken: "access"}, path: "/update-complete", body: `{"nonce":"test-session-nonce"}`, mutate: func(r *http.Request) { r.Host = "attacker.test" }, wantStatus: http.StatusBadRequest},
+		{name: "update missing origin", options: linkRequest{accessToken: "access"}, path: "/update-complete", body: `{"nonce":"test-session-nonce"}`, mutate: func(r *http.Request) { r.Header.Del("Origin") }, wantStatus: http.StatusForbidden},
+		{name: "update wrong origin", options: linkRequest{accessToken: "access"}, path: "/update-complete", body: `{"nonce":"test-session-nonce"}`, mutate: func(r *http.Request) { r.Header.Set("Origin", "https://attacker.test") }, wantStatus: http.StatusForbidden},
+		{name: "update get", options: linkRequest{accessToken: "access"}, path: "/update-complete", body: `{"nonce":"test-session-nonce"}`, mutate: func(r *http.Request) { r.Method = http.MethodGet }, wantStatus: http.StatusMethodNotAllowed},
+		{name: "update missing content type", options: linkRequest{accessToken: "access"}, path: "/update-complete", body: `{"nonce":"test-session-nonce"}`, mutate: func(r *http.Request) { r.Header.Del("Content-Type") }, wantStatus: http.StatusUnsupportedMediaType},
+		{name: "update wrong content type", options: linkRequest{accessToken: "access"}, path: "/update-complete", body: `{"nonce":"test-session-nonce"}`, mutate: func(r *http.Request) { r.Header.Set("Content-Type", "text/plain") }, wantStatus: http.StatusUnsupportedMediaType},
+		{name: "update oversized body", options: linkRequest{accessToken: "access"}, path: "/update-complete", body: `{"nonce":"test-session-nonce","padding":"` + strings.Repeat("x", 5000) + `"}`, mutate: func(*http.Request) {}, wantStatus: http.StatusRequestEntityTooLarge},
+		{name: "exit untrusted host", path: "/exit", body: `{"nonce":"test-session-nonce","error_code":"","error_message":""}`, mutate: func(r *http.Request) { r.Host = "attacker.test" }, wantStatus: http.StatusBadRequest},
+		{name: "exit missing origin", path: "/exit", body: `{"nonce":"test-session-nonce","error_code":"","error_message":""}`, mutate: func(r *http.Request) { r.Header.Del("Origin") }, wantStatus: http.StatusForbidden},
+		{name: "exit wrong origin", path: "/exit", body: `{"nonce":"test-session-nonce","error_code":"","error_message":""}`, mutate: func(r *http.Request) { r.Header.Set("Origin", "https://attacker.test") }, wantStatus: http.StatusForbidden},
+		{name: "exit get", path: "/exit", body: `{"nonce":"test-session-nonce","error_code":"","error_message":""}`, mutate: func(r *http.Request) { r.Method = http.MethodGet }, wantStatus: http.StatusMethodNotAllowed},
+		{name: "exit wrong content type", path: "/exit", body: `{"nonce":"test-session-nonce","error_code":"","error_message":""}`, mutate: func(r *http.Request) { r.Header.Set("Content-Type", "text/plain") }, wantStatus: http.StatusUnsupportedMediaType},
+		{name: "exit missing content type", path: "/exit", body: `{"nonce":"test-session-nonce","error_code":"","error_message":""}`, mutate: func(r *http.Request) { r.Header.Del("Content-Type") }, wantStatus: http.StatusUnsupportedMediaType},
+		{name: "exit oversized body", path: "/exit", body: `{"nonce":"test-session-nonce","error_code":"","error_message":"` + strings.Repeat("x", 5000) + `"}`, mutate: func(*http.Request) {}, wantStatus: http.StatusRequestEntityTooLarge},
+		{name: "exchange untrusted host", path: "/exchange", body: `{"public_token":"public-test"}`, mutate: func(r *http.Request) { r.Host = "attacker.test" }, wantStatus: http.StatusBadRequest},
+		{name: "exchange wrong origin", path: "/exchange", body: `{"public_token":"public-test"}`, mutate: func(r *http.Request) { r.Header.Set("Origin", "https://attacker.test") }, wantStatus: http.StatusForbidden},
+		{name: "exchange wrong content type", path: "/exchange", body: `{"public_token":"public-test"}`, mutate: func(r *http.Request) { r.Header.Set("Content-Type", "text/plain") }, wantStatus: http.StatusUnsupportedMediaType},
+		{name: "exchange oversized body", path: "/exchange", body: `{"public_token":"` + strings.Repeat("x", 5000) + `"}`, mutate: func(*http.Request) {}, wantStatus: http.StatusRequestEntityTooLarge},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			results := make(chan LinkResult, 1)
+			failures := make(chan error, 1)
+			mux := linkMux(client, results, failures, nil, Config{LinkPort: 8080}, tt.options, "test-session-nonce")
+			req := trustedCallbackRequest(http.MethodPost, tt.path, strings.NewReader(tt.body))
+			tt.mutate(req)
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d", rec.Code, tt.wantStatus)
+			}
+			select {
+			case result := <-results:
+				t.Errorf("untrusted request delivered result %+v", result)
+			default:
+			}
+			select {
+			case err := <-failures:
+				t.Errorf("untrusted request delivered failure %v", err)
+			default:
+			}
+		})
+	}
+}
+
+func TestLinkPageRejectsAnUntrustedHost(t *testing.T) {
+	mux := linkMux(plaidsdk.NewAPIClient(plaidsdk.NewConfiguration()), make(chan LinkResult, 1),
+		make(chan error, 1), []byte("link page"), Config{LinkPort: 8080}, linkRequest{}, "nonce")
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Host = "attacker.test"
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestUpdateLinkPagePostsOnlyTheNonce(t *testing.T) {
+	page, err := renderLinkPage(linkPageData{
+		Token:  "test-link-token",
+		Nonce:  "test-session-nonce",
+		Update: true,
+	})
+	if err != nil {
+		t.Fatalf("renderLinkPage: %v", err)
+	}
+	body := string(page)
+	for _, want := range []string{"/update-complete", "JSON.stringify({ nonce:", "test-session-nonce"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("update page does not contain %q", want)
+		}
+	}
+	for _, forbidden := range []string{"public_token", "publicToken", "/exchange"} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("update page contains forbidden text %q", forbidden)
+		}
+	}
+}
+
+func TestNewLinkPageStillPostsOnlyThePublicTokenForExchange(t *testing.T) {
+	page, err := renderLinkPage(linkPageData{Token: "test-link-token", Nonce: "test-session-nonce"})
+	if err != nil {
+		t.Fatalf("renderLinkPage: %v", err)
+	}
+	body := string(page)
+	for _, want := range []string{"/exchange", "publicToken", "public_token: publicToken"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("new-link page does not contain %q", want)
+		}
+	}
+	for _, want := range []string{"/exit", "nonce: \"test-session-nonce\""} {
+		if !strings.Contains(body, want) {
+			t.Errorf("new-link page does not contain exit protection %q", want)
+		}
+	}
+	for _, forbidden := range []string{"/update-complete"} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("new-link page contains update text %q", forbidden)
+		}
 	}
 }
