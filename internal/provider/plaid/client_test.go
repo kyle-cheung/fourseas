@@ -10,16 +10,26 @@ import (
 
 func TestCodedErrorClassifiesActionableCodes(t *testing.T) {
 	tests := []struct {
-		code            string
-		restart, gone   bool
-		productNotReady bool
+		code                      string
+		restart, gone             bool
+		productNotReady           bool
+		noLiabilityAccounts       bool
+		additionalConsentRequired bool
 	}{
-		{mutationDuringPagination, true, false, false},
-		{itemNotFound, false, true, false},
-		{"ITEM_LOGIN_REQUIRED", false, false, false},
+		{code: mutationDuringPagination, restart: true},
+		{code: itemNotFound, gone: true},
+		{code: "ITEM_LOGIN_REQUIRED"},
 		{
-			code:            "PRODUCT_NOT_READY",
+			code:            productNotReady,
 			productNotReady: true,
+		},
+		{
+			code:                noLiabilityAccounts,
+			noLiabilityAccounts: true,
+		},
+		{
+			code:                      additionalConsentRequired,
+			additionalConsentRequired: true,
 		},
 	}
 
@@ -33,6 +43,12 @@ func TestCodedErrorClassifiesActionableCodes(t *testing.T) {
 		}
 		if got := errors.Is(err, provider.ErrProductNotReady); got != tt.productNotReady {
 			t.Errorf("code %s: product not ready = %v, want %v", tt.code, got, tt.productNotReady)
+		}
+		if got := errors.Is(err, provider.ErrNoLiabilityAccounts); got != tt.noLiabilityAccounts {
+			t.Errorf("code %s: no liability accounts = %v, want %v", tt.code, got, tt.noLiabilityAccounts)
+		}
+		if got := errors.Is(err, provider.ErrAdditionalConsentRequired); got != tt.additionalConsentRequired {
+			t.Errorf("code %s: additional consent required = %v, want %v", tt.code, got, tt.additionalConsentRequired)
 		}
 		if !strings.Contains(err.Error(), tt.code) {
 			t.Errorf("error = %q, want code %q", err, tt.code)

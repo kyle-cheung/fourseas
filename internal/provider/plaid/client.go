@@ -106,6 +106,14 @@ const itemNotFound = "ITEM_NOT_FOUND"
 // first transaction sync for a newly linked item.
 const productNotReady = "PRODUCT_NOT_READY"
 
+// noLiabilityAccounts is the code Plaid returns when the item has no supported
+// liability accounts.
+const noLiabilityAccounts = "NO_LIABILITY_ACCOUNTS"
+
+// additionalConsentRequired is the code Plaid returns when the user must grant
+// access to liabilities.
+const additionalConsentRequired = "ADDITIONAL_CONSENT_REQUIRED"
+
 // codedError builds the error for one Plaid error body. Codes the caller can act
 // on carry a sentinel, so that acting on them needs no string matching.
 func codedError(op, code, errType, message string) error {
@@ -117,6 +125,10 @@ func codedError(op, code, errType, message string) error {
 		err = fmt.Errorf("%w: %w", provider.ErrItemGone, err)
 	case productNotReady:
 		err = fmt.Errorf("%w: %w", provider.ErrProductNotReady, err)
+	case noLiabilityAccounts:
+		err = fmt.Errorf("%w: %w", provider.ErrNoLiabilityAccounts, err)
+	case additionalConsentRequired:
+		err = fmt.Errorf("%w: %w", provider.ErrAdditionalConsentRequired, err)
 	}
 	return fmt.Errorf("%s: %w", op, err)
 }
