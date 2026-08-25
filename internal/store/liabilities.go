@@ -46,7 +46,7 @@ func (s *Store) ReplaceLiabilities(
 				return fmt.Errorf("look for liability account %s/%s: %w", provider, row.AccountID, err)
 			}
 			if !exists {
-				return fmt.Errorf("account %s does not belong to %s/%s", row.AccountID, provider, itemID)
+				return fmt.Errorf("account %s does not belong to %s", row.AccountID, provider)
 			}
 			_, err := stmt.ExecContext(ctx,
 				provider, itemID, row.AccountID,

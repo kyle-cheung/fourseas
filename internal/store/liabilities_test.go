@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -152,6 +153,12 @@ func TestReplaceLiabilitiesRejectsAccountFromAnotherItemAndRollsBack(t *testing.
 	})
 	if err == nil {
 		t.Fatal("replace liabilities error = nil, want the cross-item account to fail")
+	}
+	if strings.Contains(err.Error(), "item-1") {
+		t.Errorf("replace liabilities error = %q, must not contain the item ID", err)
+	}
+	if !strings.Contains(err.Error(), "plaid") || !strings.Contains(err.Error(), other.AccountID) {
+		t.Errorf("replace liabilities error = %q, want the provider and account ID", err)
 	}
 
 	if got := countRows(t, s, "account_liabilities", "item-1"); got != 1 {
