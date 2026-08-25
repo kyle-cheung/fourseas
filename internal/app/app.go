@@ -88,7 +88,7 @@ type UnlinkData struct {
 	Rows        RowCounts
 }
 
-type linkFunc func(context.Context, plaid.Config, int) (plaid.LinkResult, error)
+type linkFunc func(context.Context, plaid.Config, int, bool) (plaid.LinkResult, error)
 type removeFunc func(context.Context, plaid.Config, string) error
 type sourceFunc func(plaid.Config, string, string, string) (provider.Provider, error)
 type liabilitiesFunc func(context.Context, plaid.Config, string) ([]model.CreditLiability, error)

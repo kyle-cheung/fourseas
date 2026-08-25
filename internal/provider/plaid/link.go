@@ -25,6 +25,14 @@ type LinkResult struct {
 	Institution string
 }
 
+// linkRequest holds the choices for one Link flow. accessToken is reserved for
+// an update flow; a new link leaves it empty.
+type linkRequest struct {
+	days        int
+	liabilities bool
+	accessToken string
+}
+
 // Link runs the browser part of Plaid Link and returns the access token.
 //
 // It creates a link token, serves the Link widget on localhost, opens the
@@ -35,13 +43,14 @@ type LinkResult struct {
 // this amount when the item is created and does not permit a later change, so
 // it can only be chosen here. A value that is not positive leaves the choice to
 // Plaid, which requests 90 days.
-func Link(ctx context.Context, cfg Config, days int) (LinkResult, error) {
+func Link(ctx context.Context, cfg Config, days int, liabilities bool) (LinkResult, error) {
 	client, err := newClient(cfg)
 	if err != nil {
 		return LinkResult{}, err
 	}
 
-	linkToken, err := createLinkToken(ctx, client, cfg, days)
+	options := linkRequest{days: days, liabilities: liabilities}
+	linkToken, err := createLinkToken(ctx, client, cfg, options)
 	if err != nil {
 		return LinkResult{}, err
 	}
@@ -165,8 +174,8 @@ func LinkURL(cfg Config) string {
 	return fmt.Sprintf("http://localhost:%d", cfg.LinkPort)
 }
 
-func createLinkToken(ctx context.Context, client *plaidsdk.APIClient, cfg Config, days int) (string, error) {
-	req := linkTokenRequest(cfg, days)
+func createLinkToken(ctx context.Context, client *plaidsdk.APIClient, cfg Config, options linkRequest) (string, error) {
+	req := linkTokenRequest(cfg, options)
 
 	resp, httpResp, err := client.PlaidApi.LinkTokenCreate(ctx).
 		LinkTokenCreateRequest(*req).Execute()
@@ -180,7 +189,7 @@ func createLinkToken(ctx context.Context, client *plaidsdk.APIClient, cfg Config
 // the only place the amount of history can be set: this call initializes the
 // transactions product, and Plaid then refuses to change the amount for the
 // life of the item.
-func linkTokenRequest(cfg Config, days int) *plaidsdk.LinkTokenCreateRequest {
+func linkTokenRequest(cfg Config, options linkRequest) *plaidsdk.LinkTokenCreateRequest {
 	user := plaidsdk.NewLinkTokenCreateRequestUser("fourseas-local-user")
 	req := plaidsdk.NewLinkTokenCreateRequest(
 		"Fourseas",
@@ -189,12 +198,15 @@ func linkTokenRequest(cfg Config, days int) *plaidsdk.LinkTokenCreateRequest {
 	)
 	req.SetUser(*user)
 	req.SetProducts([]plaidsdk.Products{plaidsdk.PRODUCTS_TRANSACTIONS})
+	if options.liabilities {
+		req.SetAdditionalConsentedProducts([]plaidsdk.Products{plaidsdk.PRODUCTS_LIABILITIES})
+	}
 	if cfg.RedirectURI != "" {
 		req.SetRedirectUri(cfg.RedirectURI)
 	}
-	if days > 0 {
+	if options.days > 0 {
 		transactions := plaidsdk.NewLinkTokenTransactions()
-		transactions.SetDaysRequested(int32(days))
+		transactions.SetDaysRequested(int32(options.days))
 		req.SetTransactions(*transactions)
 	}
 	return req

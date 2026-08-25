@@ -25,7 +25,7 @@ import (
 // *app.App satisfies it.
 type service interface {
 	Accounts(context.Context, string) (app.AccountData, error)
-	Link(context.Context, int, app.Progress) (app.LinkedItem, error)
+	Link(context.Context, int, bool, app.Progress) (app.LinkedItem, error)
 	CompleteLinkSave(app.PendingSave) (app.LinkedItem, error)
 	SyncItem(context.Context, string, app.Progress) ([]model.AccountView, error)
 	SyncAll(context.Context, app.Progress) ([]app.SyncResult, error)
@@ -204,7 +204,7 @@ func (m *Model) refreshAccounts() tea.Cmd {
 // can be run again with the same length.
 func (m *Model) startLink(days int) tea.Cmd {
 	cmd := m.start(linkOperation, func(ctx context.Context) (any, error) {
-		return m.app.Link(ctx, days, m.report)
+		return m.app.Link(ctx, days, true, m.report)
 	})
 	m.recovery.retry = func() tea.Cmd { return m.startLink(days) }
 	return cmd

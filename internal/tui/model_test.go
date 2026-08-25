@@ -96,7 +96,7 @@ func (f *fakeService) Accounts(ctx context.Context, itemID string) (app.AccountD
 	return f.data, f.accountsErr
 }
 
-func (f *fakeService) Link(_ context.Context, days int, _ app.Progress) (app.LinkedItem, error) {
+func (f *fakeService) Link(_ context.Context, days int, _ bool, _ app.Progress) (app.LinkedItem, error) {
 	f.linkDays = append(f.linkDays, days)
 	if f.linkErr != nil {
 		return app.LinkedItem{}, f.linkErr
