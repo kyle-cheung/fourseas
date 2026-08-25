@@ -2,35 +2,81 @@ package main
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kyle-cheung/fourseas/providence/internal/app"
 	"github.com/kyle-cheung/fourseas/providence/internal/model"
 	"github.com/shopspring/decimal"
 )
 
-func TestAccountCellsShowADashWhenThereIsNoValue(t *testing.T) {
-	empty := model.Account{}
-	if got := accountBalance(empty); got != "-" {
-		t.Errorf("accountBalance = %q, want a dash", got)
-	}
-	if got := accountLimit(empty); got != "-" {
-		t.Errorf("accountLimit = %q, want a dash", got)
-	}
-	if got := accountUpdated(empty); got != "-" {
-		t.Errorf("accountUpdated = %q, want a dash", got)
+func TestPrintAccountsShowsLiabilityDetailsAndSharedMoneyFormatting(t *testing.T) {
+	now := time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC)
+	due := time.Date(2026, time.September, 12, 0, 0, 0, 0, time.UTC)
+	paid := time.Date(2026, time.August, 20, 0, 0, 0, 0, time.UTC)
+	rows := []model.AccountView{
+		{
+			Account: model.Account{
+				AccountID:      "acct-full",
+				Name:           "Blue Cash",
+				Mask:           "1001",
+				Type:           "credit",
+				Subtype:        "credit card",
+				Currency:       " usd ",
+				Nickname:       "Everyday",
+				BalanceCurrent: decimal.NewNullDecimal(decimal.RequireFromString("1284.21")),
+				BalanceLimit:   decimal.NewNullDecimal(decimal.RequireFromString("25000")),
+			},
+			InstitutionName: "American Express",
+			Liability: &model.CreditLiability{
+				PaymentDueDate:    &due,
+				LastPaymentDate:   &paid,
+				LastPaymentAmount: decimal.NewNullDecimal(decimal.RequireFromString("500")),
+			},
+		},
+		{
+			Account: model.Account{
+				AccountID:      "acct-missing",
+				Name:           "Freedom",
+				Mask:           "2002",
+				Type:           "credit",
+				Subtype:        "credit card",
+				Currency:       "CAD",
+				Nickname:       "Backup",
+				BalanceCurrent: decimal.NewNullDecimal(decimal.RequireFromString("-320.1")),
+			},
+			InstitutionName: "Chase",
+		},
 	}
 
-	filled := model.Account{
-		BalanceCurrent: decimal.NullDecimal{Decimal: decimal.RequireFromString("412.5"), Valid: true},
-		BalanceLimit:   decimal.NullDecimal{Decimal: decimal.RequireFromString("10000"), Valid: true},
+	output := captureStdout(t, func() { printAccountsAt(rows, now) })
+	lines := strings.Split(output, "\n")
+	if len(lines) < 3 {
+		t.Fatalf("account output = %q, want a header and two rows", output)
 	}
-	if got := accountBalance(filled); got != "412.50" {
-		t.Errorf("accountBalance = %q, want %q", got, "412.50")
+	normalize := func(line string) string {
+		return regexp.MustCompile(` {2,}`).ReplaceAllString(strings.TrimSpace(line), "\t")
 	}
-	if got := accountLimit(filled); got != "10000.00" {
-		t.Errorf("accountLimit = %q, want %q", got, "10000.00")
+	want := []string{
+		"INSTITUTION\tNAME\tMASK\tTYPE\tBALANCE\tLIMIT\tDUE\tLAST PAYMENT\tUPDATED\tNICKNAME\tACCOUNT ID",
+		"American Express\tBlue Cash\t1001\tcredit card\t1,284.21 USD\t25,000.00 USD\tSep 12\tAug 20 · 500.00 USD\t-\tEveryday\tacct-full",
+		"Chase\tFreedom\t2002\tcredit card\t-320.10 CAD\t—\t—\t—\t-\tBackup\tacct-missing",
+	}
+	for i := range want {
+		if got := normalize(lines[i]); got != want[i] {
+			t.Errorf("account output line %d = %q, want %q", i+1, got, want[i])
+		}
+	}
+	if strings.Contains(lines[0], "CCY") {
+		t.Errorf("account header = %q, want no separate currency column", lines[0])
+	}
+}
+
+func TestAccountUpdatedShowsADashWhenThereIsNoValue(t *testing.T) {
+	if got := accountUpdated(model.Account{}); got != "-" {
+		t.Errorf("accountUpdated = %q, want a dash", got)
 	}
 }
 

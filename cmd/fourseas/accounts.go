@@ -130,23 +130,6 @@ func nicknameArgs(args []string) (accountID, nickname string, err error) {
 	return accountID, nickname, nil
 }
 
-// accountBalance is one balance cell, or a dash when the provider sent none.
-func accountBalance(d model.Account) string {
-	if !d.BalanceCurrent.Valid {
-		return "-"
-	}
-	return d.BalanceCurrent.Decimal.StringFixed(2)
-}
-
-// accountLimit is the credit limit cell, or a dash for an account that has no
-// limit, such as a checking account.
-func accountLimit(d model.Account) string {
-	if !d.BalanceLimit.Valid {
-		return "-"
-	}
-	return d.BalanceLimit.Decimal.StringFixed(2)
-}
-
 // accountUpdated is when the balance was last read, or a dash before the first
 // sync that returned one.
 func accountUpdated(d model.Account) string {

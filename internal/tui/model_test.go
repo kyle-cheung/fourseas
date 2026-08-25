@@ -321,6 +321,30 @@ func TestMainNavigationAndQuit(t *testing.T) {
 	}
 }
 
+func TestAccountRowUsesOneGroupedCurrencyBearingBalance(t *testing.T) {
+	view := account("acc-1", "", "Everyday Checking", "1234", "Chase", 1284.21)
+	row := ansi.Strip(accountRow(view, false, lipgloss.NewStyle(), 80))
+	if !strings.Contains(row, "1,284.21 USD") {
+		t.Errorf("account row = %q, want the shared money format", row)
+	}
+	if got := strings.Count(row, "USD"); got != 1 {
+		t.Errorf("account row = %q, want one currency value, got %d", row, got)
+	}
+}
+
+func TestDetailUsesOneGroupedCurrencyBearingBalance(t *testing.T) {
+	view := account("acc-1", "", "Everyday Checking", "1234", "Chase", 1284.21)
+	m := ready(t, &fakeService{data: app.AccountData{Accounts: []model.AccountView{view}}})
+	openDetail(t, m, 0)
+	body := content(m)
+	if !strings.Contains(body, "1,284.21 USD") {
+		t.Errorf("detail view = %q, want the shared money format", body)
+	}
+	if got := strings.Count(body, "USD"); got != 1 {
+		t.Errorf("detail view = %q, want one currency value, got %d", body, got)
+	}
+}
+
 func TestTextPromptAcceptsQAndEscCancels(t *testing.T) {
 	m := ready(t, &fakeService{})
 
@@ -540,7 +564,7 @@ func TestAccountRowKeepsNameAtNarrowWidths(t *testing.T) {
 	view := account("acc-1", "Café Ünicode", "Everyday Checking", "1234", "Chase", 1234.56)
 
 	wide := accountRow(view, true, itemStyle, 80)
-	for _, want := range []string{"Café Ünicode", "••1234", "Chase", "USD", "1234.56", "NEW"} {
+	for _, want := range []string{"Café Ünicode", "••1234", "Chase", "1,234.56 USD", "NEW"} {
 		if !strings.Contains(wide, want) {
 			t.Errorf("wide row = %q, want it to contain %q", wide, want)
 		}

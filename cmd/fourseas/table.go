@@ -5,8 +5,11 @@ import (
 	"os"
 	"strings"
 	"text/tabwriter"
+	"time"
 
+	accountformat "github.com/kyle-cheung/fourseas/providence/internal/format"
 	"github.com/kyle-cheung/fourseas/providence/internal/model"
+	"github.com/shopspring/decimal"
 )
 
 // maxCellWidth keeps long merchant names from breaking the layout.
@@ -47,18 +50,30 @@ func printTable(rows []model.TransactionView) {
 // The account id is printed in full and last, because it is the value the user
 // copies into `fourseas accounts nickname <id>`.
 func printAccounts(rows []model.AccountView) {
+	printAccountsAt(rows, time.Now())
+}
+
+func printAccountsAt(rows []model.AccountView, now time.Time) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "INSTITUTION\tNAME\tMASK\tTYPE\tBALANCE\tLIMIT\tCCY\tUPDATED\tNICKNAME\tACCOUNT ID")
+	fmt.Fprintln(w, "INSTITUTION\tNAME\tMASK\tTYPE\tBALANCE\tLIMIT\tDUE\tLAST PAYMENT\tUPDATED\tNICKNAME\tACCOUNT ID")
 
 	for _, r := range rows {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%10s\t%10s\t%s\t%s\t%s\t%s\n",
+		var due, lastDate *time.Time
+		var lastAmount decimal.NullDecimal
+		if r.Liability != nil {
+			due = r.Liability.PaymentDueDate
+			lastDate = r.Liability.LastPaymentDate
+			lastAmount = r.Liability.LastPaymentAmount
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			truncate(r.InstitutionName),
 			truncate(r.Name),
 			r.Mask,
 			accountKind(r.Account),
-			accountBalance(r.Account),
-			accountLimit(r.Account),
-			r.Currency,
+			accountformat.Money(r.BalanceCurrent, r.Currency),
+			accountformat.Money(r.BalanceLimit, r.Currency),
+			accountformat.Date(due, now),
+			accountformat.LatestPayment(lastDate, lastAmount, r.Currency, now),
 			accountUpdated(r.Account),
 			truncate(r.Nickname),
 			r.AccountID,

@@ -10,6 +10,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/kyle-cheung/fourseas/providence/internal/app"
+	accountformat "github.com/kyle-cheung/fourseas/providence/internal/format"
 	"github.com/kyle-cheung/fourseas/providence/internal/model"
 )
 
@@ -231,7 +232,7 @@ func (m *Model) detailLines() []string {
 		{"Account", account.Name},
 		{"Mask", maskText(account)},
 		{"Type", strings.TrimSpace(account.Type + " " + account.Subtype)},
-		{"Balance", strings.TrimSpace(balanceText(account) + " " + account.Currency)},
+		{"Balance", accountformat.Money(account.BalanceCurrent, account.Currency)},
 		{"Account id", account.AccountID},
 	} {
 		if field[1] == "" {
@@ -441,7 +442,8 @@ func accountName(view model.AccountView) string {
 func accountRow(view model.AccountView, isNew bool, label lipgloss.Style, width int) string {
 	name := label.Render(accountName(view))
 	extras := []string{}
-	for _, extra := range []string{maskText(view), view.InstitutionName, view.Currency, balanceText(view)} {
+	for _, extra := range []string{maskText(view), view.InstitutionName,
+		accountformat.Money(view.BalanceCurrent, view.Currency)} {
 		if extra != "" {
 			extras = append(extras, mutedStyle.Render(extra))
 		}
@@ -479,14 +481,6 @@ func maskText(view model.AccountView) string {
 		return ""
 	}
 	return "••" + view.Mask
-}
-
-// balanceText is the current balance, or empty when no sync has returned one.
-func balanceText(view model.AccountView) string {
-	if !view.BalanceCurrent.Valid {
-		return ""
-	}
-	return view.BalanceCurrent.Decimal.StringFixed(2)
 }
 
 // syncStatus is the marked state of the last sync of every linked

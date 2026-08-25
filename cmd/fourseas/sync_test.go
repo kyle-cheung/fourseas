@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/kyle-cheung/fourseas/providence/internal/app"
 	plaidprovider "github.com/kyle-cheung/fourseas/providence/internal/provider/plaid"
 	"github.com/kyle-cheung/fourseas/providence/internal/tokens"
 )
@@ -90,5 +92,25 @@ func TestRunSyncWithoutFXOptionUsesNormalPlaidValidation(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "PLAID_CLIENT_ID") {
 		t.Errorf("runSyncWith() error = %q, want Plaid validation error", err)
+	}
+}
+
+func TestPrintSyncConsentHelpUsesTheLiveErrorIdentity(t *testing.T) {
+	var out bytes.Buffer
+	results := []app.SyncResult{{
+		Err: fmt.Errorf("fetch liabilities: %w", app.ErrAdditionalConsentRequired),
+	}}
+
+	printSyncConsentHelp(&out, results)
+
+	const want = "Statement data needs consent. Run `fourseas accounts liabilities enable <account-id>`.\n"
+	if got := out.String(); got != want {
+		t.Errorf("consent help = %q, want %q", got, want)
+	}
+
+	out.Reset()
+	printSyncConsentHelp(&out, []app.SyncResult{{Err: errors.New(app.ErrAdditionalConsentRequired.Error())}})
+	if got := out.String(); got != "" {
+		t.Errorf("ordinary sync error printed consent help %q", got)
 	}
 }
