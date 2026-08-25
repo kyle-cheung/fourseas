@@ -10,7 +10,7 @@ Show the information needed to check each card from the main menu:
 
 - Account nickname
 - Current balance
-- Next or most recently observed payment due date
+- Current payment due date when Plaid supplies one
 - Most recent payment date and amount
 
 Plaid Transactions does not supply payment due dates. Plaid Liabilities supplies
@@ -107,8 +107,13 @@ in update mode for the whole institution Item. The screen will make the
 institution scope clear.
 
 Update mode sends the existing access token and `liabilities` in
-`additional_consented_products`. It does not exchange the returned public token.
-Plaid keeps the existing access token and Item.
+`additional_consented_products`. Its Link token request omits `products` and all
+new-Item product settings. Plaid rejects a request that combines an access token
+with the normal Transactions product list.
+
+Update mode also uses its own browser success path. A successful callback ends
+the flow without calling `/item/public_token/exchange`. Plaid keeps the existing
+access token and Item.
 
 After Link succeeds, fourseas records that Liabilities is enabled and fetches
 liability data immediately. A canceled or failed consent flow leaves the local
@@ -159,7 +164,9 @@ Money uses `decimal.NullDecimal`.
 
 Plaid mapping reads `next_payment_due_date`, `last_payment_date`, and
 `last_payment_amount`. It validates provider dates and converts the one API
-floating-point amount to a decimal at the provider boundary.
+floating-point amount to a decimal at the provider boundary. Plaid models
+`account_id` as nullable. A liability with a null or empty account ID is skipped
+instead of being written with an empty primary-key value.
 
 Liability retrieval stays separate from `Provider.Sync`, which paginates
 transactions. A small liability-capable provider interface adds one
@@ -183,27 +190,21 @@ fetched_at
 The primary key is `(provider, account_id)`. Money uses `DECIMAL(18,4)`. Dates
 use `DATE`.
 
-An upsert has two null rules:
+Every successful fetch uses a plain replace-all upsert. Null due-date and payment
+fields clear their stored values. This prevents a past due date from remaining
+on screen after Plaid reports that no payment is expected. Fourseas does not
+infer a payment from negative transactions because it could mislabel a refund.
 
-- A non-null due date replaces the stored due date. A null due date preserves
-  the last observed due date.
-- The last payment date and amount always take the current response values.
-  Null current values clear the stored payment fields.
+`AccountViews` left-joins liability data. Accounts remain visible when no
+liability row exists. Unlink cleanup deletes liability rows for the Item.
 
-This keeps the most recent observed due date but shows `—` when Plaid omits the
-latest payment. Fourseas does not infer a payment from negative transactions
-because it could mislabel a refund.
+No separate liability state table is needed. `tokens.Item.Liabilities` says
+whether fourseas must fetch the product. The existing `sync_state.last_status`
+records sync errors, including missing consent.
 
-Add a `liability_state` table with one row per provider Item. Its status is one
-of `enabled`, `consent_required`, or `unavailable`. It also records the last
-check time. Temporary errors do not erase the previous state or stored data.
-
-`AccountViews` left-joins liability data and Item state. Accounts remain visible
-when neither row exists. Unlink cleanup deletes both new table rows for the Item.
-
-Both tables use `CREATE TABLE IF NOT EXISTS`. Store startup already reapplies
-additive DDL, so existing version 2 databases gain the tables without a reset or
-schema version change. The reset table list includes both tables.
+The new table uses `CREATE TABLE IF NOT EXISTS`. Store startup already reapplies
+additive DDL, so existing version 2 databases gain it without a reset or schema
+version change. The reset table list includes the table.
 
 ## Sync behavior
 
@@ -213,16 +214,18 @@ For each Item, sync does this work in order:
 2. Stop if the token Item has Liabilities off.
 3. Call `/liabilities/get` once.
 4. Classify the result.
-5. Store liability rows and state in one local transaction.
+5. Store liability rows in one local transaction.
 6. Return refreshed account views.
 
 Result rules:
 
-- A successful fetch replaces the current liability snapshot by account.
-- `NO_LIABILITY_ACCOUNTS` records `unavailable`, shows `—`, and does not fail
-  transaction sync.
-- `ADDITIONAL_CONSENT_REQUIRED` records `consent_required`, shows `—`, and makes
-  the enable action available.
+- A successful fetch replaces all liability fields for each returned account.
+- `NO_LIABILITY_ACCOUNTS` shows `—` and does not fail transaction sync.
+- `PRODUCT_NOT_READY` shows `—`, does not fail transaction sync, and retries on
+  the next sync. This is the expected result for a fresh Item while Plaid
+  prepares Liabilities.
+- `ADDITIONAL_CONSENT_REQUIRED` shows `—`, stays in
+  `sync_state.last_status`, and makes the enable action available.
 - A temporary Plaid or mapping error keeps stored liability data and marks the
   institution sync as failed.
 - Context cancellation follows the existing behavior and records no new status.
@@ -234,6 +237,9 @@ separate currency on that liability field.
 ## Error presentation
 
 Unsupported data is an expected absence, not an error. The table shows `—`.
+
+Liabilities data that is not ready is also an expected temporary absence. The
+table shows `—`, the Item sync succeeds, and the next sync retries it.
 
 Missing consent gives an actionable account-detail option. The CLI error names
 the `accounts liabilities enable` command.
@@ -250,16 +256,17 @@ Tests protect the policy boundaries with a small number of broad cases:
 
 - One Link request test covers the default-on setting and explicit opt-out.
 - One TUI setup test covers the default, toggle, and value passed to Link.
-- One Plaid mapping test covers values, nulls, decimal conversion, and dates.
-- One store test covers due-date preservation and payment replacement.
+- One Plaid mapping test covers values, nulls, a nullable account ID, decimal
+  conversion, and dates.
+- One store test covers replace-all upserts, including null fields.
 - One application test proves that pagination causes one liability call per Item
-  and covers the three result classes.
-- One update-mode test proves that consent keeps the access token and skips token
-  exchange.
+  and covers unsupported, not-ready, missing-consent, and temporary errors.
+- One update-mode test proves that the request omits `products`, keeps the access
+  token, and skips token exchange.
 - Focused CLI and TUI assertions cover commands, main-menu placement, normal
   width, and narrow width.
 - One store startup test proves that a version 2 database gains the additive
-  tables without a reset.
+  table without a reset.
 
 Provider tests use fake HTTP servers. Application and TUI tests use existing fake
 boundaries. Automated tests do not call production Plaid.
