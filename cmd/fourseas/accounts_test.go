@@ -8,11 +8,25 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kyle-cheung/fourseas/providence/internal/app"
 	"github.com/kyle-cheung/fourseas/providence/internal/model"
 	"github.com/shopspring/decimal"
 )
+
+func TestTruncatePreservesUTF8(t *testing.T) {
+	input := strings.Repeat("a", 28) + "é suffix"
+	want := strings.Repeat("a", 28) + "é…"
+
+	got := truncate(input)
+	if got != want {
+		t.Errorf("truncate(%q) = %q, want %q", input, got, want)
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("truncate(%q) = %q, want valid UTF-8", input, got)
+	}
+}
 
 func TestPrintAccountsShowsLiabilityDetailsAndSharedMoneyFormatting(t *testing.T) {
 	now := time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC)

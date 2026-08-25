@@ -194,6 +194,8 @@ func (a *App) readItem(ctx context.Context, db *store.Store, item tokens.Item, r
 			if viewErr != nil {
 				return nil, errors.Join(liabilityErr, viewErr)
 			}
+			progress(report, itemLine(item, "%d added, %d modified, %d removed",
+				counts.added, counts.modified, counts.removed))
 			return filterAccounts(views, item.ItemID), liabilityErr
 		}
 	}

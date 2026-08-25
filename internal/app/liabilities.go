@@ -209,7 +209,7 @@ func (a *App) recordLiabilitiesConsentStatus(
 		} else {
 			for _, state := range states {
 				if state.Provider == plaid.ProviderName && state.ItemID == item.ItemID &&
-					strings.HasPrefix(state.LastStatus, liabilitiesConsentRequiredStatus) {
+					liabilitiesConsentRequired(state.LastStatus) {
 					statusErr = db.SetStatusOnly(local, plaid.ProviderName, item.ItemID, "")
 					break
 				}

@@ -907,6 +907,18 @@ func TestSyncAllKeepsCommittedAccountViewsOnLiabilityFailure(t *testing.T) {
 	if len(results[0].Accounts) != 1 || results[0].Accounts[0].Liability == nil {
 		t.Errorf("result accounts = %+v, want the committed account and old liability", results[0].Accounts)
 	}
+	wantLines := []string{
+		itemLine(amex, "0 added, 0 modified, 0 removed"),
+		itemLine(amex, "failed: %v", results[0].Err),
+	}
+	if len(lines) != len(wantLines) {
+		t.Fatalf("progress lines = %q, want %q", lines, wantLines)
+	}
+	for i := range wantLines {
+		if lines[i] != wantLines[i] {
+			t.Errorf("progress line %d = %q, want %q", i, lines[i], wantLines[i])
+		}
+	}
 	status := lastStatus(t, cfg.DBPath, amex.ItemID)
 	if !strings.HasPrefix(status, "fourseas:liabilities-consent-required: ") {
 		t.Error("last_status does not start with the liability consent marker")

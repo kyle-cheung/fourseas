@@ -96,8 +96,9 @@ func accountKind(a model.Account) string {
 
 // truncate shortens a value that is too wide for a column.
 func truncate(s string) string {
-	if len(s) <= maxCellWidth {
+	runes := []rune(s)
+	if len(runes) <= maxCellWidth {
 		return s
 	}
-	return strings.TrimSpace(s[:maxCellWidth-1]) + "…"
+	return strings.TrimSpace(string(runes[:maxCellWidth-1])) + "…"
 }
