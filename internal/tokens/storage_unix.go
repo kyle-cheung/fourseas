@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+
+	"golang.org/x/sys/unix"
 )
 
 func ensureTokenDirectory(path string) error {
@@ -15,19 +18,64 @@ func ensureTokenDirectory(path string) error {
 }
 
 func openTokenLock(path string) (*os.File, error) {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	fd, err := unix.Open(path, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
 	if err != nil {
+		if errors.Is(err, unix.ELOOP) {
+			return nil, fmt.Errorf("%s is a symbolic link", path)
+		}
+		if errors.Is(err, unix.EISDIR) {
+			return nil, fmt.Errorf("%s is not a regular file", path)
+		}
 		return nil, err
 	}
-	if err := file.Chmod(0o600); err != nil {
-		file.Close()
-		return nil, err
+	file := os.NewFile(uintptr(fd), path)
+	if file == nil {
+		return nil, errors.Join(errors.New("wrap token lock file descriptor"), unix.Close(fd))
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return nil, errors.Join(err, file.Close())
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
+		return nil, errors.Join(fmt.Errorf("%s is not a regular file", path), file.Close())
+	}
+	if err := unix.Fchmod(fd, 0o600); err != nil {
+		return nil, errors.Join(err, file.Close())
 	}
 	return file, nil
 }
 
-func protectTokenFile(string) error {
-	return nil
+func readProtectedTokenFile(path string) (data []byte, err error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		if errors.Is(err, unix.ELOOP) {
+			return nil, fmt.Errorf("%s is a symbolic link", path)
+		}
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	file := os.NewFile(uintptr(fd), path)
+	if file == nil {
+		return nil, errors.Join(errors.New("wrap token file descriptor"), unix.Close(fd))
+	}
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close token file: %w", closeErr))
+		}
+	}()
+
+	tokenFileOpened()
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return nil, fmt.Errorf("inspect token file: %w", err)
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	if err := unix.Fchmod(fd, 0o600); err != nil {
+		return nil, fmt.Errorf("protect token file: %w", err)
+	}
+	data, err = io.ReadAll(file)
+	return data, err
 }
 
 func writeAtomic(path string, f File) (err error) {

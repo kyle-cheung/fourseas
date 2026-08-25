@@ -40,10 +40,7 @@ type File struct {
 // Load reads the token file. A file that does not exist is an empty file, not
 // an error: the user has simply not linked anything yet.
 func Load(path string) (File, error) {
-	if err := protectTokenFile(path); err != nil {
-		return File{}, fmt.Errorf("protect %s: %w", path, err)
-	}
-	data, err := os.ReadFile(path)
+	data, err := readProtectedTokenFile(path)
 	if os.IsNotExist(err) {
 		return File{}, nil
 	}
@@ -151,3 +148,5 @@ var writeTokenTemp = func(file *os.File, data []byte) error {
 	_, err := file.Write(data)
 	return err
 }
+
+var tokenFileOpened = func() {}

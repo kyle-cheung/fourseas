@@ -150,6 +150,14 @@ func protectTokenFile(path string) error {
 	return err
 }
 
+func readProtectedTokenFile(path string) ([]byte, error) {
+	if err := protectTokenFile(path); err != nil {
+		return nil, err
+	}
+	tokenFileOpened()
+	return os.ReadFile(path)
+}
+
 func createProtectedTemp(dir, base string) (*os.File, error) {
 	attributes, _, err := currentUserSecurity()
 	if err != nil {
