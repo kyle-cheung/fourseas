@@ -5,9 +5,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"charm.land/lipgloss/v2/table"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/kyle-cheung/fourseas/providence/internal/app"
 	accountformat "github.com/kyle-cheung/fourseas/providence/internal/format"
@@ -16,6 +19,8 @@ import (
 
 // mainChoices is the fixed order of the main screen.
 var mainChoices = []string{"Accounts", "Add account", "Sync"}
+
+const noAccountsMessage = "No accounts are linked yet."
 
 // Positions inside mainChoices.
 const (
@@ -172,18 +177,82 @@ func (m *Model) runningLine() string {
 // mainLines is the main menu, with the account count on the first choice and
 // the sync status on the third.
 func (m *Model) mainLines() []string {
-	status, tone := syncStatus(m.syncStates, m.clock())
+	now := m.clock()
+	status, tone := syncStatus(m.syncStates, now)
 	notes := map[int]string{
 		choiceAccounts: mutedStyle.Render(plural(len(m.accounts.rows), "account")),
 		choiceSync:     tone.Render(status),
 	}
 
-	lines := m.header("Main menu")
+	width := m.contentWidth()
+	lines := []string{
+		truncate(blankMark+brandStyle.Render(brandName)+" "+brandMarkStyle.Render(brandMark), width),
+		"",
+	}
+	lines = append(lines, m.accountSummaryLines(now)...)
+	lines = append(lines,
+		"",
+		truncate(blankMark+headingStyle.Render("Main menu"), width),
+		"",
+	)
 	for i, choice := range mainChoices {
 		lines = append(lines, m.menuRow(i == m.main.cursor, choice, notes[i]))
 	}
 	lines = append(lines, m.syncSummary()...)
 	return append(lines, m.footer("↑/↓ move · enter select · q quit")...)
+}
+
+// accountSummaryLines is one content-sized table row per stored account.
+func (m *Model) accountSummaryLines(now time.Time) []string {
+	if len(m.accounts.rows) == 0 {
+		return []string{truncate(blankMark+mutedStyle.Render(noAccountsMessage), m.contentWidth())}
+	}
+
+	t := table.New().
+		Headers("Account", "Balance", "Due", "Last payment").
+		Wrap(false).
+		BorderTop(false).
+		BorderBottom(false).
+		BorderLeft(false).
+		BorderRight(false).
+		BorderHeader(false).
+		BorderColumn(false).
+		BorderRow(false).
+		StyleFunc(func(row, col int) lipgloss.Style {
+			style := itemStyle
+			if row == table.HeaderRow {
+				style = headingStyle
+			}
+			if col < 3 {
+				style = style.PaddingRight(2)
+			}
+			return style
+		})
+
+	for _, account := range m.accounts.rows {
+		var due, payment string
+		if account.Liability == nil {
+			due, payment = "—", "—"
+		} else {
+			due = accountformat.Date(account.Liability.PaymentDueDate, now)
+			payment = accountformat.LatestPayment(
+				account.Liability.LastPaymentDate,
+				account.Liability.LastPaymentAmount,
+				account.Currency,
+				now,
+			)
+		}
+		t.Row(accountName(account), accountformat.Money(account.BalanceCurrent, account.Currency), due, payment)
+	}
+
+	lines := strings.Split(t.String(), "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	for i := range lines {
+		lines[i] = truncate(blankMark+lines[i], m.contentWidth())
+	}
+	return lines
 }
 
 // syncSummary is one line for every institution of the last sync, including
@@ -218,7 +287,7 @@ func syncResultParts(result app.SyncResult) (string, string, lipgloss.Style) {
 func (m *Model) accountLines() []string {
 	lines := m.header("Accounts")
 	if len(m.accounts.rows) == 0 {
-		lines = append(lines, truncate(blankMark+mutedStyle.Render("No accounts are linked yet."),
+		lines = append(lines, truncate(blankMark+mutedStyle.Render(noAccountsMessage),
 			m.contentWidth()))
 		return append(lines, m.footer("esc back · q quit")...)
 	}
@@ -481,16 +550,39 @@ func (m *Model) fieldRow(name, value string) string {
 	return columns(blankMark+mutedStyle.Render(name), value, m.contentWidth())
 }
 
-// accountName is the nickname, then the provider's name, then the raw account
-// id when neither is known yet.
+// accountName is a safe nickname, provider name, or account id. A candidate
+// that has no text after sanitizing does not block the next fallback.
 func accountName(view model.AccountView) string {
-	if view.Nickname != "" {
-		return view.Nickname
+	for _, candidate := range []string{view.Nickname, view.Name, view.AccountID} {
+		if name := displayText(candidate); name != "" {
+			return name
+		}
 	}
-	if view.Name != "" {
-		return view.Name
+	return ""
+}
+
+// displayText makes stored provider text safe for one terminal line. It
+// removes terminal commands and controls, then reduces whitespace to one
+// printable space.
+func displayText(value string) string {
+	value = ansi.Strip(value)
+	var clean strings.Builder
+	space := false
+	for _, r := range value {
+		switch {
+		case unicode.IsSpace(r):
+			space = clean.Len() > 0
+		case r < ' ' || r >= '\x7f' && r <= '\u009f':
+			continue
+		default:
+			if space {
+				clean.WriteByte(' ')
+				space = false
+			}
+			clean.WriteRune(r)
+		}
 	}
-	return view.AccountID
+	return clean.String()
 }
 
 // accountRow is one line of the account list, written in the two columns of

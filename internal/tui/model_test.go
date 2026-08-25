@@ -183,6 +183,44 @@ func (f *fakeService) Unlink(_ context.Context, itemID string, _ app.Progress) (
 // lines, so a test reads the printable text with the escape sequences removed.
 func content(m *Model) string { return ansi.Strip(m.View().Content) }
 
+// hostileDisplayName wraps visible text in terminal controls that stored
+// account names must never write back to the terminal.
+func hostileDisplayName(visible string) string {
+	return "\x1b[31m" + visible + "\x1b[0m" +
+		"\x1b]52;c;c2VjcmV0\x07" +
+		"\r\n\b\x00\x01\x1f\x7f\u0080\u0085"
+}
+
+func assertSafeAccountNames(t *testing.T, raw string, names ...string) {
+	t.Helper()
+	for _, sequence := range []string{
+		"\x1b[31m", "\x1b]52;", "\x07", "\r", "\b", "\x00", "\x01", "\x1f", "\x7f", "\u0080", "\u0085",
+	} {
+		if strings.Contains(raw, sequence) {
+			t.Errorf("raw view contains unsafe terminal sequence %q: %q", sequence, raw)
+		}
+	}
+	for _, r := range raw {
+		if r == '\n' || r == '\x1b' {
+			continue
+		}
+		if r < ' ' || r >= '\x7f' && r <= '\u009f' {
+			t.Errorf("raw view contains control character %U: %q", r, raw)
+		}
+	}
+	for _, name := range names {
+		lines := 0
+		for _, line := range strings.Split(raw, "\n") {
+			if strings.Contains(line, name) {
+				lines++
+			}
+		}
+		if lines != 1 {
+			t.Errorf("safe account name %q appears on %d physical lines, want 1: %q", name, lines, raw)
+		}
+	}
+}
+
 // hasRow says whether one line of a screen holds the label at the left and the
 // value at the right. The cursor mark and the column padding are removed, so
 // the check stays exact about the pair while the width of the columns changes.
@@ -340,6 +378,207 @@ func TestMainNavigationAndQuit(t *testing.T) {
 	}
 	if !quits(press(t, m, ctrlC())) {
 		t.Error("ctrl+c with no running operation did not quit")
+	}
+}
+
+func TestMainAccountSummaryTable(t *testing.T) {
+	now := time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC)
+	due := time.Date(2026, time.September, 12, 0, 0, 0, 0, time.UTC)
+	paid := time.Date(2026, time.August, 20, 0, 0, 0, 0, time.UTC)
+	partialDue := time.Date(2025, time.December, 5, 0, 0, 0, 0, time.UTC)
+	partialPaid := time.Date(2026, time.August, 18, 0, 0, 0, 0, time.UTC)
+
+	accounts := []model.AccountView{
+		account("acc-1", "Amex Daily", "Blue Cash", "1001", "American Express", 1284.21),
+		account("acc-2", "", "Scotia Visa", "2002", "Scotiabank", 320.1),
+		account("acc-3", "", "", "3003", "Wealthsimple", 2400),
+		account("acc-4", "Cash reserve", "Cash", "4004", "Wealthsimple", -810),
+	}
+	accounts[0].Currency = "usd"
+	accounts[0].Liability = &model.CreditLiability{
+		PaymentDueDate:    &due,
+		LastPaymentDate:   &paid,
+		LastPaymentAmount: decimal.NewNullDecimal(decimal.NewFromInt(500)),
+	}
+	accounts[1].Currency = "cad"
+	accounts[1].Liability = &model.CreditLiability{
+		PaymentDueDate:    &partialDue,
+		LastPaymentDate:   &partialPaid,
+		LastPaymentAmount: decimal.NullDecimal{},
+	}
+	accounts[2].Currency = "jpy"
+	accounts[3].Currency = "CAD"
+	accounts[3].Liability = &model.CreditLiability{}
+
+	m := ready(t, &fakeService{data: app.AccountData{Accounts: accounts}})
+	m.now = func() time.Time { return now }
+	m.width = 100
+	body := content(m)
+
+	for _, want := range []string{
+		"Account", "Balance", "Due", "Last payment",
+		"Amex Daily", "1,284.21 USD", "Sep 12", "Aug 20 · 500.00 USD",
+		"Scotia Visa", "320.10 CAD", "Dec 05, 2025",
+		"acc-3", "2,400.00 JPY", "Cash reserve", "-810.00 CAD",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("main view = %q, want it to contain %q", body, want)
+		}
+	}
+	if got := strings.Count(body, "—"); got != 5 {
+		t.Errorf("main view has %d missing values, want 5 for partial and absent liability data: %q", got, body)
+	}
+
+	wordmark := strings.Index(body, brandName+" "+brandMark)
+	header := strings.Index(body, "Account")
+	menu := strings.Index(body, "Main menu")
+	if wordmark < 0 || header < 0 || menu < 0 || !(wordmark < header && header < menu) {
+		t.Fatalf("main view order = %q, want wordmark, table, then Main menu", body)
+	}
+	if !strings.Contains(body, "\n  Main menu\n\n› Accounts") {
+		t.Errorf("main view = %q, want Main menu directly above the choices", body)
+	}
+
+	last := header
+	for _, name := range []string{"Amex Daily", "Scotia Visa", "acc-3", "Cash reserve"} {
+		position := strings.Index(body, name)
+		if position <= last {
+			t.Errorf("account %q is at %d after prior position %d; want stored row order", name, position, last)
+		}
+		last = position
+	}
+
+	lines := strings.Split(body[header-len(blankMark):menu], "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, blankMark) {
+			t.Errorf("table line %q does not start with blankMark", line)
+		}
+		if width := lipgloss.Width(line); width >= m.contentWidth() {
+			t.Errorf("table line %q is %d cells wide, want natural width below terminal width %d",
+				line, width, m.contentWidth())
+		}
+	}
+}
+
+func TestMainAccountSummarySanitizesAccountNames(t *testing.T) {
+	accounts := []model.AccountView{
+		account("acc-1", hostileDisplayName("Nick\r\n safe"), "Provider one", "1001", "Bank", 10),
+		account("acc-2", hostileDisplayName(""), hostileDisplayName("Provider\t safe"), "2002", "Bank", 20),
+		account(hostileDisplayName("acc-\n safe"), hostileDisplayName(""), hostileDisplayName(""), "3003", "Bank", 30),
+	}
+	m := ready(t, &fakeService{data: app.AccountData{Accounts: accounts}})
+
+	assertSafeAccountNames(t, m.View().Content, "Nick safe", "Provider safe", "acc- safe")
+}
+
+func TestAccountListAndDetailSanitizeAccountNames(t *testing.T) {
+	view := account("acc-1", hostileDisplayName("Nick\r\n safe"), "Provider", "1001", "Bank", 10)
+	m := ready(t, &fakeService{data: app.AccountData{Accounts: []model.AccountView{view}}})
+
+	press(t, m, codeKey(tea.KeyEnter))
+	assertSafeAccountNames(t, m.View().Content, "Nick safe")
+	press(t, m, codeKey(tea.KeyEnter))
+	assertSafeAccountNames(t, m.View().Content, "Nick safe")
+}
+
+func TestMainRenderUsesOneCapturedTime(t *testing.T) {
+	captured := time.Date(2025, time.December, 31, 23, 59, 45, 0, time.UTC)
+	later := time.Date(2026, time.January, 1, 0, 0, 45, 0, time.UTC)
+	lastSync := captured.Add(-30 * time.Second)
+	due := time.Date(2026, time.January, 2, 0, 0, 0, 0, time.UTC)
+	view := account("acc-1", "Card", "Credit card", "1001", "Bank", 100)
+	view.Liability = &model.CreditLiability{PaymentDueDate: &due}
+	m := ready(t, &fakeService{data: app.AccountData{
+		Accounts: []model.AccountView{view},
+		States: []app.SyncState{{
+			ItemID:       "item-1",
+			Institution:  "Bank",
+			LastSyncedAt: &lastSync,
+			LastStatus:   "ok",
+		}},
+	}})
+
+	clockCalls := 0
+	m.now = func() time.Time {
+		clockCalls++
+		if clockCalls == 1 {
+			return captured
+		}
+		return later
+	}
+	body := content(m)
+
+	if clockCalls != 1 {
+		t.Fatalf("one main render called the clock %d times, want 1", clockCalls)
+	}
+	if !hasRow(body, "Sync", okMark+" Last sync: just now") {
+		t.Errorf("main view = %q, want sync status formatted with the captured time", body)
+	}
+	if !strings.Contains(body, "Jan 02, 2026") {
+		t.Errorf("main view = %q, want the due date formatted with the same captured time", body)
+	}
+}
+
+func TestMainAccountSummaryTableAtNarrowWidth(t *testing.T) {
+	now := time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC)
+	due := time.Date(2026, time.September, 12, 0, 0, 0, 0, time.UTC)
+	paid := time.Date(2026, time.August, 20, 0, 0, 0, 0, time.UTC)
+	accounts := []model.AccountView{
+		account("acc-1", "Amex Daily", "Blue Cash", "1001", "American Express", 1284.21),
+		account("acc-2", "", "Scotia Visa", "2002", "Scotiabank", 320.1),
+		account("acc-3", "", "", "3003", "Wealthsimple", 2400),
+		account("acc-4", "Cash reserve", "Cash", "4004", "Wealthsimple", -810),
+	}
+	accounts[0].Liability = &model.CreditLiability{
+		PaymentDueDate:    &due,
+		LastPaymentDate:   &paid,
+		LastPaymentAmount: decimal.NewNullDecimal(decimal.NewFromInt(500)),
+	}
+
+	m := ready(t, &fakeService{data: app.AccountData{Accounts: accounts}})
+	m.now = func() time.Time { return now }
+	const narrow = 50
+	m.width = narrow
+	body := content(m)
+	for _, name := range []string{"Amex Daily", "Scotia Visa", "acc-3", "Cash reserve"} {
+		lines := 0
+		for _, line := range strings.Split(body, "\n") {
+			if strings.Contains(line, name) {
+				lines++
+			}
+		}
+		if lines != 1 {
+			t.Errorf("account %q appears on %d physical lines, want exactly 1: %q", name, lines, body)
+		}
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if width := lipgloss.Width(line); width > narrow {
+			t.Errorf("main line %q is %d cells wide, want at most %d", line, width, narrow)
+		}
+	}
+}
+
+func TestMainEmptyAccountSummary(t *testing.T) {
+	m := ready(t, &fakeService{})
+	body := content(m)
+	if !hasLine(body, "No accounts are linked yet.") {
+		t.Errorf("empty main view = %q, want exact empty-account message", body)
+	}
+	if !strings.Contains(body, "No accounts are linked yet.\n\n  Main menu\n\n› Accounts") {
+		t.Errorf("empty main view = %q, want the message above the usable menu", body)
+	}
+
+	press(t, m, codeKey(tea.KeyDown))
+	if m.main.cursor != choiceAdd {
+		t.Fatalf("cursor after down = %d, want Add account", m.main.cursor)
+	}
+	press(t, m, codeKey(tea.KeyUp))
+	press(t, m, codeKey(tea.KeyEnter))
+	if m.screen != accountsScreen {
+		t.Fatalf("screen after selecting Accounts = %v, want accountsScreen", m.screen)
 	}
 }
 
