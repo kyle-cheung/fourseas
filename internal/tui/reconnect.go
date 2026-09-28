@@ -30,50 +30,48 @@ func (m *Model) startReconnectSync() tea.Cmd {
 }
 
 func (m *Model) startReconnectRefresh() tea.Cmd {
-	cmd := m.start(postReconnectRefreshOperation, func(ctx context.Context) (any, error) {
-		return m.app.Accounts(ctx, "")
+	return m.startActionRefresh(accountRefresh{
+		destination:   accountsScreen,
+		success:       "Reconnected " + linkedName(m.reconnected) + ". Accounts refreshed.",
+		failurePrefix: "Reconnected and synced, but refreshing the account list ",
+		retryLabel:    "Retry refresh",
+		retryNote:     "Retry refresh reloads the stored accounts.",
 	})
-	m.recovery.retry = m.startReconnectRefresh
-	m.recovery.retryLabel = "Retry refresh"
-	return cmd
 }
 
-func (m *Model) showReconnectFailure(msg operationMsg) tea.Cmd {
-	m.showFailure(msg.err)
+func (m *Model) showReconnectSyncFailure(err error) tea.Cmd {
+	m.showFailure(err)
+	if errors.Is(err, app.ErrLoginRequired) {
+		itemID := m.reconnected.ItemID
+		m.recovery.message = "Plaid still requires sign-in for this institution."
+		m.recovery.notes = []string{"Choose Reconnect institution to sign in again."}
+		m.recovery.retryLabel = "Reconnect institution"
+		m.recovery.retry = func() tea.Cmd { return m.startReconnect(itemID) }
+		return nil
+	}
+	if errors.Is(err, app.ErrAdditionalConsentRequired) {
+		m.recovery.message = "Sign-in completed, but statement data still needs consent."
+		m.recovery.notes = []string{"Open a credit account's details and choose Enable statement data."}
+		m.recovery.retry = nil
+		return nil
+	}
 	outcome := "failed"
-	if errors.Is(msg.err, context.Canceled) {
+	if errors.Is(err, context.Canceled) {
 		outcome = "was canceled"
 	}
-	if msg.kind == reconnectSyncOperation {
-		if errors.Is(msg.err, app.ErrLoginRequired) {
-			itemID := m.reconnected.ItemID
-			m.recovery.message = "Plaid still requires sign-in for this institution."
-			m.recovery.notes = []string{"Choose Reconnect institution to sign in again."}
-			m.recovery.retryLabel = "Reconnect institution"
-			m.recovery.retry = func() tea.Cmd { return m.startReconnect(itemID) }
-			return nil
-		}
-		if errors.Is(msg.err, app.ErrAdditionalConsentRequired) {
-			m.recovery.message = "Sign-in completed, but statement data still needs consent."
-			m.recovery.notes = []string{"Open a credit account's details and choose Enable statement data."}
-			m.recovery.retry = nil
-			return nil
-		}
-		m.recovery.message = "Sign-in completed, but sync " + outcome + "."
-		m.recovery.notes = []string{"Reason: " + displayError(msg.err), "Retry sync fetches data without reopening sign-in."}
-	} else {
-		m.recovery.message = "Reconnected and synced, but refreshing the account list " + outcome + "."
-		m.recovery.notes = []string{"Reason: " + displayError(msg.err), "Retry refresh reloads the stored accounts."}
-	}
+	m.recovery.message = "Sign-in completed, but sync " + outcome + "."
+	m.recovery.notes = []string{"Reason: " + displayError(err), "Retry sync fetches data without reopening sign-in."}
 	return nil
 }
 
 func (m *Model) dropReconnectedResult() {
-	for i := len(m.syncResults) - 1; i >= 0; i-- {
-		if m.syncResults[i].ItemID == m.reconnected.ItemID {
-			m.syncResults = append(m.syncResults[:i], m.syncResults[i+1:]...)
+	results := make([]app.SyncResult, 0, len(m.syncResults))
+	for _, result := range m.syncResults {
+		if result.ItemID != m.reconnected.ItemID {
+			results = append(results, result)
 		}
 	}
+	m.syncResults = results
 }
 
 func (m *Model) showReconnectStatusFailure(err error) tea.Cmd {

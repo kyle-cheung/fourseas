@@ -148,11 +148,21 @@ func TestReconnectRedactsTokensAndRechecksTarget(t *testing.T) {
 }
 
 func TestSyncStatesRecognizeSavedLoginRequired(t *testing.T) {
-	for _, status := range []string{"fourseas:login-required: details", "sync item item-1: plaid ITEM_LOGIN_REQUIRED (ITEM_ERROR): login needed", "ok", "unrelated error"} {
-		got := syncStates([]model.SyncState{{ItemID: "item-1", LastStatus: status}}, tokens.File{}, "")
-		want := strings.Contains(status, "login-required") || strings.Contains(status, "ITEM_LOGIN_REQUIRED")
-		if got[0].ReconnectRequired != want {
-			t.Fatalf("status=%q reconnect=%v", status, got[0].ReconnectRequired)
+	for _, tt := range []struct {
+		status                  string
+		login, consent, pending bool
+	}{
+		{status: "fourseas:login-required: details", login: true},
+		{status: "sync item item-1: plaid ITEM_LOGIN_REQUIRED (ITEM_ERROR): login needed", login: true},
+		{status: "fourseas:liabilities-consent-required: details", consent: true},
+		{status: "fourseas:reconnected:sync-pending", pending: true},
+		{status: "ITEM_LOGIN_REQUIRED"},
+		{status: "ok"},
+		{status: "unrelated error"},
+	} {
+		got := syncStates([]model.SyncState{{ItemID: "item-1", LastStatus: tt.status}}, tokens.File{}, "")[0]
+		if got.ReconnectRequired != tt.login || got.LiabilitiesConsentRequired != tt.consent || got.ReconnectSyncPending != tt.pending {
+			t.Fatalf("status=%q classification=%+v", tt.status, got)
 		}
 	}
 }
@@ -273,7 +283,8 @@ func TestReconnectStatusFailurePreservesAuthenticationOutcome(t *testing.T) {
 	a := New(cfg)
 	a.reconnect = func(context.Context, plaid.Config, string) (plaid.LinkResult, error) { return plaid.LinkResult{}, nil }
 	linked, err := a.Reconnect(context.Background(), "item-1", nil)
-	if err == nil || linked.ItemID != "item-1" || !strings.Contains(err.Error(), "sign-in completed") {
-		t.Fatalf("lost partial success: %+v %v", linked, err)
+	var partial *ReconnectStatusError
+	if !errors.As(err, &partial) || partial.Item.ItemID != "item-1" || linked != (LinkedItem{}) || !strings.Contains(err.Error(), "sign-in completed") {
+		t.Fatalf("lost typed partial success: %+v %v", linked, err)
 	}
 }

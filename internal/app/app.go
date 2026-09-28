@@ -22,11 +22,8 @@ type Progress func(string)
 // How much transaction history a new link may ask Plaid for. Plaid fixes the
 // amount when the item is created and does not permit a later change.
 const (
-	MinLinkDays                      = 30
-	MaxLinkDays                      = 730
-	reconnectSyncPendingStatus       = "fourseas:reconnected:sync-pending"
-	loginRequiredStatus              = "fourseas:login-required: "
-	liabilitiesConsentRequiredStatus = "fourseas:liabilities-consent-required: "
+	MinLinkDays = 30
+	MaxLinkDays = 730
 )
 
 // Config is everything the operations need to reach Plaid and the local files.
@@ -54,7 +51,7 @@ type AccountData struct {
 	LiabilitiesEnabled map[string]bool
 }
 
-// LinkedItem is one newly linked institution.
+// LinkedItem identifies a linked institution without exposing its access token.
 type LinkedItem struct {
 	ItemID      string
 	Institution string
@@ -96,7 +93,7 @@ type linkFunc func(context.Context, plaid.Config, int, bool) (plaid.LinkResult, 
 type removeFunc func(context.Context, plaid.Config, string) error
 type sourceFunc func(plaid.Config, string, string, string) (provider.Provider, error)
 type liabilitiesFunc func(context.Context, plaid.Config, string) ([]model.CreditLiability, error)
-type updateLiabilitiesFunc func(context.Context, plaid.Config, string) (plaid.LinkResult, error)
+type updateLinkFunc func(context.Context, plaid.Config, string) (plaid.LinkResult, error)
 
 // App is the one façade over the store, the token file, and the provider.
 type App struct {
@@ -105,8 +102,8 @@ type App struct {
 	remove            removeFunc
 	source            sourceFunc
 	liabilities       liabilitiesFunc
-	updateLiabilities updateLiabilitiesFunc
-	reconnect         updateLiabilitiesFunc
+	updateLiabilities updateLinkFunc
+	reconnect         updateLinkFunc
 }
 
 // ErrProductNotReady lets presentation code classify the error without importing a provider.
@@ -145,7 +142,7 @@ func newWith(
 	remove removeFunc,
 	source sourceFunc,
 	liabilities liabilitiesFunc,
-	update updateLiabilitiesFunc,
+	update updateLinkFunc,
 ) *App {
 	return &App{
 		cfg:               cfg,

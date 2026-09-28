@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -82,19 +83,31 @@ func TestReconnectSyncFailureRetriesOnlySync(t *testing.T) {
 }
 
 func TestReconnectAccountRefreshFailureRetriesOnlyRead(t *testing.T) {
-	fake := &fakeService{}
-	m, cmd := reconnectDetail(t, fake)
-	cmd = runOperation(t, m, cmd)
-	cmd = runOperation(t, m, cmd)
-	fake.accountsErr = errors.New("read failed")
-	runOperation(t, m, cmd)
-	if !strings.Contains(content(m), "Retry refresh") {
-		t.Fatalf("wrong refresh failure: %s", content(m))
-	}
-	fake.accountsErr = nil
-	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
-	if len(fake.reconnectCalls) != 1 || len(fake.syncCalls) != 1 || m.screen != accountsScreen {
-		t.Fatal("refresh repeated a previous stage")
+	for _, cause := range []error{errors.New("read failed"), context.Canceled} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			fake := &fakeService{}
+			m, cmd := reconnectDetail(t, fake)
+			cmd = runOperation(t, m, cmd)
+			cmd = runOperation(t, m, cmd)
+			fake.accountsErr = cause
+			runOperation(t, m, cmd)
+			if !strings.Contains(content(m), "Retry refresh") || !strings.Contains(content(m), "Reconnected and synced") {
+				t.Fatalf("wrong refresh failure: %s", content(m))
+			}
+			// A second failure must keep the same retry and destination.
+			runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+			if m.returnTo != accountsScreen || !strings.Contains(content(m), "Retry refresh") {
+				t.Fatalf("retry lost its outcome: %s", content(m))
+			}
+			fake.accountsErr = nil
+			runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+			if len(fake.reconnectCalls) != 1 || len(fake.syncCalls) != 1 || m.screen != accountsScreen {
+				t.Fatal("refresh repeated a previous stage or changed its destination")
+			}
+			if !strings.Contains(content(m), "Reconnected Wealthsimple") {
+				t.Fatalf("lost success message: %s", content(m))
+			}
+		})
 	}
 }
 
@@ -147,18 +160,21 @@ func TestPendingReconnectSyncDoesNotAskForAnotherSignIn(t *testing.T) {
 }
 
 func TestReconnectStatusFailureRetriesSyncWithoutRepeatingSignIn(t *testing.T) {
-	fake := &fakeService{}
-	m, cmd := reconnectDetail(t, fake)
-	msg := operationResult(t, cmd)
-	msg.err = errors.New("sign-in completed, but saving status failed")
-	m.Update(msg)
-	if m.screen != recoveryScreen || !strings.Contains(content(m), "Retry sync") {
-		t.Fatalf("incorrect partial-success recovery: %s", content(m))
-	}
-	cmd = runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
-	runOperation(t, m, cmd)
-	if len(fake.reconnectCalls) != 1 || len(fake.syncCalls) != 1 {
-		t.Fatal("repeated sign-in after confirmed authentication")
+	for _, cause := range []error{errors.New("saving status failed"), context.Canceled} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			partial := &app.ReconnectStatusError{Item: app.LinkedItem{ItemID: "item-1", Institution: "Wealthsimple"}, Err: cause}
+			fake := &fakeService{reconnectErr: fmt.Errorf("reconnect: %w", partial)}
+			m, cmd := reconnectDetail(t, fake)
+			runOperation(t, m, cmd)
+			if m.screen != recoveryScreen || !strings.Contains(content(m), "Retry sync") {
+				t.Fatalf("incorrect partial-success recovery: %s", content(m))
+			}
+			cmd = runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
+			runOperation(t, m, cmd)
+			if len(fake.reconnectCalls) != 1 || len(fake.syncCalls) != 1 || fake.syncCalls[0] != "item-1" {
+				t.Fatal("repeated sign-in or lost target after confirmed authentication")
+			}
+		})
 	}
 }
 
@@ -184,5 +200,21 @@ func TestReconnectSyncActionableErrorDoesNotOfferBlindSyncRetry(t *testing.T) {
 				t.Fatalf("missing consent instructions: %s", content(m))
 			}
 		})
+	}
+}
+
+func TestDropReconnectedResultDoesNotMutateOperationResult(t *testing.T) {
+	results := []app.SyncResult{{ItemID: "item-1"}, {ItemID: "item-2"}, {ItemID: "item-1"}, {ItemID: "item-3"}}
+	m := New(&fakeService{})
+	m.syncResults = results
+	m.reconnected = app.LinkedItem{ItemID: "item-1"}
+	m.dropReconnectedResult()
+	if len(m.syncResults) != 2 || m.syncResults[0].ItemID != "item-2" || m.syncResults[1].ItemID != "item-3" {
+		t.Fatalf("filtered results = %+v", m.syncResults)
+	}
+	for i, id := range []string{"item-1", "item-2", "item-1", "item-3"} {
+		if results[i].ItemID != id {
+			t.Fatal("mutated the operation's backing array")
+		}
 	}
 }

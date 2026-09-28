@@ -5,18 +5,29 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/kyle-cheung/fourseas/providence/internal/provider/plaid"
-	"github.com/kyle-cheung/fourseas/providence/internal/store"
 	"github.com/kyle-cheung/fourseas/providence/internal/tokens"
 )
+
+// ReconnectStatusError means sign-in completed for Item, but its local status
+// could not be saved. Retry sync rather than authentication.
+type ReconnectStatusError struct {
+	Item LinkedItem
+	Err  error
+}
+
+func (e *ReconnectStatusError) Error() string {
+	return fmt.Sprintf("sign-in completed, but its local status could not be saved: %v", e.Err)
+}
+
+func (e *ReconnectStatusError) Unwrap() error { return e.Err }
 
 // Reconnect repairs an existing Item's authentication and replaces an old login
 // warning with a pending-sync status. It preserves data, tokens, and settings.
 // Callers sync separately so a fetch can be retried without repeating sign-in.
-// A nonempty result with an error means authentication completed for the verified
-// Item, but its local status could not be saved. Callers must retry sync only.
+// A ReconnectStatusError carries the verified Item when authentication completed
+// but its local status could not be saved. Callers must retry sync only.
 func (a *App) Reconnect(ctx context.Context, itemID string, report Progress) (LinkedItem, error) {
 	if err := ctx.Err(); err != nil {
 		return LinkedItem{}, err
@@ -60,29 +71,7 @@ func (a *App) Reconnect(ctx context.Context, itemID string, report Progress) (Li
 	}
 	linked := LinkedItem{ItemID: item.ItemID, Institution: Label(current)}
 	if err := a.recordReconnect(ctx, item.ItemID); err != nil {
-		return linked, fmt.Errorf("sign-in completed, but its local status could not be saved: %w", err)
+		return LinkedItem{}, &ReconnectStatusError{Item: linked, Err: err}
 	}
 	return linked, nil
-}
-
-func (a *App) recordReconnect(ctx context.Context, itemID string) error {
-	// Successful sign-in survives cancellation. Persist that fact with a bounded
-	// local context so a canceled follow-up sync cannot resurrect the old warning.
-	local, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-	defer cancel()
-	db, err := store.Open(a.cfg.DBPath)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	states, err := db.SyncStates(local)
-	if err != nil {
-		return err
-	}
-	for _, state := range states {
-		if state.Provider == plaid.ProviderName && state.ItemID == itemID && loginRequired(state.LastStatus) {
-			return db.SetStatusOnly(local, plaid.ProviderName, itemID, reconnectSyncPendingStatus)
-		}
-	}
-	return nil
 }

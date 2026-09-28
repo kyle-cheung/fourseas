@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -14,13 +15,12 @@ import (
 type fakeReconnectService struct {
 	steps            []string
 	authErr, syncErr error
-	authConfirmed    bool
 }
 
 func (f *fakeReconnectService) Reconnect(_ context.Context, id string, report app.Progress) (app.LinkedItem, error) {
 	f.steps = append(f.steps, "reconnect:"+id)
 	report("Open http://localhost:8080 in your browser")
-	if f.authErr != nil && !f.authConfirmed {
+	if f.authErr != nil {
 		return app.LinkedItem{}, f.authErr
 	}
 	return app.LinkedItem{ItemID: id, Institution: "Wealthsimple"}, f.authErr
@@ -111,11 +111,16 @@ func TestReconnectCommandDirectsActionableErrorsToUserAction(t *testing.T) {
 }
 
 func TestReconnectCommandStatusFailureDoesNotRepeatSignIn(t *testing.T) {
-	cause := errors.New("sign-in completed, but saving status failed")
-	f := &fakeReconnectService{authErr: cause, authConfirmed: true}
-	var out bytes.Buffer
-	err := runReconnectWith(context.Background(), f, []string{"item-1"}, &out)
-	if !errors.Is(err, cause) || !strings.Contains(err.Error(), "fourseas sync") || len(f.steps) != 1 {
-		t.Fatalf("steps=%v err=%v", f.steps, err)
+	for _, cause := range []error{errors.New("saving status failed"), context.Canceled} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			partial := &app.ReconnectStatusError{Item: app.LinkedItem{ItemID: "item-1", Institution: "Wealthsimple"}, Err: cause}
+			f := &fakeReconnectService{authErr: fmt.Errorf("reconnect: %w", partial)}
+			var out bytes.Buffer
+			err := runReconnectWith(context.Background(), f, []string{"item-1"}, &out)
+			var got *app.ReconnectStatusError
+			if !errors.Is(err, cause) || !errors.As(err, &got) || !strings.Contains(err.Error(), "fourseas sync") || len(f.steps) != 1 {
+				t.Fatalf("steps=%v err=%v", f.steps, err)
+			}
+		})
 	}
 }

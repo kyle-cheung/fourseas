@@ -33,7 +33,8 @@ func runReconnectWith(ctx context.Context, client reconnectService, args []strin
 	}
 	item, err := client.Reconnect(ctx, args[0], func(line string) { fmt.Fprintln(out, line) })
 	if err != nil {
-		if item.ItemID != "" {
+		var statusErr *app.ReconnectStatusError
+		if errors.As(err, &statusErr) {
 			return fmt.Errorf("%w; run `fourseas sync` to fetch data without repeating sign-in", err)
 		}
 		if errors.Is(err, context.Canceled) {

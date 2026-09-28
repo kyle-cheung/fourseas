@@ -179,7 +179,7 @@ func (m *Model) runningLine() string {
 		return "Enabling statement data"
 	case liabilitiesRefreshOperation:
 		return "Refreshing statement data"
-	case postEnableRefreshOperation, postReconnectRefreshOperation:
+	case actionRefreshOperation:
 		return "Refreshing accounts"
 	}
 	return "Loading"
