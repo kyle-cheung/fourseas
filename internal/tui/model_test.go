@@ -23,8 +23,10 @@ import (
 // fakeService is a stand-in for *app.App. It records what the model asked for
 // and returns prepared answers, so no store or provider is opened in a test.
 type fakeService struct {
-	data        app.AccountData
-	accountsErr error
+	reconnectCalls []string
+	reconnectErr   error
+	data           app.AccountData
+	accountsErr    error
 	// accountsCalls holds the item id of every Accounts call, in order.
 	accountsCalls []string
 	// accountsCtx is the context of the last Accounts call, so a test can see
@@ -93,6 +95,14 @@ type fakeService struct {
 	liabilityRefreshCalls  []string
 	liabilityRefreshErrs   []error
 	liabilityRefreshEffect func(*fakeService)
+}
+
+func (f *fakeService) Reconnect(_ context.Context, itemID string, _ app.Progress) (app.LinkedItem, error) {
+	f.reconnectCalls = append(f.reconnectCalls, itemID)
+	if f.reconnectErr != nil {
+		return app.LinkedItem{}, f.reconnectErr
+	}
+	return app.LinkedItem{ItemID: itemID, Institution: "Wealthsimple"}, nil
 }
 
 type linkCall struct {
@@ -1533,9 +1543,9 @@ func TestDetailDisabledCreditShowsStatementActionAndRefreshesAfterSuccess(t *tes
 		}
 	}
 	actions := m.detailActions()
-	if len(actions) != 3 || actions[0] != detailRename ||
-		actions[1] != detailEnableLiabilities || actions[2] != detailUnlink {
-		t.Fatalf("detail actions = %v, want Rename, Enable, Unlink", actions)
+	if len(actions) != 4 || actions[0] != detailRename ||
+		actions[1] != detailEnableLiabilities || actions[2] != detailReconnect || actions[3] != detailUnlink {
+		t.Fatalf("detail actions = %v, want Rename, Enable, Reconnect, Unlink", actions)
 	}
 
 	press(t, m, codeKey(tea.KeyDown)) // Enable statement data
@@ -1552,11 +1562,11 @@ func TestDetailDisabledCreditShowsStatementActionAndRefreshesAfterSuccess(t *tes
 		t.Fatal("refreshed Model does not show the enabled Item flag")
 	}
 	actions = m.detailActions()
-	if len(actions) != 2 || actions[0] != detailRename || actions[1] != detailUnlink {
-		t.Fatalf("detail actions after enable = %v, want Rename and Unlink", actions)
+	if len(actions) != 3 || actions[0] != detailRename || actions[1] != detailReconnect || actions[2] != detailUnlink {
+		t.Fatalf("detail actions after enable = %v, want Rename, Reconnect, and Unlink", actions)
 	}
-	if m.detail.cursor != 1 || detailActionLabel(actions[m.detail.cursor]) != "Unlink institution" {
-		t.Fatalf("detail cursor = %d, action = %q, want the valid Unlink index",
+	if m.detail.cursor != 1 || detailActionLabel(actions[m.detail.cursor]) != "Reconnect institution" {
+		t.Fatalf("detail cursor = %d, action = %q, want the valid Reconnect index",
 			m.detail.cursor, detailActionLabel(actions[m.detail.cursor]))
 	}
 }
@@ -1949,10 +1959,11 @@ func TestDetailNonCreditOmitsStatementActionAndKeepsUnlinkIndex(t *testing.T) {
 		t.Errorf("non-credit detail = %q, want no statement action", body)
 	}
 	actions := m.detailActions()
-	if len(actions) != 2 || actions[1] != detailUnlink {
-		t.Fatalf("non-credit actions = %v, want Rename and Unlink", actions)
+	if len(actions) != 3 || actions[1] != detailReconnect || actions[2] != detailUnlink {
+		t.Fatalf("non-credit actions = %v, want Rename, Reconnect, and Unlink", actions)
 	}
-	press(t, m, codeKey(tea.KeyDown))
+	press(t, m, codeKey(tea.KeyDown)) // Reconnect
+	press(t, m, codeKey(tea.KeyDown)) // Unlink
 	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
 	if len(fake.previewCalls) != 1 || fake.previewCalls[0] != "item-1" {
 		t.Fatalf("UnlinkPreview calls = %v, want item-1 from the dynamic index", fake.previewCalls)
@@ -2074,6 +2085,7 @@ func TestEnableLiabilitiesCancellationIsShownAtEachStateBoundary(t *testing.T) {
 func openUnlink(t *testing.T, m *Model) {
 	t.Helper()
 	openDetail(t, m, 0)
+	press(t, m, codeKey(tea.KeyDown)) // Reconnect institution
 	press(t, m, codeKey(tea.KeyDown)) // Unlink institution
 	runOperation(t, m, press(t, m, codeKey(tea.KeyEnter)))
 	if m.screen != unlinkScreen {

@@ -33,10 +33,11 @@ func TestCodedErrorClassifiesActionableCodes(t *testing.T) {
 		productNotReady           bool
 		noLiabilityAccounts       bool
 		additionalConsentRequired bool
+		loginRequired             bool
 	}{
 		{code: mutationDuringPagination, restart: true},
 		{code: itemNotFound, gone: true},
-		{code: "ITEM_LOGIN_REQUIRED"},
+		{code: "ITEM_LOGIN_REQUIRED", loginRequired: true},
 		{
 			code:            productNotReady,
 			productNotReady: true,
@@ -55,6 +56,9 @@ func TestCodedErrorClassifiesActionableCodes(t *testing.T) {
 		err := codedError("Plaid operation", tt.code, "API_ERROR", "details")
 		if got := errors.Is(err, provider.ErrRestartPagination); got != tt.restart {
 			t.Errorf("code %s: restart = %v, want %v", tt.code, got, tt.restart)
+		}
+		if got := errors.Is(err, provider.ErrLoginRequired); got != tt.loginRequired {
+			t.Errorf("code %s: login required = %v, want %v", tt.code, got, tt.loginRequired)
 		}
 		if got := errors.Is(err, provider.ErrItemGone); got != tt.gone {
 			t.Errorf("code %s: gone = %v, want %v", tt.code, got, tt.gone)

@@ -82,9 +82,16 @@ const (
 // failed operation can be run again as it was.
 func (r recoveryState) choices() []string {
 	if r.retry != nil {
-		return []string{recoveryRetry, recoveryMain}
+		return []string{r.retryChoice(), recoveryMain}
 	}
 	return []string{recoveryMain}
+}
+
+func (r recoveryState) retryChoice() string {
+	if r.retryLabel != "" {
+		return r.retryLabel
+	}
+	return recoveryRetry
 }
 
 // defaultWidth is the width used before the first resize message arrives.
@@ -156,9 +163,11 @@ func (m *Model) runningLine() string {
 	switch m.runningKind {
 	case linkOperation:
 		return "Linking"
+	case reconnectOperation:
+		return "Reconnecting"
 	case linkSaveOperation:
 		return "Saving the token"
-	case syncItemOperation, syncAllOperation:
+	case syncItemOperation, syncAllOperation, reconnectSyncOperation:
 		return "Syncing"
 	case nicknameOperation:
 		return "Saving"
@@ -170,7 +179,7 @@ func (m *Model) runningLine() string {
 		return "Enabling statement data"
 	case liabilitiesRefreshOperation:
 		return "Refreshing statement data"
-	case postEnableRefreshOperation:
+	case actionRefreshOperation:
 		return "Refreshing accounts"
 	}
 	return "Loading"
@@ -278,6 +287,8 @@ func syncResultParts(result app.SyncResult) (string, string, lipgloss.Style) {
 	switch {
 	case result.Skipped:
 		return result.Label, noneMark + " skipped", mutedStyle
+	case errors.Is(result.Err, app.ErrLoginRequired):
+		return result.Label, failedMark + " Reconnect required", warnStyle
 	case result.Err != nil:
 		return result.Label, failedMark + " failed — " + displayError(result.Err), warnStyle
 	}
@@ -320,6 +331,9 @@ func (m *Model) detailLines() []string {
 	lines = append(lines, "")
 	for i, action := range m.detailActions() {
 		lines = append(lines, m.menuRow(i == m.detail.cursor, detailActionLabel(action), ""))
+		if action == detailReconnect {
+			lines = append(lines, m.choiceNoteLines("This reconnects all accounts on this connection.")...)
+		}
 		if action == detailEnableLiabilities {
 			lines = append(lines, m.choiceNoteLines(
 				"This enables statement data for the whole institution.")...)
@@ -334,6 +348,8 @@ func detailActionLabel(action detailAction) string {
 		return "Rename"
 	case detailEnableLiabilities:
 		return "Enable statement data"
+	case detailReconnect:
+		return "Reconnect institution"
 	case detailUnlink:
 		return "Unlink institution"
 	}
@@ -670,9 +686,18 @@ func maskText(view model.AccountView) string {
 // institution is reported even when a later sync succeeded, because the failed
 // institution still holds stale data.
 func syncStatus(states []app.SyncState, now time.Time) (string, lipgloss.Style) {
-	var failed, ok *app.SyncState
+	var failed, ok, reconnect, pending *app.SyncState
 	for i := range states {
 		state := &states[i]
+		if state.ReconnectRequired && (reconnect == nil || newer(state.LastSyncedAt, reconnect.LastSyncedAt)) {
+			reconnect = state
+		}
+		if state.ReconnectSyncPending {
+			if pending == nil || newer(state.LastSyncedAt, pending.LastSyncedAt) {
+				pending = state
+			}
+			continue
+		}
 		if state.LastStatus == "ok" {
 			if state.LastSyncedAt != nil && (ok == nil || state.LastSyncedAt.After(*ok.LastSyncedAt)) {
 				ok = state
@@ -685,11 +710,15 @@ func syncStatus(states []app.SyncState, now time.Time) (string, lipgloss.Style) 
 	}
 
 	switch {
+	case reconnect != nil:
+		return failedMark + " Reconnect required: " + reconnect.Institution, warnStyle
 	case failed != nil && failed.LastSyncedAt != nil:
 		return failedMark + " Sync failed: " + failed.Institution +
 			" (" + since(*failed.LastSyncedAt, now) + ")", warnStyle
 	case failed != nil:
 		return failedMark + " Sync failed: " + failed.Institution, warnStyle
+	case pending != nil:
+		return noneMark + " Sync pending: " + pending.Institution + " (sign-in completed)", warnStyle
 	case ok != nil:
 		return okMark + " Last sync: " + since(*ok.LastSyncedAt, now), healthyStyle
 	}
@@ -731,6 +760,9 @@ func plural(n int, unit string) string {
 
 // displayError is the only place a stored error becomes user wording.
 func displayError(err error) string {
+	if errors.Is(err, app.ErrLoginRequired) {
+		return "Reconnect required. Open Accounts and choose Reconnect institution."
+	}
 	if errors.Is(err, app.ErrProductNotReady) {
 		return "The bank is still preparing the data"
 	}

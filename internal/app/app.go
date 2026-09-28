@@ -22,9 +22,8 @@ type Progress func(string)
 // How much transaction history a new link may ask Plaid for. Plaid fixes the
 // amount when the item is created and does not permit a later change.
 const (
-	MinLinkDays                      = 30
-	MaxLinkDays                      = 730
-	liabilitiesConsentRequiredStatus = "fourseas:liabilities-consent-required: "
+	MinLinkDays = 30
+	MaxLinkDays = 730
 )
 
 // Config is everything the operations need to reach Plaid and the local files.
@@ -41,6 +40,8 @@ type SyncState struct {
 	LastSyncedAt               *time.Time
 	LastStatus                 string
 	LiabilitiesConsentRequired bool
+	ReconnectRequired          bool
+	ReconnectSyncPending       bool
 }
 
 // AccountData is the stored account list with its sync state.
@@ -50,7 +51,7 @@ type AccountData struct {
 	LiabilitiesEnabled map[string]bool
 }
 
-// LinkedItem is one newly linked institution.
+// LinkedItem identifies a linked institution without exposing its access token.
 type LinkedItem struct {
 	ItemID      string
 	Institution string
@@ -92,7 +93,7 @@ type linkFunc func(context.Context, plaid.Config, int, bool) (plaid.LinkResult, 
 type removeFunc func(context.Context, plaid.Config, string) error
 type sourceFunc func(plaid.Config, string, string, string) (provider.Provider, error)
 type liabilitiesFunc func(context.Context, plaid.Config, string) ([]model.CreditLiability, error)
-type updateLiabilitiesFunc func(context.Context, plaid.Config, string) (plaid.LinkResult, error)
+type updateLinkFunc func(context.Context, plaid.Config, string) (plaid.LinkResult, error)
 
 // App is the one façade over the store, the token file, and the provider.
 type App struct {
@@ -101,7 +102,8 @@ type App struct {
 	remove            removeFunc
 	source            sourceFunc
 	liabilities       liabilitiesFunc
-	updateLiabilities updateLiabilitiesFunc
+	updateLiabilities updateLinkFunc
+	reconnect         updateLinkFunc
 }
 
 // ErrProductNotReady lets presentation code classify the error without importing a provider.
@@ -110,6 +112,9 @@ var ErrProductNotReady = provider.ErrProductNotReady
 // ErrAdditionalConsentRequired lets presentation code identify the action the
 // user must take without creating a second error identity.
 var ErrAdditionalConsentRequired = provider.ErrAdditionalConsentRequired
+
+// ErrLoginRequired identifies an institution that needs authentication.
+var ErrLoginRequired = provider.ErrLoginRequired
 
 // Option changes one dependency of an App.
 type Option func(*App)
@@ -124,6 +129,7 @@ func New(cfg Config, options ...Option) *App {
 	a := newWith(cfg, plaid.Link, plaid.Remove, func(cfg plaid.Config, token, itemID, institution string) (provider.Provider, error) {
 		return plaid.NewSource(cfg, token, itemID, institution)
 	}, plaid.Liabilities, plaid.UpdateLiabilities)
+	a.reconnect = plaid.Reconnect
 	for _, option := range options {
 		option(a)
 	}
@@ -136,7 +142,7 @@ func newWith(
 	remove removeFunc,
 	source sourceFunc,
 	liabilities liabilitiesFunc,
-	update updateLiabilitiesFunc,
+	update updateLinkFunc,
 ) *App {
 	return &App{
 		cfg:               cfg,

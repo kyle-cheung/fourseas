@@ -46,10 +46,6 @@ func liabilitiesEnabled(saved tokens.File, itemID string) map[string]bool {
 	return enabled
 }
 
-func liabilitiesConsentRequired(status string) bool {
-	return strings.HasPrefix(status, liabilitiesConsentRequiredStatus)
-}
-
 // SetNickname gives one account the name the user calls it by. A blank
 // nickname clears it.
 func (a *App) SetNickname(ctx context.Context, accountID, nickname string) error {
@@ -95,6 +91,8 @@ func syncStates(states []model.SyncState, saved tokens.File, itemID string) []Sy
 			LastSyncedAt:               state.LastSyncedAt,
 			LastStatus:                 state.LastStatus,
 			LiabilitiesConsentRequired: liabilitiesConsentRequired(state.LastStatus),
+			ReconnectRequired:          loginRequired(state.LastStatus),
+			ReconnectSyncPending:       reconnectSyncPending(state.LastStatus),
 		})
 	}
 	return out

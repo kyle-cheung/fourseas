@@ -521,6 +521,20 @@ func TestDeliverDropsASecondResult(t *testing.T) {
 	}
 }
 
+func TestExitWithoutPlaidErrorIsRecognizableAsUserClosingLink(t *testing.T) {
+	failures := make(chan error, 1)
+	req := httptest.NewRequest(http.MethodPost, "/exit", strings.NewReader(`{"nonce":"session","error_code":"","error_message":""}`))
+	exitHandler("session", failures)(httptest.NewRecorder(), req)
+	select {
+	case err := <-failures:
+		if !errors.Is(err, ErrLinkClosed) {
+			t.Fatalf("unrecognized cancellation: %v", err)
+		}
+	default:
+		t.Fatal("no exit reported")
+	}
+}
+
 func TestNewUpdateNonceUsesThirtyTwoRandomBytes(t *testing.T) {
 	first, err := newUpdateNonce()
 	if err != nil {

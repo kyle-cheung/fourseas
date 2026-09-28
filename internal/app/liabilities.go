@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/kyle-cheung/fourseas/providence/internal/model"
 	"github.com/kyle-cheung/fourseas/providence/internal/provider"
@@ -83,9 +82,6 @@ func NewLiabilitiesStatusError(err error, accessToken string, snapshotStored boo
 		snapshotStored:      snapshotStored,
 	}
 }
-
-// The timeout is a variable so a test can make status cleanup expire.
-var liabilitiesStatusTimeout = 30 * time.Second
 
 // EnableLiabilities collects consent for the institution that owns accountID,
 // saves the enabled flag, and requests the first liability snapshot.
@@ -183,46 +179,6 @@ func (a *App) liabilityItem(
 		return tokens.Item{}, fmt.Errorf("account %q has type %q; liabilities require a credit account", accountID, account.Type)
 	}
 	return linkedItem(saved, a.cfg.Plaid.Env, account.ItemID)
-}
-
-// recordLiabilitiesConsentStatus changes only the app-owned consent marker.
-// The saved flag survives caller cancellation, so this local status update
-// also uses a bounded context that ignores that cancellation.
-func (a *App) recordLiabilitiesConsentStatus(
-	ctx context.Context,
-	db *store.Store,
-	item tokens.Item,
-	refreshErr error,
-) error {
-	safeErr := redactAccessToken(refreshErr, item.AccessToken)
-	local, stop := context.WithTimeout(context.WithoutCancel(ctx), liabilitiesStatusTimeout)
-	defer stop()
-
-	var statusErr error
-	if errors.Is(safeErr, provider.ErrAdditionalConsentRequired) {
-		statusErr = db.SetStatusOnly(local, plaid.ProviderName, item.ItemID,
-			liabilitiesConsentRequiredStatus+safeErr.Error())
-	} else {
-		states, err := db.SyncStates(local)
-		if err != nil {
-			statusErr = err
-		} else {
-			for _, state := range states {
-				if state.Provider == plaid.ProviderName && state.ItemID == item.ItemID &&
-					liabilitiesConsentRequired(state.LastStatus) {
-					statusErr = db.SetStatusOnly(local, plaid.ProviderName, item.ItemID, "")
-					break
-				}
-			}
-		}
-	}
-	if safeErr == nil {
-		return statusErr
-	}
-	if statusErr == nil {
-		return safeErr
-	}
-	return errors.Join(safeErr, statusErr)
 }
 
 func accountByID(views []model.AccountView, accountID string) (model.AccountView, bool) {

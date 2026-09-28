@@ -24,6 +24,7 @@ import (
 // service is everything the interface asks the application façade to do.
 // *app.App satisfies it.
 type service interface {
+	Reconnect(context.Context, string, app.Progress) (app.LinkedItem, error)
 	Accounts(context.Context, string) (app.AccountData, error)
 	Link(context.Context, int, bool, app.Progress) (app.LinkedItem, error)
 	CompleteLinkSave(app.PendingSave) (app.LinkedItem, error)
@@ -75,6 +76,7 @@ const (
 	detailRename detailAction = iota
 	detailEnableLiabilities
 	detailUnlink
+	detailReconnect
 )
 
 type promptState struct {
@@ -95,6 +97,7 @@ type recoveryState struct {
 	notes        []string
 	compactNotes []string
 	cursor       int
+	retryLabel   string
 	retry        func() tea.Cmd
 }
 
@@ -125,6 +128,7 @@ type Model struct {
 	prompt             promptState
 	unlink             unlinkState
 	recovery           recoveryState
+	reconnected        app.LinkedItem
 	linked             app.LinkedItem
 	nicknameQueue      []model.AccountView
 	nicknameIndex      int
@@ -168,7 +172,9 @@ const (
 	unlinkOperation
 	enableLiabilitiesOperation
 	liabilitiesRefreshOperation
-	postEnableRefreshOperation
+	actionRefreshOperation
+	reconnectOperation
+	reconnectSyncOperation
 )
 
 // progressMsg is one step of a long operation, sent from the operation's own
@@ -323,11 +329,13 @@ func (m *Model) startLiabilitiesRefresh(accountID string) tea.Cmd {
 // startPostEnableRefresh reads the account state after consent succeeded. Its
 // retry repeats only this read. It must never request consent a second time.
 func (m *Model) startPostEnableRefresh() tea.Cmd {
-	cmd := m.start(postEnableRefreshOperation, func(ctx context.Context) (any, error) {
-		return m.app.Accounts(ctx, "")
+	return m.startActionRefresh(accountRefresh{
+		destination:   detailScreen,
+		success:       "Statement data is enabled for the whole institution.",
+		failurePrefix: "Statement data was enabled, but the account refresh ",
+		retryLabel:    recoveryRetry,
+		retryNote:     "Retry refreshes accounts. It does not request consent again.",
 	})
-	m.recovery.retry = m.startPostEnableRefresh
-	return cmd
 }
 
 // Update applies one message. While an operation runs, only progress, the
@@ -391,10 +399,9 @@ func (m *Model) finish(msg operationMsg) tea.Cmd {
 	m.cancel = nil
 	m.status = ""
 
-	// A cancellation is what the user asked for, not a failure. A destructive
-	// operation is the exception: it changes data at Plaid before it changes
-	// anything here, so whatever it reports has to be shown.
-	if errors.Is(msg.err, context.Canceled) && !destructive(msg.kind) {
+	// Cancellation can follow a completed action. Keep that outcome visible
+	// instead of silently returning to the screen before the action.
+	if errors.Is(msg.err, context.Canceled) && !reportsCancellation(msg) {
 		return m.cancelled(msg.kind)
 	}
 	if msg.err != nil {
@@ -402,12 +409,20 @@ func (m *Model) finish(msg operationMsg) tea.Cmd {
 	}
 
 	switch msg.kind {
-	case accountsOperation, postEnableRefreshOperation:
+	case reconnectOperation:
+		m.reconnected, _ = msg.value.(app.LinkedItem)
+		m.screen = detailScreen
+		return m.startReconnectSync()
+	case reconnectSyncOperation:
+		m.dropReconnectedResult()
+		return m.startReconnectRefresh()
+	case actionRefreshOperation:
+		result, _ := msg.value.(accountRefreshResult)
+		m.applyAccountData(result.data)
+		m.success = result.outcome.success
+	case accountsOperation:
 		data, _ := msg.value.(app.AccountData)
 		m.applyAccountData(data)
-		if msg.kind == postEnableRefreshOperation {
-			m.success = "Statement data is enabled for the whole institution."
-		}
 	case linkOperation, linkSaveOperation:
 		// A completed save ends where a successful link ends, because both
 		// leave the same saved item behind.
@@ -435,21 +450,25 @@ func (m *Model) finish(msg operationMsg) tea.Cmd {
 	case enableLiabilitiesOperation:
 		itemID, _ := msg.value.(string)
 		m.markLiabilitiesEnabled(itemID)
-		m.screen = detailScreen
 		return m.startPostEnableRefresh()
 	case liabilitiesRefreshOperation:
 		m.markLiabilitiesEnabled(m.detail.account.ItemID)
-		m.screen = detailScreen
 		return m.startPostEnableRefresh()
 	}
 	return nil
 }
 
-// destructive says whether the operation changes stored or billed state. Such
-// an operation cannot be treated as if nothing happened.
-func destructive(kind operation) bool {
+// reportsCancellation keeps completed or potentially completed actions visible,
+// including read-only follow-up operations and typed partial-success errors.
+func reportsCancellation(msg operationMsg) bool {
+	var statusErr *app.ReconnectStatusError
+	if errors.As(msg.err, &statusErr) {
+		return true
+	}
+	kind := msg.kind
 	return kind == unlinkOperation || kind == enableLiabilitiesOperation ||
-		kind == liabilitiesRefreshOperation || kind == postEnableRefreshOperation
+		kind == liabilitiesRefreshOperation || kind == actionRefreshOperation ||
+		kind == reconnectSyncOperation
 }
 
 // cancelled leaves one cancelled operation behind.
@@ -492,10 +511,20 @@ func linkedName(linked app.LinkedItem) string {
 // time, so it is dropped and the user reads one outcome.
 func (m *Model) finishSyncAll(results []app.SyncResult) tea.Cmd {
 	m.syncResults = results
+	// User action takes precedence over failures that a later sync can retry.
+	for _, result := range results {
+		if errors.Is(result.Err, app.ErrLoginRequired) {
+			m.showFailure(result.Err)
+			m.recovery.message = result.Label + " — Reconnect required"
+			m.recovery.notes = []string{
+				"Open Accounts and choose Reconnect institution in an account's details.",
+				"If no account is listed, use: fourseas reconnect " + result.ItemID,
+			}
+			return nil
+		}
+	}
 	for _, result := range results {
 		if result.Err != nil {
-			// The retry the operation left is still the whole sync, which is
-			// what Retry must run.
 			return m.showFailure(result.Err)
 		}
 	}
@@ -590,8 +619,17 @@ func (m *Model) failed(msg operationMsg) tea.Cmd {
 	}
 	// The summary of an older sync does not describe this failure.
 	m.syncResults = nil
-	if msg.kind == postEnableRefreshOperation {
-		return m.showPostEnableRefreshFailure(msg.err)
+	var statusErr *app.ReconnectStatusError
+	if errors.As(msg.err, &statusErr) {
+		m.reconnected = statusErr.Item
+		return m.showReconnectStatusFailure(msg.err)
+	}
+	if msg.kind == reconnectSyncOperation {
+		return m.showReconnectSyncFailure(msg.err)
+	}
+	if msg.kind == actionRefreshOperation {
+		result, _ := msg.value.(accountRefreshResult)
+		return m.showActionRefreshFailure(result.outcome, msg.err)
 	}
 	if msg.kind == enableLiabilitiesOperation {
 		var enabledErr *app.LiabilitiesEnabledError
@@ -671,23 +709,6 @@ func (m *Model) showLiabilitiesConsentRequired(itemID, accountID string, cause e
 		"Retry requests consent again.",
 	}
 	m.recovery.retry = func() tea.Cmd { return m.startEnableLiabilities(accountID) }
-	return nil
-}
-
-// showPostEnableRefreshFailure says what succeeded before the read failed.
-// Retry reads accounts only, so it cannot open consent or bill an endpoint a
-// second time.
-func (m *Model) showPostEnableRefreshFailure(err error) tea.Cmd {
-	m.showFailure(err)
-	if errors.Is(err, context.Canceled) {
-		m.recovery.message = "Statement data was enabled, but the account refresh was canceled."
-	} else {
-		m.recovery.message = "Statement data was enabled, but the account refresh failed."
-	}
-	m.recovery.notes = []string{
-		"Reason: " + displayError(err),
-		"Retry refreshes accounts. It does not request consent again.",
-	}
 	return nil
 }
 
@@ -951,6 +972,8 @@ func (m *Model) activateDetail() tea.Cmd {
 	switch actions[m.detail.cursor] {
 	case detailEnableLiabilities:
 		return m.startEnableLiabilities(account.AccountID)
+	case detailReconnect:
+		return m.startReconnect(account.ItemID)
 	case detailUnlink:
 		return m.startUnlinkPreview(account.ItemID)
 	default:
@@ -967,7 +990,7 @@ func (m *Model) detailActions() []detailAction {
 		(!m.liabilitiesEnabled[account.ItemID] || m.liabilitiesConsentRequired(account.ItemID)) {
 		actions = append(actions, detailEnableLiabilities)
 	}
-	return append(actions, detailUnlink)
+	return append(actions, detailReconnect, detailUnlink)
 }
 
 func (m *Model) liabilitiesConsentRequired(itemID string) bool {
@@ -1019,7 +1042,7 @@ func (m *Model) markLiabilitiesConsentRequired(itemID string) {
 // the failure behind with a fresh account list, because the failed operation
 // may still have changed the stored data.
 func (m *Model) recoverWith(choice string) tea.Cmd {
-	if choice == recoveryRetry && m.recovery.retry != nil {
+	if choice == m.recovery.retryChoice() && m.recovery.retry != nil {
 		// The retry belongs to the screen the failed operation ran on, which
 		// returnTo still holds. Leaving the recovery screen up would show a
 		// cleared failure while the retry runs, and would make a cancelled

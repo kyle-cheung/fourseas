@@ -31,6 +31,9 @@ var ErrNoLiabilityAccounts = errors.New("the item has no liability accounts")
 // ErrAdditionalConsentRequired says the user must grant access to liabilities.
 var ErrAdditionalConsentRequired = errors.New("additional consent is required")
 
+// ErrLoginRequired says the existing connection needs user authentication.
+var ErrLoginRequired = errors.New("reconnect required")
+
 // Batch is one page of incremental changes from a provider.
 type Batch struct {
 	Added      []model.Transaction

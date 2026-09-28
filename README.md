@@ -27,6 +27,7 @@ Plaid needs setup in its dashboard before `link` works. See
 | ------- | ------------ |
 | `fourseas link` | Link one institution through Plaid Link in the browser |
 | `fourseas sync` | Fetch what changed from Plaid, refresh FX rates, and print the newest rows |
+| `fourseas reconnect <item-id>` | Sign in again to an existing institution, then sync its accounts |
 | `fourseas link --days <n>` | Link with `n` days of history. 30 to 730, 730 by default |
 | `fourseas link --liabilities=false` | Opt out of Plaid Liabilities before the Item is created |
 | `fourseas sync --fx` | Refresh FX rates only |
@@ -130,6 +131,33 @@ use subscription pricing under your Plaid agreement. After a subscription
 product is added, Plaid can charge while the Item has a valid access token,
 even if fourseas makes no more API calls or calls fail. `/item/remove` ends the
 subscription.
+
+### Reconnect an institution
+
+When sync reports `ITEM_LOGIN_REQUIRED`, the institution needs you to sign in
+again. Run the reconnect command printed with the error:
+
+```bash
+bin/fourseas reconnect <item-id>
+```
+
+Find Item IDs with `fourseas unlink --list`. Reconnect opens Plaid Link in update
+mode for the existing connection. It keeps your token, stored transactions,
+nicknames, sync cursor, and product settings, then syncs that institution.
+
+In the terminal interface, open **Accounts**, select an account, and choose
+**Reconnect institution**. This repairs all accounts on that connection. The
+action is always available, including before a login error. Canceling sign-in
+returns to account details. After sign-in, a failed sync offers **Retry sync**;
+it fetches data without repeating sign-in. In the CLI, use `fourseas sync` to
+retry the fetch. If Plaid still reports `ITEM_LOGIN_REQUIRED`, the TUI offers
+**Reconnect institution** again. If statement data needs consent, it directs you
+to **Enable statement data** instead of retrying the fetch.
+
+Successful sign-in replaces an old reconnect warning with **Sync pending** until
+the fetch completes, even if you cancel the fetch. This changes only the saved
+status, preserving the cursor and last-sync time. An institution with no stored
+accounts can be reconnected using the CLI command shown with its sync error.
 
 ### Remove a card
 

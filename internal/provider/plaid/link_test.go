@@ -51,7 +51,7 @@ func TestLinkTokenRequestCarriesOnlyUpdateLiabilitiesConsent(t *testing.T) {
 	const accessToken = "test-update-access-token"
 	cfg := Config{RedirectURI: "https://example.test/oauth"}
 
-	req := linkTokenRequest(cfg, linkRequest{accessToken: accessToken})
+	req := linkTokenRequest(cfg, linkRequest{accessToken: accessToken, liabilities: true})
 
 	if got := req.GetClientName(); got != "Fourseas" {
 		t.Errorf("client_name = %q, want Fourseas", got)
@@ -82,5 +82,23 @@ func TestLinkTokenRequestCarriesOnlyUpdateLiabilitiesConsent(t *testing.T) {
 	}
 	if _, set := req.GetTransactionsOk(); set {
 		t.Error("transactions is set in update mode")
+	}
+}
+
+func TestReconnectRequestDoesNotRequestProductsOrHistory(t *testing.T) {
+	req := linkTokenRequest(Config{RedirectURI: "http://localhost:8080/oauth"}, linkRequest{
+		accessToken: "existing-token", days: 730,
+	})
+	if req.GetAccessToken() != "existing-token" || req.GetRedirectUri() != "http://localhost:8080/oauth" {
+		t.Fatal("reconnect must retain the existing token and OAuth redirect")
+	}
+	if _, set := req.GetAdditionalConsentedProductsOk(); set {
+		t.Error("reconnect must not request additional product consent")
+	}
+	if _, set := req.GetProductsOk(); set {
+		t.Error("reconnect must not initialize products")
+	}
+	if _, set := req.GetTransactionsOk(); set {
+		t.Error("reconnect must not change transaction history")
 	}
 }

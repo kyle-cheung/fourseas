@@ -557,11 +557,11 @@ func TestEnableLiabilitiesStatusCleanupFailureIsTypedAfterSnapshotSaved(t *testi
 		},
 	)
 
-	oldTimeout := liabilitiesStatusTimeout
-	liabilitiesStatusTimeout = 0
-	defer func() { liabilitiesStatusTimeout = oldTimeout }()
+	oldTimeout := localStatusTimeout
+	localStatusTimeout = 0
+	defer func() { localStatusTimeout = oldTimeout }()
 	err = client.EnableLiabilities(context.Background(), accountID, nil)
-	liabilitiesStatusTimeout = oldTimeout
+	localStatusTimeout = oldTimeout
 	var enabledErr *LiabilitiesEnabledError
 	if !errors.As(err, &enabledErr) {
 		t.Fatalf("EnableLiabilities error = %T, want *LiabilitiesEnabledError", err)
@@ -638,11 +638,11 @@ func TestEnableLiabilitiesProductNotReadyCleanupFailureDoesNotClaimSnapshotStore
 		},
 	)
 
-	oldTimeout := liabilitiesStatusTimeout
-	liabilitiesStatusTimeout = 0
-	defer func() { liabilitiesStatusTimeout = oldTimeout }()
+	oldTimeout := localStatusTimeout
+	localStatusTimeout = 0
+	defer func() { localStatusTimeout = oldTimeout }()
 	err = client.EnableLiabilities(context.Background(), accountID, nil)
-	liabilitiesStatusTimeout = oldTimeout
+	localStatusTimeout = oldTimeout
 	var enabledErr *LiabilitiesEnabledError
 	if !errors.As(err, &enabledErr) {
 		t.Fatalf("EnableLiabilities error = %T, want *LiabilitiesEnabledError", err)
