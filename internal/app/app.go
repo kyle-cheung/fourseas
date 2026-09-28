@@ -24,6 +24,8 @@ type Progress func(string)
 const (
 	MinLinkDays                      = 30
 	MaxLinkDays                      = 730
+	reconnectSyncPendingStatus       = "fourseas:reconnected:sync-pending"
+	loginRequiredStatus              = "fourseas:login-required: "
 	liabilitiesConsentRequiredStatus = "fourseas:liabilities-consent-required: "
 )
 
@@ -41,6 +43,8 @@ type SyncState struct {
 	LastSyncedAt               *time.Time
 	LastStatus                 string
 	LiabilitiesConsentRequired bool
+	ReconnectRequired          bool
+	ReconnectSyncPending       bool
 }
 
 // AccountData is the stored account list with its sync state.
@@ -102,6 +106,7 @@ type App struct {
 	source            sourceFunc
 	liabilities       liabilitiesFunc
 	updateLiabilities updateLiabilitiesFunc
+	reconnect         updateLiabilitiesFunc
 }
 
 // ErrProductNotReady lets presentation code classify the error without importing a provider.
@@ -110,6 +115,9 @@ var ErrProductNotReady = provider.ErrProductNotReady
 // ErrAdditionalConsentRequired lets presentation code identify the action the
 // user must take without creating a second error identity.
 var ErrAdditionalConsentRequired = provider.ErrAdditionalConsentRequired
+
+// ErrLoginRequired identifies an institution that needs authentication.
+var ErrLoginRequired = provider.ErrLoginRequired
 
 // Option changes one dependency of an App.
 type Option func(*App)
@@ -124,6 +132,7 @@ func New(cfg Config, options ...Option) *App {
 	a := newWith(cfg, plaid.Link, plaid.Remove, func(cfg plaid.Config, token, itemID, institution string) (provider.Provider, error) {
 		return plaid.NewSource(cfg, token, itemID, institution)
 	}, plaid.Liabilities, plaid.UpdateLiabilities)
+	a.reconnect = plaid.Reconnect
 	for _, option := range options {
 		option(a)
 	}

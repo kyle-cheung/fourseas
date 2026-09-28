@@ -46,6 +46,7 @@ func runSyncWith(ctx context.Context, cfg settings, options []string, source fxS
 		return err
 	}
 	printSyncConsentHelp(out, results)
+	printSyncReconnectHelp(out, results)
 
 	attempted, failed := 0, 0
 	for _, result := range results {

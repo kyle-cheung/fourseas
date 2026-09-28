@@ -5,6 +5,7 @@
 //	fourseas link --days 365  request less history than the default 730 days
 //	fourseas link --liabilities=false  opt out of statement data before linking
 //	fourseas sync      fetch new transactions and FX rates, then print the newest rows
+//	fourseas reconnect <item-id>  repair a connection and sync its accounts
 //	fourseas sync --fx fetch FX rates only
 //	fourseas accounts  list the stored accounts with their balances
 //	fourseas accounts nickname <account-id> "Amex Daily"  name an account
@@ -40,6 +41,9 @@ Usage:
                      --liabilities=false opts out before linking.
   fourseas sync      Fetch new transactions and FX rates, then print the newest rows
   fourseas sync --fx Fetch FX rates only
+  fourseas reconnect <item-id>
+                     Sign in again to an existing institution, then sync its accounts.
+                     Keeps stored history, nicknames, and product settings
   fourseas accounts  List the stored accounts with their balances and ids
   fourseas accounts nickname <account-id> "Amex Daily"
                      Name an account. An empty name clears the nickname
@@ -80,6 +84,8 @@ func run() error {
 		return runLink(ctx, cfg, os.Args[2:])
 	case "sync":
 		return runSync(ctx, cfg, os.Args[2:])
+	case "reconnect":
+		return runReconnect(ctx, cfg, os.Args[2:])
 	case "accounts":
 		return runAccounts(ctx, cfg, os.Args[2:])
 	case "show":

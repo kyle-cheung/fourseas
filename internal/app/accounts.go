@@ -95,7 +95,15 @@ func syncStates(states []model.SyncState, saved tokens.File, itemID string) []Sy
 			LastSyncedAt:               state.LastSyncedAt,
 			LastStatus:                 state.LastStatus,
 			LiabilitiesConsentRequired: liabilitiesConsentRequired(state.LastStatus),
+			ReconnectRequired:          loginRequired(state.LastStatus),
+			ReconnectSyncPending:       state.LastStatus == reconnectSyncPendingStatus,
 		})
 	}
 	return out
+}
+
+// loginRequired also recognizes statuses saved before reconnect was supported.
+func loginRequired(status string) bool {
+	return strings.HasPrefix(status, loginRequiredStatus) ||
+		status == "ITEM_LOGIN_REQUIRED" || strings.Contains(status, "plaid ITEM_LOGIN_REQUIRED (")
 }

@@ -161,6 +161,9 @@ func (a *App) syncItem(ctx context.Context, db *store.Store, item tokens.Item, r
 		return views, err
 	}
 	status := err.Error()
+	if errors.Is(err, provider.ErrLoginRequired) {
+		status = loginRequiredStatus + status
+	}
 	if errors.Is(err, provider.ErrAdditionalConsentRequired) {
 		status = liabilitiesConsentRequiredStatus + status
 	}

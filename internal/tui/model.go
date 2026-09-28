@@ -24,6 +24,7 @@ import (
 // service is everything the interface asks the application façade to do.
 // *app.App satisfies it.
 type service interface {
+	Reconnect(context.Context, string, app.Progress) (app.LinkedItem, error)
 	Accounts(context.Context, string) (app.AccountData, error)
 	Link(context.Context, int, bool, app.Progress) (app.LinkedItem, error)
 	CompleteLinkSave(app.PendingSave) (app.LinkedItem, error)
@@ -75,6 +76,7 @@ const (
 	detailRename detailAction = iota
 	detailEnableLiabilities
 	detailUnlink
+	detailReconnect
 )
 
 type promptState struct {
@@ -95,6 +97,7 @@ type recoveryState struct {
 	notes        []string
 	compactNotes []string
 	cursor       int
+	retryLabel   string
 	retry        func() tea.Cmd
 }
 
@@ -125,6 +128,7 @@ type Model struct {
 	prompt             promptState
 	unlink             unlinkState
 	recovery           recoveryState
+	reconnected        app.LinkedItem
 	linked             app.LinkedItem
 	nicknameQueue      []model.AccountView
 	nicknameIndex      int
@@ -169,6 +173,9 @@ const (
 	enableLiabilitiesOperation
 	liabilitiesRefreshOperation
 	postEnableRefreshOperation
+	reconnectOperation
+	reconnectSyncOperation
+	postReconnectRefreshOperation
 )
 
 // progressMsg is one step of a long operation, sent from the operation's own
@@ -391,6 +398,13 @@ func (m *Model) finish(msg operationMsg) tea.Cmd {
 	m.cancel = nil
 	m.status = ""
 
+	if msg.kind == reconnectOperation && msg.err != nil {
+		if linked, ok := msg.value.(app.LinkedItem); ok && linked.ItemID != "" {
+			m.reconnected = linked
+			return m.showReconnectStatusFailure(msg.err)
+		}
+	}
+
 	// A cancellation is what the user asked for, not a failure. A destructive
 	// operation is the exception: it changes data at Plaid before it changes
 	// anything here, so whatever it reports has to be shown.
@@ -402,6 +416,18 @@ func (m *Model) finish(msg operationMsg) tea.Cmd {
 	}
 
 	switch msg.kind {
+	case reconnectOperation:
+		m.reconnected, _ = msg.value.(app.LinkedItem)
+		m.screen = detailScreen
+		return m.startReconnectSync()
+	case reconnectSyncOperation:
+		m.dropReconnectedResult()
+		m.screen = accountsScreen
+		return m.startReconnectRefresh()
+	case postReconnectRefreshOperation:
+		data, _ := msg.value.(app.AccountData)
+		m.applyAccountData(data)
+		m.success = "Reconnected " + linkedName(m.reconnected) + ". Accounts refreshed."
 	case accountsOperation, postEnableRefreshOperation:
 		data, _ := msg.value.(app.AccountData)
 		m.applyAccountData(data)
@@ -449,7 +475,8 @@ func (m *Model) finish(msg operationMsg) tea.Cmd {
 // an operation cannot be treated as if nothing happened.
 func destructive(kind operation) bool {
 	return kind == unlinkOperation || kind == enableLiabilitiesOperation ||
-		kind == liabilitiesRefreshOperation || kind == postEnableRefreshOperation
+		kind == liabilitiesRefreshOperation || kind == postEnableRefreshOperation ||
+		kind == reconnectSyncOperation || kind == postReconnectRefreshOperation
 }
 
 // cancelled leaves one cancelled operation behind.
@@ -492,10 +519,20 @@ func linkedName(linked app.LinkedItem) string {
 // time, so it is dropped and the user reads one outcome.
 func (m *Model) finishSyncAll(results []app.SyncResult) tea.Cmd {
 	m.syncResults = results
+	// User action takes precedence over failures that a later sync can retry.
+	for _, result := range results {
+		if errors.Is(result.Err, app.ErrLoginRequired) {
+			m.showFailure(result.Err)
+			m.recovery.message = result.Label + " — Reconnect required"
+			m.recovery.notes = []string{
+				"Open Accounts and choose Reconnect institution in an account's details.",
+				"If no account is listed, use: fourseas reconnect " + result.ItemID,
+			}
+			return nil
+		}
+	}
 	for _, result := range results {
 		if result.Err != nil {
-			// The retry the operation left is still the whole sync, which is
-			// what Retry must run.
 			return m.showFailure(result.Err)
 		}
 	}
@@ -590,6 +627,9 @@ func (m *Model) failed(msg operationMsg) tea.Cmd {
 	}
 	// The summary of an older sync does not describe this failure.
 	m.syncResults = nil
+	if msg.kind == reconnectSyncOperation || msg.kind == postReconnectRefreshOperation {
+		return m.showReconnectFailure(msg)
+	}
 	if msg.kind == postEnableRefreshOperation {
 		return m.showPostEnableRefreshFailure(msg.err)
 	}
@@ -951,6 +991,8 @@ func (m *Model) activateDetail() tea.Cmd {
 	switch actions[m.detail.cursor] {
 	case detailEnableLiabilities:
 		return m.startEnableLiabilities(account.AccountID)
+	case detailReconnect:
+		return m.startReconnect(account.ItemID)
 	case detailUnlink:
 		return m.startUnlinkPreview(account.ItemID)
 	default:
@@ -967,7 +1009,7 @@ func (m *Model) detailActions() []detailAction {
 		(!m.liabilitiesEnabled[account.ItemID] || m.liabilitiesConsentRequired(account.ItemID)) {
 		actions = append(actions, detailEnableLiabilities)
 	}
-	return append(actions, detailUnlink)
+	return append(actions, detailReconnect, detailUnlink)
 }
 
 func (m *Model) liabilitiesConsentRequired(itemID string) bool {
@@ -1019,7 +1061,7 @@ func (m *Model) markLiabilitiesConsentRequired(itemID string) {
 // the failure behind with a fresh account list, because the failed operation
 // may still have changed the stored data.
 func (m *Model) recoverWith(choice string) tea.Cmd {
-	if choice == recoveryRetry && m.recovery.retry != nil {
+	if choice == m.recovery.retryChoice() && m.recovery.retry != nil {
 		// The retry belongs to the screen the failed operation ran on, which
 		// returnTo still holds. Leaving the recovery screen up would show a
 		// cleared failure while the retry runs, and would make a cancelled

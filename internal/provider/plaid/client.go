@@ -122,6 +122,8 @@ const additionalConsentRequired = "ADDITIONAL_CONSENT_REQUIRED"
 func codedError(op, code, errType, message string) error {
 	err := fmt.Errorf("plaid %s (%s): %s", code, errType, message)
 	switch code {
+	case "ITEM_LOGIN_REQUIRED":
+		err = fmt.Errorf("%w: %w", provider.ErrLoginRequired, err)
 	case mutationDuringPagination:
 		err = fmt.Errorf("%w: %w", provider.ErrRestartPagination, err)
 	case itemNotFound:

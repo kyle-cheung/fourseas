@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -22,6 +23,9 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	plaidsdk "github.com/plaid/plaid-go/v40/plaid"
 )
+
+// ErrLinkClosed identifies a user exiting Link without a Plaid error.
+var ErrLinkClosed = errors.New("link was closed before the bank sign-in finished")
 
 // linkTimeout is how long fourseas waits for the browser part to finish.
 const linkTimeout = 10 * time.Minute
@@ -58,6 +62,15 @@ func Link(ctx context.Context, cfg Config, days int, liabilities bool) (LinkResu
 // UpdateLiabilities opens Link in update mode to collect liabilities consent
 // for an existing Item. It never receives or exchanges a public token.
 func UpdateLiabilities(ctx context.Context, cfg Config, accessToken string) (LinkResult, error) {
+	result, err := runLink(ctx, cfg, linkRequest{accessToken: accessToken, liabilities: true})
+	return result, redactLinkSecret(err, accessToken)
+}
+
+// Reconnect repairs authentication for an existing Item without changing product consent.
+func Reconnect(ctx context.Context, cfg Config, accessToken string) (LinkResult, error) {
+	if strings.TrimSpace(accessToken) == "" {
+		return LinkResult{}, fmt.Errorf("reconnect requires an existing access token")
+	}
 	result, err := runLink(ctx, cfg, linkRequest{accessToken: accessToken})
 	return result, redactLinkSecret(err, accessToken)
 }
@@ -288,11 +301,10 @@ func linkTokenRequest(cfg Config, options linkRequest) *plaidsdk.LinkTokenCreate
 	req.SetUser(*user)
 	if options.accessToken != "" {
 		req.SetAccessToken(options.accessToken)
-		req.SetAdditionalConsentedProducts([]plaidsdk.Products{plaidsdk.PRODUCTS_LIABILITIES})
 	} else {
 		req.SetProducts([]plaidsdk.Products{plaidsdk.PRODUCTS_TRANSACTIONS})
 	}
-	if options.accessToken == "" && options.liabilities {
+	if options.liabilities {
 		req.SetAdditionalConsentedProducts([]plaidsdk.Products{plaidsdk.PRODUCTS_LIABILITIES})
 	}
 	if cfg.RedirectURI != "" {
@@ -460,7 +472,7 @@ func exitHandler(nonce string, failures chan<- error) http.HandlerFunc {
 		code := sanitizeLinkErrorField(*body.ErrorCode)
 		message := sanitizeLinkErrorField(*body.ErrorMessage)
 		if code == "" {
-			report(failures, fmt.Errorf("link was closed before the bank sign-in finished"))
+			report(failures, ErrLinkClosed)
 			return
 		}
 		report(failures, fmt.Errorf("link failed: %s: %s", code, message))
