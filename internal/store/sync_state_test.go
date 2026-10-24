@@ -199,3 +199,21 @@ func TestSetStatusOnAnItemThatNeverSynced(t *testing.T) {
 		t.Errorf("cursor = %q, want an empty cursor", states[0].Cursor)
 	}
 }
+
+func TestHistoricalCompletionSurvivesLaterPages(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	if err := s.ApplyPage(ctx, Page{Provider: "plaid", ItemID: "item", Cursor: "a", HistoryComplete: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ApplyPage(ctx, Page{Provider: "plaid", ItemID: "item", Cursor: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	states, err := s.SyncStates(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 || !states[0].HistoryComplete {
+		t.Fatalf("states = %+v; want completed history", states)
+	}
+}

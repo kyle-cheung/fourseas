@@ -361,3 +361,22 @@ func TestToAccountUsesThePlaidBalanceTimeWhenThereIsOne(t *testing.T) {
 		t.Errorf("BalanceUpdatedAt = %v, want the time Plaid reported %v", got[0].BalanceUpdatedAt, reported)
 	}
 }
+
+func TestPaymentDueEvidenceMapping(t *testing.T) {
+	resp := decodeSample(t)
+	got, err := toModel(resp.Added[0], "item-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DetailedCategory != "FOOD_AND_DRINK_COFFEE" {
+		t.Errorf("detailed category = %q", got.DetailedCategory)
+	}
+	var row plaidsdk.CreditCardLiability
+	if err := json.Unmarshal([]byte(`{"account_id":"acct","last_statement_issue_date":"2026-10-01"}`), &row); err != nil {
+		t.Fatal(err)
+	}
+	rows := toCreditLiabilities([]plaidsdk.CreditCardLiability{row}, "item", time.Now())
+	if rows[0].LastStatementIssueDate == nil || rows[0].LastStatementIssueDate.Format(dateLayout) != "2026-10-01" {
+		t.Errorf("issue date = %v", rows[0].LastStatementIssueDate)
+	}
+}

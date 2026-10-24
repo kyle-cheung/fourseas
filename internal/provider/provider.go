@@ -42,9 +42,10 @@ type Batch struct {
 	// Accounts is the full account list of the institution, with balances.
 	// Plaid normally sends it with every page. A provider may fetch it when
 	// account data is not ready with the transactions.
-	Accounts   []model.Account
-	NextCursor string
-	HasMore    bool
+	Accounts        []model.Account
+	NextCursor      string
+	HasMore         bool
+	HistoryComplete bool
 }
 
 // Provider reads transactions for one linked institution.

@@ -57,6 +57,8 @@ type AccountView struct {
 	InstitutionName string
 	// Liability is nil when no credit liability snapshot is stored.
 	Liability *CreditLiability
+	// RemainingStatementBalance is null when payment evidence is incomplete.
+	RemainingStatementBalance decimal.NullDecimal
 }
 
 // SyncState is where the next incremental sync of one institution starts.
@@ -66,7 +68,8 @@ type SyncState struct {
 	Cursor       string
 	LastSyncedAt *time.Time
 	// LastStatus is "ok" or a short failure reason.
-	LastStatus string
+	LastStatus      string
+	HistoryComplete bool
 }
 
 // TransactionView is one row of v_transactions: a transaction with the account

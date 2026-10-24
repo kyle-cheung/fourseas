@@ -96,7 +96,7 @@ func (s *Store) SetStatusOnly(ctx context.Context, provider, itemID, status stri
 // last one ended.
 func (s *Store) SyncStates(ctx context.Context) ([]model.SyncState, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT provider, item_id, cursor, last_synced_at, last_status
+		SELECT provider, item_id, cursor, last_synced_at, last_status, coalesce(history_complete,false)
 		FROM sync_state
 		ORDER BY provider, item_id`)
 	if err != nil {
@@ -111,7 +111,7 @@ func (s *Store) SyncStates(ctx context.Context) ([]model.SyncState, error) {
 			cursor, status sql.NullString
 			lastSyncedAt   sql.NullTime
 		)
-		if err := rows.Scan(&state.Provider, &state.ItemID, &cursor, &lastSyncedAt, &status); err != nil {
+		if err := rows.Scan(&state.Provider, &state.ItemID, &cursor, &lastSyncedAt, &status, &state.HistoryComplete); err != nil {
 			return nil, fmt.Errorf("scan sync state: %w", err)
 		}
 		state.Cursor = text(cursor)

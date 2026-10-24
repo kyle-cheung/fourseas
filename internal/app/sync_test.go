@@ -1124,3 +1124,33 @@ func TestSyncAllRefusesWhenNothingIsLinked(t *testing.T) {
 		t.Errorf("error = %q, want it to name the link command", err)
 	}
 }
+
+func TestDrainPersistsHistoricalCompletionOnlyAfterFinalPage(t *testing.T) {
+	db := newTestStore(t)
+	ctx := context.Background()
+	if err := db.SetCursor(ctx, "fake", "item-1", "start"); err != nil {
+		t.Fatal(err)
+	}
+	interrupted := &fakeSource{pages: []provider.Batch{{NextCursor: "a", HasMore: true, HistoryComplete: true}}, errs: []error{nil, errors.New("interrupted before final page")}}
+	if _, err := drain(ctx, db, interrupted, "item-1", nil); err == nil {
+		t.Fatal("interrupted drain succeeded")
+	}
+	states, err := db.SyncStates(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 || states[0].HistoryComplete || states[0].Cursor != "start" {
+		t.Fatalf("interrupted states = %+v; want incomplete history and starting cursor", states)
+	}
+	source := &fakeSource{pages: []provider.Batch{{NextCursor: "a", HasMore: true, HistoryComplete: true}, {NextCursor: "b"}}}
+	if _, err := drain(ctx, db, source, "item-1", nil); err != nil {
+		t.Fatal(err)
+	}
+	states, err = db.SyncStates(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 || !states[0].HistoryComplete || states[0].Cursor != "b" {
+		t.Fatalf("states = %+v", states)
+	}
+}

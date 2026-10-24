@@ -318,6 +318,7 @@ func drainFrom(ctx context.Context, db *store.Store, source provider.Provider, i
 	var total counts
 	startCursor := cursor
 	pagesRead := 0
+	historyComplete := false
 
 	for page := 0; page < maxPages; page++ {
 		batch, err := source.Sync(ctx, cursor)
@@ -325,6 +326,8 @@ func drainFrom(ctx context.Context, db *store.Store, source provider.Provider, i
 			return total, pagesRead, err
 		}
 
+		historyComplete = historyComplete || batch.HistoryComplete
+		batch.HistoryComplete = historyComplete && !batch.HasMore
 		checkpoint := batch.NextCursor
 		if batch.HasMore {
 			checkpoint = startCursor
@@ -350,12 +353,13 @@ func drainFrom(ctx context.Context, db *store.Store, source provider.Provider, i
 // toPage turns one provider batch into the unit the store commits.
 func toPage(providerName, itemID string, batch provider.Batch, cursor string) store.Page {
 	return store.Page{
-		Provider:   providerName,
-		ItemID:     itemID,
-		Added:      batch.Added,
-		Modified:   batch.Modified,
-		RemovedIDs: batch.RemovedIDs,
-		Accounts:   batch.Accounts,
-		Cursor:     cursor,
+		Provider:        providerName,
+		ItemID:          itemID,
+		Added:           batch.Added,
+		Modified:        batch.Modified,
+		RemovedIDs:      batch.RemovedIDs,
+		Accounts:        batch.Accounts,
+		Cursor:          cursor,
+		HistoryComplete: batch.HistoryComplete,
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kyle-cheung/fourseas/providence/internal/model"
 	"github.com/shopspring/decimal"
 )
 
@@ -44,4 +45,45 @@ func amount(value string) decimal.NullDecimal {
 func date(year int, month time.Month, day int) *time.Time {
 	value := time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
 	return &value
+}
+
+func TestPaymentDue(t *testing.T) {
+	loc, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name, now, due, amount, want string
+		overdue                      bool
+	}{
+		{"upcoming", "2026-10-15T23:30:00-07:00", "2026-11-03", "772.70", "772.70 USD · Nov 03 (in 19 days)", false},
+		{"tomorrow", "2026-10-15T23:30:00-07:00", "2026-10-16", "1", "1.00 USD · Oct 16 (in 1 day)", false},
+		{"today", "2026-10-15T23:30:00-07:00", "2026-10-15", "1", "1.00 USD · Oct 15 (today)", false},
+		{"overdue", "2026-10-15T23:30:00-07:00", "2026-10-14", "31.63", "31.63 USD · Oct 14 (overdue 1 day)", true},
+		{"overdue plural", "2026-10-15T23:30:00-07:00", "2026-10-13", "1", "1.00 USD · Oct 13 (overdue 2 days)", true},
+		{"spring DST", "2026-03-08T23:30:00-07:00", "2026-03-09", "1", "1.00 USD · Mar 09 (in 1 day)", false},
+		{"fall DST", "2026-11-01T23:30:00-08:00", "2026-11-02", "1", "1.00 USD · Nov 02 (in 1 day)", false},
+		{"year boundary", "2026-12-31T23:30:00-08:00", "2027-01-01", "1", "1.00 USD · Jan 01, 2027 (in 1 day)", false},
+		{"paid", "2026-10-15T23:30:00-07:00", "2026-10-14", "0", "Paid", false},
+		{"unknown", "2026-10-15T23:30:00-07:00", "2026-10-14", "", "Check statement", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now, _ := time.Parse(time.RFC3339, tt.now)
+			now = now.In(loc)
+			due, _ := time.Parse("2006-01-02", tt.due)
+			a := model.AccountView{Account: model.Account{Type: "credit", Currency: "USD"}, Liability: &model.CreditLiability{PaymentDueDate: &due}}
+			if tt.amount != "" {
+				a.RemainingStatementBalance = amount(tt.amount)
+			}
+			got, overdue := PaymentDue(a, now)
+			if got != tt.want || overdue != tt.overdue {
+				t.Errorf("PaymentDue = %q, %v; want %q, %v", got, overdue, tt.want, tt.overdue)
+			}
+		})
+	}
+	got, _ := PaymentDue(model.AccountView{Account: model.Account{Type: "depository"}}, time.Now())
+	if got != "—" {
+		t.Errorf("noncredit = %q", got)
+	}
 }
