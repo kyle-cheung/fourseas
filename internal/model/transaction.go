@@ -41,6 +41,7 @@ type Transaction struct {
 	// SupersededBy is set on a pending row when its posted row arrives.
 	SupersededBy string
 
-	Category string
-	SyncedAt time.Time
+	Category         string
+	DetailedCategory string
+	SyncedAt         time.Time
 }

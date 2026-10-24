@@ -14,15 +14,15 @@ const transactionColumns = `
 	provider, external_id, item_id, account_id,
 	date, authorized_date, name, merchant_name,
 	amount, currency,
-	pending, pending_transaction_id, superseded_by, category, synced_at`
+	pending, pending_transaction_id, superseded_by, category, detailed_category, synced_at`
 
 const upsertTransactionSQL = `
 INSERT INTO transactions (
 	provider, external_id, item_id, account_id,
 	date, authorized_date, name, merchant_name,
 	amount, currency,
-	pending, pending_transaction_id, superseded_by, category, synced_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	pending, pending_transaction_id, superseded_by, category, detailed_category, synced_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (provider, external_id) DO UPDATE SET
 	item_id                = excluded.item_id,
 	account_id             = excluded.account_id,
@@ -36,6 +36,7 @@ ON CONFLICT (provider, external_id) DO UPDATE SET
 	pending_transaction_id = excluded.pending_transaction_id,
 	superseded_by          = excluded.superseded_by,
 	category               = excluded.category,
+	detailed_category = excluded.detailed_category,
 	synced_at              = excluded.synced_at
 `
 
@@ -72,7 +73,7 @@ func upsertTransactions(ctx context.Context, db execer, txs []model.Transaction)
 			t.Date, timeArg(t.AuthorizedDate), textArg(t.Name), textArg(t.MerchantName),
 			decimalArg(t.Amount), textArg(model.NormalizeCurrency(t.Currency)),
 			t.Pending, textArg(t.PendingTransactionID), textArg(t.SupersededBy),
-			textArg(t.Category), syncedAt,
+			textArg(t.Category), textArg(t.DetailedCategory), syncedAt,
 		)
 		if err != nil {
 			return fmt.Errorf("upsert %s/%s: %w", t.Provider, t.ExternalID, err)
@@ -157,18 +158,18 @@ type scanner interface {
 // scanTransaction reads one row in transactionColumns order.
 func scanTransaction(row scanner) (model.Transaction, error) {
 	var (
-		t                                               model.Transaction
-		itemID, accountID, name, merchantName, currency sql.NullString
-		pendingID, supersededBy, category               sql.NullString
-		authorizedDate, syncedAt                        sql.NullTime
-		amount                                          any
+		t                                                   model.Transaction
+		itemID, accountID, name, merchantName, currency     sql.NullString
+		pendingID, supersededBy, category, detailedCategory sql.NullString
+		authorizedDate, syncedAt                            sql.NullTime
+		amount                                              any
 	)
 
 	err := row.Scan(
 		&t.Provider, &t.ExternalID, &itemID, &accountID,
 		&t.Date, &authorizedDate, &name, &merchantName,
 		&amount, &currency,
-		&t.Pending, &pendingID, &supersededBy, &category, &syncedAt,
+		&t.Pending, &pendingID, &supersededBy, &category, &detailedCategory, &syncedAt,
 	)
 	if err != nil {
 		return model.Transaction{}, err
@@ -186,6 +187,7 @@ func scanTransaction(row scanner) (model.Transaction, error) {
 	t.PendingTransactionID = text(pendingID)
 	t.SupersededBy = text(supersededBy)
 	t.Category = text(category)
+	t.DetailedCategory = text(detailedCategory)
 	if when := timePtr(syncedAt); when != nil {
 		t.SyncedAt = *when
 	}

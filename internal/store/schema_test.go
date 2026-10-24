@@ -339,3 +339,43 @@ func TestResetDropsEverythingAndRebuilds(t *testing.T) {
 		t.Errorf("version = %d after a reset, want %d", version, SchemaVersion)
 	}
 }
+
+func TestVersionTwoDatabaseAddsPaymentEvidenceColumns(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "fourseas.duckdb")
+	first := openAt(t, path)
+	a := sampleAccount()
+	if err := first.UpsertAccounts(ctx, []model.Account{a}); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("duckdb", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{`ALTER TABLE account_liabilities DROP COLUMN last_statement_issue_date`, `ALTER TABLE transactions DROP COLUMN detailed_category`, `ALTER TABLE sync_state DROP COLUMN history_complete`} {
+		if _, err := raw.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second := openAt(t, path)
+	views, err := second.AccountViews(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 1 || views[0].AccountID != a.AccountID || views[0].RemainingStatementBalance.Valid {
+		t.Fatalf("views = %+v", views)
+	}
+	var n int
+	if err := second.db.QueryRowContext(ctx, `SELECT count(*) FROM information_schema.columns WHERE column_name IN ('last_statement_issue_date','detailed_category','history_complete')`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 3 {
+		t.Errorf("new nullable columns = %d, want 3", n)
+	}
+}

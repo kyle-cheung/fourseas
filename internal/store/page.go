@@ -18,7 +18,8 @@ type Page struct {
 	// Accounts is the account list the same response carried, with balances.
 	Accounts []model.Account
 	// Cursor stays at the start of a page sequence until its final page lands.
-	Cursor string
+	Cursor          string
+	HistoryComplete bool
 }
 
 // ApplyPage writes one page and its cursor in one database transaction.
@@ -46,6 +47,13 @@ func (s *Store) ApplyPage(ctx context.Context, page Page) error {
 		if err := resolveSupersedes(ctx, dbtx, page.Provider); err != nil {
 			return err
 		}
-		return saveCursor(ctx, dbtx, page.Provider, page.ItemID, page.Cursor)
+		if err := saveCursor(ctx, dbtx, page.Provider, page.ItemID, page.Cursor); err != nil {
+			return err
+		}
+		if page.HistoryComplete {
+			_, err := dbtx.ExecContext(ctx, `UPDATE sync_state SET history_complete=true WHERE provider=? AND item_id=?`, page.Provider, page.ItemID)
+			return err
+		}
+		return nil
 	})
 }

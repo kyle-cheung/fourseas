@@ -85,8 +85,9 @@ func (s *Source) Sync(ctx context.Context, cursor string) (provider.Batch, error
 		RemovedIDs: removed,
 		// A ready sync carries the accounts. The fallback above supplies them
 		// while the transaction data is still pending.
-		Accounts:   toAccounts(accounts, s.itemID, time.Now().UTC()),
-		NextCursor: resp.NextCursor,
-		HasMore:    resp.HasMore,
+		Accounts:        toAccounts(accounts, s.itemID, time.Now().UTC()),
+		NextCursor:      resp.NextCursor,
+		HasMore:         resp.HasMore,
+		HistoryComplete: resp.GetTransactionsUpdateStatus() == plaidsdk.TRANSACTIONSUPDATESTATUS_HISTORICAL_UPDATE_COMPLETE,
 	}, nil
 }

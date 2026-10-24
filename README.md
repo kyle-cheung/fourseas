@@ -115,9 +115,22 @@ failures keep the snapshot and the transaction pages that already committed.
 The account result still contains those committed values.
 
 `fourseas accounts` puts the currency in each balance and limit cell. It does
-not use a separate currency column. The terminal interface shows account,
-balance, due date, and latest payment in a summary table above the main menu.
-Missing values use `—`.
+not use a separate currency column. The terminal interface shows **Account**,
+**Cur. balance**, and **Payment due** above the main menu. Fully covered
+statements show `Paid`; noncredit accounts show `—` for Payment due.
+
+The overview's **Payment due** shows the remaining latest statement amount and
+its due date, with overdue amounts in red. It uses synced posted card payments,
+never new purchases or refunds; the raw statement balance and last payment stay
+in account details. **Check statement** means required dates, payment evidence,
+or a successful completed history sync are missing or ambiguous. A last-payment
+snapshot can independently confirm full coverage when history is incomplete and
+its payment date is strictly after the statement issue date. Old uncategorized
+transfers may remain ambiguous after an incremental sync. Returned payments
+classified only as generic transfers cannot always be distinguished from
+purchases. The overview reflects the last synced data, including any
+provider delays in reporting payments, reversals, or a new statement after
+rollover; the sync status shows its age.
 
 Fourseas cannot disable an active Liabilities subscription in place. Unlink
 the Item and link it again with `--liabilities=false`. Issue

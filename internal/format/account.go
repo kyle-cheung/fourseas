@@ -2,6 +2,7 @@
 package format
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -50,4 +51,37 @@ func LatestPayment(date *time.Time, amount decimal.NullDecimal, currency string,
 		return missing
 	}
 	return Date(date, now) + " · " + Money(amount, currency)
+}
+
+// PaymentDue formats the remaining statement obligation and its calendar due
+// date. Provider dates have no time zone; only now is converted to local time.
+func PaymentDue(a model.AccountView, now time.Time) (string, bool) {
+	if a.Type != "credit" {
+		return missing, false
+	}
+	if a.Liability == nil || !a.RemainingStatementBalance.Valid || a.Liability.PaymentDueDate == nil {
+		return "Check statement", false
+	}
+	if !a.RemainingStatementBalance.Decimal.IsPositive() {
+		return "Paid", false
+	}
+	due := a.Liability.PaymentDueDate
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	date := time.Date(due.Year(), due.Month(), due.Day(), 0, 0, 0, 0, time.UTC)
+	days := int(date.Sub(today) / (24 * time.Hour))
+	relative := "today"
+	n := days
+	if n < 0 {
+		n = -n
+	}
+	unit := "days"
+	if n == 1 {
+		unit = "day"
+	}
+	if days > 0 {
+		relative = fmt.Sprintf("in %d %s", n, unit)
+	} else if days < 0 {
+		relative = fmt.Sprintf("overdue %d %s", n, unit)
+	}
+	return Money(a.RemainingStatementBalance, a.Currency) + " · " + Date(due, now) + " (" + relative + ")", days < 0
 }

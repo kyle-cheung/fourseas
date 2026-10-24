@@ -220,7 +220,7 @@ func (m *Model) accountSummaryLines(now time.Time) []string {
 	}
 
 	t := table.New().
-		Headers("Account", "Cur. balance", "Stmt balance", "Due", "Last payment").
+		Headers("Account", "Cur. balance", "Payment due").
 		Wrap(false).
 		BorderTop(false).
 		BorderBottom(false).
@@ -234,25 +234,18 @@ func (m *Model) accountSummaryLines(now time.Time) []string {
 			if row == table.HeaderRow {
 				style = headingStyle
 			}
-			if col < 4 {
+			if col < 2 {
 				style = style.PaddingRight(2)
 			}
 			return style
 		})
 
 	for _, account := range m.accounts.rows {
-		statement, due, payment := "—", "—", "—"
-		if account.Liability != nil {
-			statement = accountformat.Money(account.Liability.LastStatementBalance, account.Currency)
-			due = accountformat.Date(account.Liability.PaymentDueDate, now)
-			payment = accountformat.LatestPayment(
-				account.Liability.LastPaymentDate,
-				account.Liability.LastPaymentAmount,
-				account.Currency,
-				now,
-			)
+		due, overdue := accountformat.PaymentDue(account, now)
+		if overdue {
+			due = warnStyle.Render(due)
 		}
-		t.Row(accountName(account), accountformat.Money(account.BalanceCurrent, account.Currency), statement, due, payment)
+		t.Row(accountName(account), accountformat.Money(account.BalanceCurrent, account.Currency), due)
 	}
 
 	lines := strings.Split(t.String(), "\n")
@@ -327,6 +320,13 @@ func (m *Model) detailLines() []string {
 			continue
 		}
 		lines = append(lines, m.fieldRow(field[0], field[1]))
+	}
+	if account.Liability != nil {
+		now := m.clock()
+		lines = append(lines,
+			m.fieldRow("Statement", accountformat.Money(account.Liability.LastStatementBalance, account.Currency)),
+			m.fieldRow("Last payment", accountformat.LatestPayment(account.Liability.LastPaymentDate, account.Liability.LastPaymentAmount, account.Currency, now)),
+		)
 	}
 	lines = append(lines, "")
 	for i, action := range m.detailActions() {

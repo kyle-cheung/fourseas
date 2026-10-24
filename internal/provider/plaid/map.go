@@ -54,6 +54,7 @@ func toModel(t plaidsdk.Transaction, itemID string) (model.Transaction, error) {
 		// hide the duplicate; nothing here proposes a superseded_by.
 		PendingTransactionID: t.GetPendingTransactionId(),
 		Category:             category(t),
+		DetailedCategory:     t.GetPersonalFinanceCategory().Detailed,
 	}, nil
 }
 
@@ -163,14 +164,15 @@ func toCreditLiabilities(rows []plaidsdk.CreditCardLiability, itemID string, fet
 		}
 
 		out = append(out, model.CreditLiability{
-			Provider:             ProviderName,
-			ItemID:               itemID,
-			AccountID:            accountID,
-			PaymentDueDate:       nullableLiabilityDate(row.GetNextPaymentDueDateOk()),
-			LastPaymentDate:      nullableLiabilityDate(row.GetLastPaymentDateOk()),
-			LastPaymentAmount:    optionalAmount(row.GetLastPaymentAmountOk()),
-			LastStatementBalance: optionalAmount(row.GetLastStatementBalanceOk()),
-			FetchedAt:            fetchedAt,
+			Provider:               ProviderName,
+			ItemID:                 itemID,
+			AccountID:              accountID,
+			PaymentDueDate:         nullableLiabilityDate(row.GetNextPaymentDueDateOk()),
+			LastPaymentDate:        nullableLiabilityDate(row.GetLastPaymentDateOk()),
+			LastPaymentAmount:      optionalAmount(row.GetLastPaymentAmountOk()),
+			LastStatementBalance:   optionalAmount(row.GetLastStatementBalanceOk()),
+			LastStatementIssueDate: nullableLiabilityDate(row.GetLastStatementIssueDateOk()),
+			FetchedAt:              fetchedAt,
 		})
 	}
 	return out

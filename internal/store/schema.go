@@ -108,6 +108,8 @@ CREATE TABLE IF NOT EXISTS account_liabilities (
 
 ALTER TABLE account_liabilities
 	ADD COLUMN IF NOT EXISTS last_statement_balance DECIMAL(18,4);
+ALTER TABLE account_liabilities ADD COLUMN IF NOT EXISTS last_statement_issue_date DATE;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS detailed_category VARCHAR;
 
 CREATE TABLE IF NOT EXISTS sync_state (
 	provider       VARCHAR NOT NULL,
@@ -117,6 +119,7 @@ CREATE TABLE IF NOT EXISTS sync_state (
 	last_status    VARCHAR,
 	PRIMARY KEY (provider, item_id)
 );
+ALTER TABLE sync_state ADD COLUMN IF NOT EXISTS history_complete BOOLEAN;
 ` + viewDDL
 
 // ensureSchema checks the version, then creates anything that is missing.

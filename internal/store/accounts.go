@@ -20,7 +20,7 @@ const accountColumns = `
 const accountViewSQL = `
 SELECT ` + accountColumns + `, i.institution_name,
 	l.item_id, l.payment_due_date, l.last_payment_date, l.last_payment_amount,
-	l.last_statement_balance, l.fetched_at
+	l.last_statement_balance, l.last_statement_issue_date, l.fetched_at
 FROM accounts a
 LEFT JOIN institutions i
 	ON i.provider = a.provider AND i.item_id = a.item_id
@@ -122,21 +122,44 @@ func (s *Store) AccountViews(ctx context.Context) ([]model.AccountView, error) {
 		}
 		out = append(out, view)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	states, err := s.SyncStates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		var state model.SyncState
+		for _, candidate := range states {
+			if candidate.Provider == out[i].Provider && candidate.ItemID == out[i].ItemID {
+				state = candidate
+				break
+			}
+		}
+		out[i].RemainingStatementBalance, err = s.statementBalance(ctx, out[i], state)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 // scanAccountView reads one row of accountViewSQL.
 func scanAccountView(rows *sql.Rows) (model.AccountView, error) {
 	var (
-		view                                      model.AccountView
-		itemID, name, mask, kind, subtype         sql.NullString
-		currency, nickname, institutionName       sql.NullString
-		liabilityItemID                           sql.NullString
-		current, available, limit, paymentAmount  any
-		statementBalance                          any
-		balanceUpdatedAt, firstSeenAt, lastSeenAt sql.NullTime
-		paymentDueDate, lastPaymentDate           sql.NullTime
-		liabilityFetchedAt                        sql.NullTime
+		view                                                model.AccountView
+		itemID, name, mask, kind, subtype                   sql.NullString
+		currency, nickname, institutionName                 sql.NullString
+		liabilityItemID                                     sql.NullString
+		current, available, limit, paymentAmount            any
+		statementBalance                                    any
+		balanceUpdatedAt, firstSeenAt, lastSeenAt           sql.NullTime
+		paymentDueDate, lastPaymentDate, statementIssueDate sql.NullTime
+		liabilityFetchedAt                                  sql.NullTime
 	)
 	a := &view.Account
 	err := rows.Scan(
@@ -146,7 +169,7 @@ func scanAccountView(rows *sql.Rows) (model.AccountView, error) {
 		&firstSeenAt, &lastSeenAt,
 		&institutionName,
 		&liabilityItemID, &paymentDueDate, &lastPaymentDate, &paymentAmount,
-		&statementBalance, &liabilityFetchedAt,
+		&statementBalance, &statementIssueDate, &liabilityFetchedAt,
 	)
 	if err != nil {
 		return model.AccountView{}, fmt.Errorf("scan account: %w", err)
@@ -187,14 +210,15 @@ func scanAccountView(rows *sql.Rows) (model.AccountView, error) {
 			return model.AccountView{}, fmt.Errorf("last_statement_balance: %w", err)
 		}
 		view.Liability = &model.CreditLiability{
-			Provider:             a.Provider,
-			ItemID:               text(liabilityItemID),
-			AccountID:            a.AccountID,
-			PaymentDueDate:       timePtr(paymentDueDate),
-			LastPaymentDate:      timePtr(lastPaymentDate),
-			LastPaymentAmount:    amount,
-			LastStatementBalance: statement,
-			FetchedAt:            liabilityFetchedAt.Time,
+			Provider:               a.Provider,
+			ItemID:                 text(liabilityItemID),
+			AccountID:              a.AccountID,
+			PaymentDueDate:         timePtr(paymentDueDate),
+			LastPaymentDate:        timePtr(lastPaymentDate),
+			LastPaymentAmount:      amount,
+			LastStatementBalance:   statement,
+			LastStatementIssueDate: timePtr(statementIssueDate),
+			FetchedAt:              liabilityFetchedAt.Time,
 		}
 	}
 	return view, nil

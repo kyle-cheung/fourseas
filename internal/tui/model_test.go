@@ -421,7 +421,10 @@ func TestMainAccountSummaryTable(t *testing.T) {
 		account("acc-3", "", "", "3003", "Wealthsimple", 2400),
 		account("acc-4", "Cash reserve", "Cash", "4004", "Wealthsimple", -810),
 	}
+	accounts[0].Type = "credit"
+	accounts[1].Type = "credit"
 	accounts[0].Currency = "usd"
+	accounts[0].RemainingStatementBalance = decimal.NewNullDecimal(decimal.NewFromInt(500))
 	accounts[0].Liability = &model.CreditLiability{
 		PaymentDueDate:       &due,
 		LastPaymentDate:      &paid,
@@ -444,17 +447,17 @@ func TestMainAccountSummaryTable(t *testing.T) {
 	body := content(m)
 
 	for _, want := range []string{
-		"Account", "Cur. balance", "Stmt balance", "Due", "Last payment",
-		"Amex Daily", "1,284.21 USD", "1,000.00 USD", "Sep 12", "Aug 20 · 500.00 USD",
-		"Scotia Visa", "320.10 CAD", "Dec 05, 2025",
+		"Account", "Cur. balance", "Payment due",
+		"Amex Daily", "1,284.21 USD", "500.00 USD · Sep 12 (in 19 days)",
+		"Scotia Visa", "320.10 CAD", "Check statement",
 		"acc-3", "2,400.00 JPY", "Cash reserve", "-810.00 CAD",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("main view = %q, want it to contain %q", body, want)
 		}
 	}
-	if got := strings.Count(body, "—"); got != 8 {
-		t.Errorf("main view has %d missing values, want 8 for absent liability data: %q", got, body)
+	if strings.Contains(body, "Stmt balance") || strings.Contains(body, "Last payment") {
+		t.Errorf("obsolete overview columns: %q", body)
 	}
 
 	wordmark := strings.Index(body, brandName+" "+brandMark)
@@ -489,6 +492,12 @@ func TestMainAccountSummaryTable(t *testing.T) {
 				line, width, m.contentWidth())
 		}
 	}
+	m.accounts.rows[0].RemainingStatementBalance = decimal.NewNullDecimal(decimal.Zero)
+	paidBody := content(m)
+	if !hasRow(paidBody, "Amex Daily", "1,284.21 USD Paid") {
+		t.Errorf("paid card with positive current balance = %q", paidBody)
+	}
+
 }
 
 func TestMainAccountSummarySanitizesAccountNames(t *testing.T) {
@@ -518,6 +527,8 @@ func TestMainRenderUsesOneCapturedTime(t *testing.T) {
 	lastSync := captured.Add(-30 * time.Second)
 	due := time.Date(2026, time.January, 2, 0, 0, 0, 0, time.UTC)
 	view := account("acc-1", "Card", "Credit card", "1001", "Bank", 100)
+	view.Type = "credit"
+	view.RemainingStatementBalance = decimal.NewNullDecimal(decimal.NewFromInt(100))
 	view.Liability = &model.CreditLiability{PaymentDueDate: &due}
 	m := ready(t, &fakeService{data: app.AccountData{
 		Accounts: []model.AccountView{view},
@@ -2942,5 +2953,25 @@ func TestWrapTextKeepsEveryWord(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDetailShowsStatementAndLatestPayment(t *testing.T) {
+	view := account("acc-1", "", "Credit card", "1234", "Bank", 1284.21)
+	paid := time.Date(2025, time.December, 20, 0, 0, 0, 0, time.UTC)
+	view.Liability = &model.CreditLiability{LastStatementBalance: decimal.NewNullDecimal(decimal.NewFromInt(1000)), LastPaymentDate: &paid, LastPaymentAmount: decimal.NewNullDecimal(decimal.NewFromInt(500))}
+	m := ready(t, &fakeService{data: app.AccountData{Accounts: []model.AccountView{view}}})
+	m.now = func() time.Time { return time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC) }
+	openDetail(t, m, 0)
+	body := content(m)
+	for _, want := range []string{"Statement", "1,000.00 USD", "Last payment", "Dec 20, 2025 · 500.00 USD"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("detail = %q; want %q", body, want)
+		}
+	}
+	m.detail.account.Liability = &model.CreditLiability{}
+	body = content(m)
+	if !hasRow(body, "Statement", "—") || !hasRow(body, "Last payment", "—") {
+		t.Errorf("missing statement fields = %q", body)
 	}
 }
